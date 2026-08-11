@@ -2,9 +2,10 @@
 
 namespace Tests\Feature;
 
+use App\Models\AdAccount;
+use App\Models\AdSetup;
 use App\Models\AutomationTask;
 use App\Models\Campaign;
-use App\Models\AdSetup;
 use App\Models\T4JamProfile;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -114,6 +115,38 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('t4jam_profiles', ['user_id' => $user->id, 'meta_user_name' => 'Meta Tester', 'last_meta_error' => null]);
     }
 
+    public function test_manual_meta_ads_sync_redirects_while_sync_runs_after_response(): void
+    {
+        $this->seed();
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        Http::fake([
+            'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
+            'graph.facebook.com/*/me/adaccounts?*' => Http::response([
+                'data' => [
+                    ['account_id' => '456', 'id' => 'act_456', 'name' => 'Manual Account', 'currency' => 'IDR', 'account_status' => 1],
+                ],
+            ]),
+            'graph.facebook.com/*/act_456/campaigns?*' => Http::response([
+                'data' => [
+                    ['id' => 'cmp_456', 'name' => 'Manual Campaign', 'status' => 'ACTIVE', 'daily_budget' => '250000'],
+                ],
+            ]),
+            'graph.facebook.com/*/cmp_456/insights?*' => Http::response(['data' => []]),
+        ]);
+
+        $this->from('/profile/')
+            ->post('/profile/sync-meta-ads/')
+            ->assertRedirect('/profile/')
+            ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
+
+        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_456', 'name' => 'Manual Account']);
+        $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_456', 'daily_budget' => 250000]);
+    }
+
     public function test_meta_write_status_uses_graph_api_when_enabled(): void
     {
         $this->seed();
@@ -144,7 +177,7 @@ class ExampleTest extends TestCase
         $user = User::firstOrFail();
         $this->actingAs($user);
 
-        $accountId = \App\Models\AdAccount::firstOrFail()->id;
+        $accountId = AdAccount::firstOrFail()->id;
 
         $this->post('/setup-iklan/', $this->adSetupPayload($accountId, ['publish' => 0]))
             ->assertRedirect('/setup-iklan/');
@@ -164,7 +197,7 @@ class ExampleTest extends TestCase
         $this->actingAs($user);
         T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
 
-        $account = \App\Models\AdAccount::firstOrFail();
+        $account = AdAccount::firstOrFail();
 
         Http::fake([
             'graph.facebook.com/*/'.$account->external_id.'/campaigns' => Http::response(['id' => 'meta-campaign']),
@@ -193,7 +226,7 @@ class ExampleTest extends TestCase
         $user = User::firstOrFail();
         $this->actingAs($user);
 
-        $account = \App\Models\AdAccount::firstOrFail();
+        $account = AdAccount::firstOrFail();
 
         $this->post('/setup-iklan/', $this->adSetupPayload($account->id, ['publish' => 1]))
             ->assertRedirect('/setup-iklan/')
@@ -214,7 +247,7 @@ class ExampleTest extends TestCase
         $this->actingAs($user);
         T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
 
-        $account = \App\Models\AdAccount::firstOrFail();
+        $account = AdAccount::firstOrFail();
 
         Http::fake([
             'graph.facebook.com/*/'.$account->external_id.'/campaigns' => Http::response([

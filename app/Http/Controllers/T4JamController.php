@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Exceptions\MetaAdsException;
+use App\Jobs\SyncMetaAdsProfile;
 use App\Models\AdAccount;
 use App\Models\AutomationLog;
 use App\Models\AutomationTask;
@@ -11,14 +12,14 @@ use App\Models\Interest;
 use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\T4JamProfile;
+use App\Services\MetaAdsClient;
+use App\Services\MetaAdsSyncService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\View\View;
-use App\Services\MetaAdsClient;
-use App\Services\MetaAdsSyncService;
 
 class T4JamController extends Controller
 {
@@ -324,7 +325,7 @@ class T4JamController extends Controller
         return response()->json(['status' => 200, 'text' => 'Password berhasil diupdate']);
     }
 
-    public function saveAccessToken(Request $request, MetaAdsSyncService $metaSync): RedirectResponse
+    public function saveAccessToken(Request $request): RedirectResponse
     {
         $accessToken = $request->input('access_token_app');
         $appId = $request->input('id_aplikasi');
@@ -351,30 +352,22 @@ class T4JamController extends Controller
             return back()->with('status', 'Access token berhasil disimpan.');
         }
 
-        try {
-            $counts = $metaSync->sync($profile);
-        } catch (MetaAdsException $exception) {
-            $profile->update(['last_meta_error' => $exception->getMessage()]);
+        SyncMetaAdsProfile::dispatchAfterResponse($profile->id);
 
-            return back()->withErrors(['meta' => $exception->getMessage()]);
-        }
-
-        return back()->with('status', "Access token valid. Sync {$counts['accounts']} ad account, {$counts['campaigns']} campaign, {$counts['insights']} insight.");
+        return back()->with('status', 'Access token berhasil disimpan. Sync Meta Ads sedang diproses.');
     }
 
-    public function syncMetaAds(MetaAdsSyncService $metaSync): RedirectResponse
+    public function syncMetaAds(): RedirectResponse
     {
         $profile = $this->currentProfile();
 
-        try {
-            $counts = $metaSync->sync($profile);
-        } catch (MetaAdsException $exception) {
-            $profile->update(['last_meta_error' => $exception->getMessage()]);
-
-            return back()->withErrors(['meta' => $exception->getMessage()]);
+        if (! $profile->access_token) {
+            return back()->withErrors(['meta' => 'Access token Meta belum diisi.']);
         }
 
-        return back()->with('status', "Sync Meta Ads selesai: {$counts['accounts']} ad account, {$counts['campaigns']} campaign, {$counts['insights']} insight.");
+        SyncMetaAdsProfile::dispatchAfterResponse($profile->id);
+
+        return back()->with('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
     }
 
     private function automationPayload(Request $request): array
