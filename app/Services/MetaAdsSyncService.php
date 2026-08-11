@@ -14,9 +14,10 @@ class MetaAdsSyncService
         $client = $this->client($profile);
         $metaUser = $client->validateToken();
         $accounts = $client->adAccounts();
+        $campaignsByAccount = $this->campaignsByAccount($client, $accounts);
         $counts = ['accounts' => 0, 'campaigns' => 0, 'insights' => 0];
 
-        DB::transaction(function () use ($profile, $metaUser, $accounts, $client, &$counts): void {
+        DB::transaction(function () use ($profile, $metaUser, $accounts, $campaignsByAccount, &$counts): void {
             $profile->update([
                 'meta_user_id' => $metaUser['id'] ?? null,
                 'meta_user_name' => $metaUser['name'] ?? null,
@@ -37,7 +38,7 @@ class MetaAdsSyncService
                 );
                 $counts['accounts']++;
 
-                foreach ($client->campaigns($account->external_id) as $campaignData) {
+                foreach ($campaignsByAccount[$accountData['id']] ?? [] as $campaignData) {
                     $campaign = Campaign::updateOrCreate(
                         ['external_id' => $campaignData['id']],
                         [
@@ -53,7 +54,7 @@ class MetaAdsSyncService
                     );
                     $counts['campaigns']++;
 
-                    $insights = $client->campaignInsights($campaign->external_id);
+                    $insights = $campaignData['insights'];
                     if ($insights) {
                         $campaign->update($this->insightPayload($insights));
                         $counts['insights']++;
@@ -72,6 +73,23 @@ class MetaAdsSyncService
         }
 
         return new MetaAdsClient($profile->access_token);
+    }
+
+    private function campaignsByAccount(MetaAdsClient $client, array $accounts): array
+    {
+        $campaignsByAccount = [];
+
+        foreach ($accounts as $accountData) {
+            $accountId = $accountData['id'];
+            $campaignsByAccount[$accountId] = [];
+
+            foreach ($client->campaigns($accountId) as $campaignData) {
+                $campaignData['insights'] = $client->campaignInsights($campaignData['id']);
+                $campaignsByAccount[$accountId][] = $campaignData;
+            }
+        }
+
+        return $campaignsByAccount;
     }
 
     private function insightPayload(array $insights): array
