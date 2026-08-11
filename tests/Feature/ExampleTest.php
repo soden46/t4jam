@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\AutomationTask;
 use App\Models\Campaign;
+use App\Models\AdSetup;
 use App\Models\T4JamProfile;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -183,6 +184,56 @@ class ExampleTest extends TestCase
             'meta_creative_id' => 'meta-creative',
             'meta_ad_id' => 'meta-ad',
         ]);
+    }
+
+    public function test_ad_setup_publish_without_write_mode_marks_ready_without_error(): void
+    {
+        $this->seed();
+        config(['services.meta.enable_writes' => false]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        $account = \App\Models\AdAccount::firstOrFail();
+
+        $this->post('/setup-iklan/', $this->adSetupPayload($account->id, ['publish' => 1]))
+            ->assertRedirect('/setup-iklan/')
+            ->assertSessionHas('warning', 'Setup iklan sudah siap. Publish ke Meta belum dijalankan karena write mode belum aktif.')
+            ->assertSessionMissing('status');
+
+        $setup = AdSetup::where('name', 'Setup Test')->firstOrFail();
+
+        $this->assertSame('ready', $setup->status);
+        $this->assertNull($setup->last_error);
+    }
+
+    public function test_ad_setup_publish_failure_stores_user_friendly_error(): void
+    {
+        $this->seed();
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $account = \App\Models\AdAccount::firstOrFail();
+
+        Http::fake([
+            'graph.facebook.com/*/'.$account->external_id.'/campaigns' => Http::response([
+                'error' => [
+                    'message' => 'Invalid parameter: debug provider payload details.',
+                    'code' => 100,
+                    'type' => 'OAuthException',
+                ],
+            ], 400),
+        ]);
+
+        $this->post('/setup-iklan/', $this->adSetupPayload($account->id, ['publish' => 1]))
+            ->assertRedirect('/setup-iklan/')
+            ->assertSessionHasErrors(['meta' => 'Meta menolak data setup iklan. Cek Page ID, targeting, budget, dan URL landing page.']);
+
+        $setup = AdSetup::where('name', 'Setup Test')->firstOrFail();
+
+        $this->assertSame('failed', $setup->status);
+        $this->assertSame('Meta menolak data setup iklan. Cek Page ID, targeting, budget, dan URL landing page.', $setup->last_error);
     }
 
     private function adSetupPayload(int $accountId, array $overrides = []): array

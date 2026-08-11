@@ -10,6 +10,7 @@ use App\Services\MetaAdSetupPublisher;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log;
 use Illuminate\View\View;
 
 class AdSetupController extends Controller
@@ -67,11 +68,17 @@ class AdSetupController extends Controller
         }
 
         try {
-            $publisher->publish($setup, T4JamProfile::firstOrCreate(['user_id' => Auth::id()]));
+            $setup = $publisher->publish($setup, T4JamProfile::firstOrCreate(['user_id' => Auth::id()]));
         } catch (MetaAdsException $exception) {
-            $setup->update(['status' => 'failed', 'last_error' => $exception->getMessage()]);
+            $message = $this->metaErrorMessage($exception);
+            $setup->update(['status' => 'failed', 'last_error' => $message]);
+            $this->reportMetaPublishFailure($exception, $setup);
 
-            return redirect()->route('ad-setups.index')->withErrors(['meta' => $exception->getMessage()]);
+            return redirect()->route('ad-setups.index')->withErrors(['meta' => $message]);
+        }
+
+        if ($setup->status === 'ready') {
+            return redirect()->route('ad-setups.index')->with('warning', 'Setup iklan sudah siap. Publish ke Meta belum dijalankan karena write mode belum aktif.');
         }
 
         return redirect()->route('ad-setups.index')->with('status', 'Setup iklan berhasil dipublish ke Meta.');
@@ -82,11 +89,17 @@ class AdSetupController extends Controller
         abort_unless($adSetup->user_id === Auth::id(), 403);
 
         try {
-            $publisher->publish($adSetup, T4JamProfile::firstOrCreate(['user_id' => Auth::id()]));
+            $adSetup = $publisher->publish($adSetup, T4JamProfile::firstOrCreate(['user_id' => Auth::id()]));
         } catch (MetaAdsException $exception) {
-            $adSetup->update(['status' => 'failed', 'last_error' => $exception->getMessage()]);
+            $message = $this->metaErrorMessage($exception);
+            $adSetup->update(['status' => 'failed', 'last_error' => $message]);
+            $this->reportMetaPublishFailure($exception, $adSetup);
 
-            return redirect()->route('ad-setups.index')->withErrors(['meta' => $exception->getMessage()]);
+            return redirect()->route('ad-setups.index')->withErrors(['meta' => $message]);
+        }
+
+        if ($adSetup->status === 'ready') {
+            return redirect()->route('ad-setups.index')->with('warning', 'Setup iklan sudah siap. Publish ke Meta belum dijalankan karena write mode belum aktif.');
         }
 
         return redirect()->route('ad-setups.index')->with('status', 'Setup iklan berhasil dipublish ke Meta.');
@@ -119,5 +132,35 @@ class AdSetupController extends Controller
             })
             ->values()
             ->all();
+    }
+
+    private function metaErrorMessage(MetaAdsException $exception): string
+    {
+        $message = strtolower($exception->getMessage());
+
+        if ($exception->metaCode === 190 || str_contains($message, 'token')) {
+            return 'Access token Meta tidak valid atau sudah expired. Silakan simpan ulang access token di Profile.';
+        }
+
+        if ($exception->httpStatus === 403 || str_contains($message, 'permission')) {
+            return 'Akses Meta belum punya izin untuk membuat iklan di ad account ini.';
+        }
+
+        if ($exception->httpStatus === 400) {
+            return 'Meta menolak data setup iklan. Cek Page ID, targeting, budget, dan URL landing page.';
+        }
+
+        return 'Publish ke Meta belum berhasil. Coba lagi beberapa saat atau cek koneksi Meta di Profile.';
+    }
+
+    private function reportMetaPublishFailure(MetaAdsException $exception, AdSetup $setup): void
+    {
+        Log::warning('Meta ad setup publish failed', [
+            'ad_setup_id' => $setup->id,
+            'user_id' => $setup->user_id,
+            'http_status' => $exception->httpStatus,
+            'meta_code' => $exception->metaCode,
+            'meta_type' => $exception->metaType,
+        ]);
     }
 }

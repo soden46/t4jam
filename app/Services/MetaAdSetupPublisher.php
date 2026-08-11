@@ -17,7 +17,7 @@ class MetaAdSetupPublisher
         if (! config('services.meta.enable_writes')) {
             $setup->update([
                 'status' => 'ready',
-                'last_error' => 'Meta write disabled. Set META_ADS_ENABLE_WRITES=true to publish.',
+                'last_error' => null,
             ]);
 
             return $setup->fresh(['adAccount']);

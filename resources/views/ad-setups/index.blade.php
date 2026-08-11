@@ -212,10 +212,18 @@
             </thead>
             <tbody>
                 @forelse ($setups as $setup)
+                    @php
+                        $badgeClass = match ($setup->status) {
+                            'published' => 'active',
+                            'ready' => 'ready',
+                            'failed' => 'failed',
+                            default => 'draft',
+                        };
+                    @endphp
                     <tr>
                         <td data-label="Setup"><strong>{{ $setup->name }}</strong><br><small>{{ $setup->campaign_name }}</small></td>
                         <td data-label="Ad Account">{{ $setup->adAccount->name }}</td>
-                        <td data-label="Status"><span class="badge {{ $setup->status === 'published' ? 'active' : 'pause' }}">{{ $setup->status }}</span></td>
+                        <td data-label="Status"><span class="badge {{ $badgeClass }}">{{ $setup->status }}</span></td>
                         <td data-label="Meta IDs">
                             <small>Campaign: {{ $setup->meta_campaign_id ?: '-' }}</small><br>
                             <small>Ad Set: {{ $setup->meta_adset_id ?: '-' }}</small><br>
