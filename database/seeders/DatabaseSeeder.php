@@ -3,7 +3,6 @@
 namespace Database\Seeders;
 
 use App\Models\AdAccount;
-use App\Models\AdSetup;
 use App\Models\AutomationLog;
 use App\Models\AutomationTask;
 use App\Models\Campaign;
@@ -27,10 +26,14 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         $user = User::firstOrCreate(
-            ['email' => 'demo@t4jam.local'],
+            ['email' => env('T4JAM_LOCAL_EMAIL', 'demo@t4jam.local')],
             [
-                'name' => 'Demo T4Jam',
-                'password' => Hash::make('password'),
+                'name' => env('T4JAM_LOCAL_NAME', 'Cipto Tukino'),
+                'password' => app()->environment('testing')
+                    ? Hash::make('password')
+                    : (env('T4JAM_LOCAL_PASSWORD_HASH')
+                    ? env('T4JAM_LOCAL_PASSWORD_HASH')
+                    : Hash::make('')),
             ]
         );
 
@@ -130,35 +133,5 @@ class DatabaseSeeder extends Seeder
                 ])->all()
             );
         }
-
-        AdSetup::firstOrCreate(
-            ['user_id' => $user->id, 'name' => 'Demo Setup Iklan T4Jam'],
-            [
-                'ad_account_id' => $accountModels->first()->id,
-                'campaign_name' => 'Demo Campaign T4Jam',
-                'campaign_objective' => 'OUTCOME_SALES',
-                'special_ad_categories' => [],
-                'campaign_status' => 'PAUSED',
-                'adset_name' => 'Demo Ad Set - Indonesia',
-                'daily_budget' => 100000,
-                'billing_event' => 'IMPRESSIONS',
-                'optimization_goal' => 'OFFSITE_CONVERSIONS',
-                'bid_strategy' => 'LOWEST_COST_WITHOUT_CAP',
-                'targeting' => [
-                    'geo_locations' => ['countries' => ['ID']],
-                    'age_min' => 18,
-                    'age_max' => 55,
-                    'interests' => [['id' => '6003348453981', 'name' => 'Sepatu']],
-                ],
-                'ad_name' => 'Demo Ad T4Jam',
-                'creative_name' => 'Demo Creative T4Jam',
-                'page_id' => '1234567890',
-                'message' => 'Demo primary text untuk setup iklan.',
-                'headline' => 'Demo Headline',
-                'description' => 'Demo description',
-                'link_url' => 'https://example.com',
-                'call_to_action' => 'LEARN_MORE',
-            ]
-        );
     }
 }
