@@ -45,7 +45,6 @@ function toast(message, type = 'success') {
     let el = qs('.toast-lite');
     if (!el) {
         el = document.createElement('div');
-        el.style.cssText = 'position:fixed;right:1rem;bottom:1rem;z-index:200;box-shadow:var(--shadow)';
         document.body.appendChild(el);
     }
     el.className = `toast-lite alert ${type}`;
