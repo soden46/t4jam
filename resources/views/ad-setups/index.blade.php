@@ -22,6 +22,9 @@
 </section>
 
 @error('meta')<div class="alert danger">{{ $message }}</div>@enderror
+@unless ($metaWritesEnabled)
+    <div class="alert warning">Meta write mode belum aktif. Publish setup dan update budget hanya tersimpan di aplikasi.</div>
+@endunless
 
 <form method="POST" action="{{ route('ad-setups.store') }}" class="setup-form">
     @csrf

@@ -41,14 +41,14 @@ function formBody(formOrObject) {
     return data;
 }
 
-function toast(message) {
+function toast(message, type = 'success') {
     let el = qs('.toast-lite');
     if (!el) {
         el = document.createElement('div');
-        el.className = 'toast-lite alert success';
         el.style.cssText = 'position:fixed;right:1rem;bottom:1rem;z-index:200;box-shadow:var(--shadow)';
         document.body.appendChild(el);
     }
+    el.className = `toast-lite alert ${type}`;
     el.textContent = message;
     clearTimeout(el._timer);
     el._timer = setTimeout(() => el.remove(), 2600);
@@ -250,14 +250,24 @@ function renderAutomationTable(rows) {
     `).join('');
 
     qsa('[data-toggle-task]').forEach((button) => button.addEventListener('click', async () => {
-        await request('/update-status-automation-tasks/', { method: 'POST', body: formBody({ automation_id: button.dataset.toggleTask, status: button.dataset.status }) });
-        await loadAutomationTasks();
+        try {
+            const response = await request('/update-status-automation-tasks/', { method: 'POST', body: formBody({ automation_id: button.dataset.toggleTask, status: button.dataset.status }) });
+            toast(response.text || 'Status automation berhasil diperbarui');
+            await loadAutomationTasks();
+        } catch (error) {
+            toast(error.message, 'danger');
+        }
     }));
     qsa('[data-edit]').forEach((button) => button.addEventListener('click', () => editTask(button.dataset.edit)));
     qsa('[data-history]').forEach((button) => button.addEventListener('click', () => historyTask(button.dataset.history)));
     qsa('[data-budget-down]').forEach((button) => button.addEventListener('click', async () => {
-        await request('/turun-budget-manual/', { method: 'POST', body: formBody({ automation_id: button.dataset.budgetDown }) });
-        await loadAutomationTasks();
+        try {
+            const response = await request('/turun-budget-manual/', { method: 'POST', body: formBody({ automation_id: button.dataset.budgetDown }) });
+            toast(response.text || 'Budget berhasil diturunkan manual');
+            await loadAutomationTasks();
+        } catch (error) {
+            toast(error.message, 'danger');
+        }
     }));
 }
 
@@ -308,10 +318,14 @@ function bindAutomationForm(defaultMode) {
     form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const isUpdate = qs('#automation_id').value;
-        await request(isUpdate ? '/update-automation-tasks/' : '/create-automation-tasks/', { method: 'POST', body: formBody(form) });
-        closeModals();
-        toast(isUpdate ? 'Automation strategy berhasil diupdate' : 'Automation budget berhasil dibuat');
-        if (page() === 'automation') await loadAutomationTasks();
+        try {
+            const response = await request(isUpdate ? '/update-automation-tasks/' : '/create-automation-tasks/', { method: 'POST', body: formBody(form) });
+            closeModals();
+            toast(response.text || (isUpdate ? 'Automation strategy berhasil diupdate' : 'Automation budget berhasil dibuat'));
+            if (page() === 'automation') await loadAutomationTasks();
+        } catch (error) {
+            toast(error.message, 'danger');
+        }
     });
     if (defaultMode === 'create') qs('#activation-row')?.setAttribute('hidden', 'hidden');
 }

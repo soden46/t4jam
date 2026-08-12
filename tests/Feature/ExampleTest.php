@@ -42,11 +42,14 @@ class ExampleTest extends TestCase
     public function test_create_automation_task_persists_dynamic_data(): void
     {
         $this->seed();
+        config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
         $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
 
         $before = AutomationTask::count();
         $campaign = Campaign::with('adAccount')->firstOrFail();
+        Http::fake(['graph.facebook.com/*/'.$campaign->external_id => Http::response(['success' => true])]);
 
         $this->postJson('/create-automation-tasks/', [
             'ad_account' => $campaign->adAccount->external_id,
@@ -62,6 +65,11 @@ class ExampleTest extends TestCase
         ])->assertOk()->assertJsonPath('status', 200);
 
         $this->assertSame($before + 1, AutomationTask::count());
+        $this->assertDatabaseHas('campaigns', ['id' => $campaign->id, 'daily_budget' => 125000]);
+
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $campaign->external_id)
+            && $request['daily_budget'] === 125000);
     }
 
     public function test_dashboard_campaign_data_is_scoped_to_selected_ad_account_and_campaigns(): void
@@ -112,6 +120,58 @@ class ExampleTest extends TestCase
             'ad_account' => $firstAccount->external_id,
             'campaign_id' => $otherCampaign->external_id,
         ])->assertStatus(422)->assertJsonPath('text', 'Pilih campaign dari ad account yang aktif dulu.');
+    }
+
+    public function test_update_automation_task_pushes_budget_to_meta_campaign(): void
+    {
+        $this->seed();
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        Http::fake(['graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true])]);
+
+        $this->postJson('/update-automation-tasks/', [
+            'automation_id' => $task->id,
+            'budget_funnel_lp' => 'lp_to_wa',
+            'mode_automation' => 'default',
+            'hold_spend' => 'onhold',
+            'budget_conversion' => 'purchase',
+            'starting_budget' => 1500000,
+            'maximum_budget' => 0,
+            'cpr_cap' => 7000,
+            'period' => 10,
+        ])->assertOk()
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.');
+
+        $task->refresh();
+
+        $this->assertSame(1500000, $task->current_budget);
+        $this->assertDatabaseHas('campaigns', ['id' => $task->campaign_id, 'daily_budget' => 1500000]);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign_external_id)
+            && $request['daily_budget'] === 1500000);
+    }
+
+    public function test_budget_update_fails_clearly_when_meta_write_mode_is_disabled(): void
+    {
+        $this->seed();
+        config(['services.meta.enable_writes' => false]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        $task = AutomationTask::firstOrFail();
+        $originalBudget = $task->current_budget;
+
+        $this->postJson('/update-automation-tasks/', [
+            'automation_id' => $task->id,
+            'starting_budget' => 20000,
+        ])->assertStatus(422)
+            ->assertJsonPath('text', 'Budget belum dikirim ke Meta karena write mode belum aktif.');
+
+        $this->assertSame($originalBudget, $task->fresh()->current_budget);
     }
 
     public function test_google_sign_in_button_logs_in_with_local_fallback(): void

@@ -24,6 +24,7 @@ class AdSetupController extends Controller
                 ->where('user_id', Auth::id())
                 ->latest()
                 ->get(),
+            'metaWritesEnabled' => config('services.meta.enable_writes'),
         ]);
     }
 
