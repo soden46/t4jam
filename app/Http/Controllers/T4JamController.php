@@ -25,10 +25,14 @@ class T4JamController extends Controller
 {
     public function dashboard(): View
     {
+        $accounts = AdAccount::with('campaigns')->get();
+        $selectedAccount = session('selected_ad_account', $accounts->first()?->external_id);
+
         return view('dashboard', [
             'title' => 'Report Dashboard',
-            'accounts' => AdAccount::with('campaigns')->get(),
-            'insights' => $this->insightsPayload(),
+            'accounts' => $accounts,
+            'selectedAccount' => $selectedAccount,
+            'insights' => $this->insightsPayload($selectedAccount),
         ]);
     }
 
@@ -72,30 +76,38 @@ class T4JamController extends Controller
     public function adAccounts(): JsonResponse
     {
         $accounts = AdAccount::with('campaigns')->get();
+        $selected = session('selected_ad_account', $accounts->first()?->external_id);
+        $selectedAccount = $accounts->firstWhere('external_id', $selected) ?? $accounts->first();
 
         return response()->json([
             'status' => 200,
             'adaccount' => $accounts->map(fn (AdAccount $account) => $this->accountPayload($account))->values(),
-            'selected' => session('selected_ad_account', $accounts->first()?->external_id),
-            'fix_campaign_list' => Campaign::with('adAccount')->get()->map(fn (Campaign $campaign) => $this->campaignPayload($campaign))->values(),
+            'selected' => $selectedAccount?->external_id,
+            'selected_campaigns' => $this->normalizeCampaignIds(session('selected_campaigns', [])),
+            'fix_campaign_list' => $selectedAccount
+                ? $selectedAccount->campaigns->map(fn (Campaign $campaign) => $this->campaignPayload($campaign))->values()
+                : collect(),
         ]);
     }
 
-    public function adInsights(): JsonResponse
+    public function adInsights(Request $request): JsonResponse
     {
-        return response()->json($this->insightsPayload());
+        $adAccount = $request->query('ad_account', session('selected_ad_account'));
+
+        return response()->json($this->insightsPayload($adAccount, $this->normalizeCampaignIds(session('selected_campaigns', []))));
     }
 
     public function changeAdAccount(Request $request): JsonResponse
     {
         session(['selected_ad_account' => $request->input('ad_account')]);
+        session()->forget('selected_campaigns');
 
         return response()->json(['status' => 200, 'text' => 'Ad account berhasil dipilih']);
     }
 
     public function changeSelectedCampaign(Request $request): JsonResponse
     {
-        session(['selected_campaigns' => $request->input('campaigns', [])]);
+        session(['selected_campaigns' => $this->normalizeCampaignIds($request->input('campaigns', []))]);
 
         return response()->json(['status' => 200, 'text' => 'Campaign berhasil diperbarui']);
     }
@@ -164,8 +176,17 @@ class T4JamController extends Controller
 
     public function createAutomationTask(Request $request): JsonResponse
     {
-        $account = AdAccount::where('external_id', $request->input('ad_account'))->first() ?? AdAccount::first();
-        $campaign = Campaign::where('external_id', $request->input('campaign_id'))->first() ?? Campaign::first();
+        $account = AdAccount::where('external_id', $request->input('ad_account'))->first();
+
+        if (! $account) {
+            return response()->json(['status' => 422, 'text' => 'Pilih ad account yang valid dulu.'], 422);
+        }
+
+        $campaign = $account->campaigns()->where('external_id', $request->input('campaign_id'))->first();
+
+        if (! $campaign) {
+            return response()->json(['status' => 422, 'text' => 'Pilih campaign dari ad account yang aktif dulu.'], 422);
+        }
 
         $task = AutomationTask::create($this->automationPayload($request) + [
             'id' => (string) str()->uuid(),
@@ -452,29 +473,33 @@ class T4JamController extends Controller
         ];
     }
 
-    private function insightsPayload(): array
+    private function insightsPayload(?string $adAccountExternalId = null, array $selectedCampaigns = []): array
     {
-        $rows = Campaign::query()->get()->map(function (Campaign $campaign) {
-            $result = max(0, $campaign->result);
-            $cpr = $result > 0 ? round($campaign->spend / $result) : $campaign->spend;
+        $rows = Campaign::query()
+            ->when($adAccountExternalId, fn ($query) => $query->whereHas('adAccount', fn ($account) => $account->where('external_id', $adAccountExternalId)))
+            ->when($selectedCampaigns !== [], fn ($query) => $query->whereIn('external_id', $selectedCampaigns))
+            ->get()
+            ->map(function (Campaign $campaign) {
+                $result = max(0, $campaign->result);
+                $cpr = $result > 0 ? round($campaign->spend / $result) : $campaign->spend;
 
-            return [
-                'campaign_id' => $campaign->external_id,
-                'campaign_name' => $campaign->name,
-                'budget' => $campaign->daily_budget,
-                'spend' => $campaign->spend,
-                'reach' => $campaign->reach,
-                'hasil' => $campaign->result,
-                'cpr' => $cpr,
-                'link_click' => $campaign->link_click,
-                'landing_page_view' => $campaign->landing_page_view,
-                'klik_landas' => $campaign->link_click > 0 ? round(($campaign->landing_page_view / $campaign->link_click) * 100, 1) : 0,
-                'uang_jangkauan' => $campaign->reach > 0 ? round($campaign->spend / $campaign->reach, 1) : 0,
-                'uang_klik' => $campaign->link_click > 0 ? round($campaign->spend / $campaign->link_click, 1) : 0,
-                'landas_hasil' => $result > 0 ? round($campaign->landing_page_view / $result, 1) : 0,
-                'cpr_10' => round($cpr * 1.1),
-            ];
-        });
+                return [
+                    'campaign_id' => $campaign->external_id,
+                    'campaign_name' => $campaign->name,
+                    'budget' => $campaign->daily_budget,
+                    'spend' => $campaign->spend,
+                    'reach' => $campaign->reach,
+                    'hasil' => $campaign->result,
+                    'cpr' => $cpr,
+                    'link_click' => $campaign->link_click,
+                    'landing_page_view' => $campaign->landing_page_view,
+                    'klik_landas' => $campaign->link_click > 0 ? round(($campaign->landing_page_view / $campaign->link_click) * 100, 1) : 0,
+                    'uang_jangkauan' => $campaign->reach > 0 ? round($campaign->spend / $campaign->reach, 1) : 0,
+                    'uang_klik' => $campaign->link_click > 0 ? round($campaign->spend / $campaign->link_click, 1) : 0,
+                    'landas_hasil' => $result > 0 ? round($campaign->landing_page_view / $result, 1) : 0,
+                    'cpr_10' => round($cpr * 1.1),
+                ];
+            });
 
         $sum = fn (string $key) => $rows->sum($key);
         $results = max(1, $sum('hasil'));
@@ -494,6 +519,25 @@ class T4JamController extends Controller
                 $this->metric('Landas Hasil', 'number', 'landas_hasil', round($sum('landing_page_view') / $results, 1)),
             ],
         ];
+    }
+
+    private function normalizeCampaignIds(mixed $campaigns): array
+    {
+        if (is_string($campaigns)) {
+            $campaigns = explode(',', $campaigns);
+        }
+
+        if (! is_array($campaigns)) {
+            return [];
+        }
+
+        return collect($campaigns)
+            ->flatten()
+            ->map(fn ($campaign) => trim((string) $campaign))
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
     }
 
     private function metric(string $name, string $type, string $key, int|float $value, int|float|null $min = null): array

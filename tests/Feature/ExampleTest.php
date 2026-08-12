@@ -46,8 +46,11 @@ class ExampleTest extends TestCase
         $this->actingAs($user);
 
         $before = AutomationTask::count();
+        $campaign = Campaign::with('adAccount')->firstOrFail();
 
         $this->postJson('/create-automation-tasks/', [
+            'ad_account' => $campaign->adAccount->external_id,
+            'campaign_id' => $campaign->external_id,
             'budget_funnel_lp' => 'lp_to_form',
             'mode_automation' => 'hybrid',
             'hold_spend' => 'loss',
@@ -59,6 +62,56 @@ class ExampleTest extends TestCase
         ])->assertOk()->assertJsonPath('status', 200);
 
         $this->assertSame($before + 1, AutomationTask::count());
+    }
+
+    public function test_dashboard_campaign_data_is_scoped_to_selected_ad_account_and_campaigns(): void
+    {
+        $this->seed();
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        $account = AdAccount::with('campaigns')->whereHas('campaigns')->get()->last();
+        $campaign = $account->campaigns->first();
+
+        $accountResponse = $this
+            ->withSession(['selected_ad_account' => $account->external_id])
+            ->getJson('/api/get-ad-account/')
+            ->assertOk()
+            ->assertJsonPath('selected', $account->external_id)
+            ->json('fix_campaign_list');
+
+        $this->assertNotEmpty($accountResponse);
+        $this->assertSame(
+            $account->campaigns->pluck('external_id')->sort()->values()->all(),
+            collect($accountResponse)->pluck('id')->sort()->values()->all()
+        );
+
+        $insights = $this
+            ->withSession([
+                'selected_ad_account' => $account->external_id,
+                'selected_campaigns' => [$campaign->external_id],
+            ])
+            ->getJson('/api/get-ad-insight/?ad_account='.$account->external_id)
+            ->assertOk()
+            ->json('summery');
+
+        $this->assertSame([$campaign->external_id], collect($insights)->pluck('campaign_id')->all());
+    }
+
+    public function test_create_automation_requires_campaign_from_selected_ad_account(): void
+    {
+        $this->seed();
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        $accounts = AdAccount::with('campaigns')->whereHas('campaigns')->take(2)->get();
+        $firstAccount = $accounts->first();
+        $otherCampaign = $accounts->last()->campaigns->first();
+
+        $this->postJson('/create-automation-tasks/', [
+            'ad_account' => $firstAccount->external_id,
+            'campaign_id' => $otherCampaign->external_id,
+        ])->assertStatus(422)->assertJsonPath('text', 'Pilih campaign dari ad account yang aktif dulu.');
     }
 
     public function test_google_sign_in_button_logs_in_with_local_fallback(): void

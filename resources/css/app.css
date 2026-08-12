@@ -17,6 +17,7 @@
     --success: #50cd89;
     --warning: #e78b2f;
     --shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, .06);
+    --content-max: 1120px;
     font-family: Inter, Helvetica, sans-serif;
 }
 
@@ -71,7 +72,7 @@ label small { color: var(--muted); font-weight: 500; }
 .terms { font-size: .82rem; line-height: 1.6; }
 
 .app-header { position: sticky; top: 0; z-index: 20; background: rgba(255, 255, 255, .94); border-bottom: 1px solid var(--line); backdrop-filter: blur(14px); }
-.header-inner { width: min(1180px, 100%); margin: 0 auto; min-height: 72px; padding: 0 1rem; display: flex; align-items: center; gap: 1rem; min-width: 0; }
+.header-inner { width: min(var(--content-max), 100%); margin: 0 auto; min-height: 72px; padding: 0 1rem; display: flex; align-items: center; gap: 1rem; min-width: 0; }
 .app-logo { font-size: 1.5rem; white-space: nowrap; }
 .top-menu { display: flex; align-items: stretch; gap: .25rem; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .top-menu::-webkit-scrollbar { display: none; }
@@ -83,15 +84,33 @@ label small { color: var(--muted); font-weight: 500; }
 .utility-btn.compact { width: 38px; padding: 0; }
 .theme-mark { width: 16px; height: 16px; border-radius: 50%; display: inline-block; background: linear-gradient(135deg, var(--primary), var(--primary-2)); box-shadow: inset 6px 0 0 rgba(255,255,255,.72); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-.app-main { width: 100%; margin: 0; padding: 1.5rem 1rem; }
-.page-shell { width: min(1180px, 100%); margin: 0 auto; display: grid; gap: 1rem; min-width: 0; }
+.app-main { width: 100%; margin: 0; padding: 0 1rem 1.5rem; }
+.page-shell {
+    width: min(var(--content-max), 100%);
+    margin: 0 auto;
+    display: grid;
+    gap: 1rem;
+    min-width: 0;
+    min-height: calc(100vh - 72px);
+    padding: 1.25rem 1rem 1.5rem;
+    background: #f8fafc;
+    border-left: 1px solid #dce4ef;
+    border-right: 1px solid #dce4ef;
+}
 .app-footer { color: #4b5675; padding: 1.5rem 1rem; }
-.footer-inner { width: min(1180px, 100%); margin: 0 auto; display: flex; justify-content: space-between; gap: 1rem; }
+.footer-inner { width: min(var(--content-max), 100%); margin: 0 auto; display: flex; justify-content: space-between; gap: 1rem; }
 .footer-inner div { display: flex; gap: 1rem; flex-wrap: wrap; }
 .panel, .card { background: var(--surface); border: 1px solid var(--line); border-radius: .5rem; box-shadow: 0 .75rem 2rem rgba(7, 20, 55, .04); padding: 1.25rem; min-width: 0; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1.25rem; }
 .panel-head p { margin-bottom: 0; }
 .toolbar, .filter-strip, .table-toolbar, .action-row, .form-row { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
+.toolbar, .filter-strip {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: .5rem;
+    padding: 1rem;
+    min-width: 0;
+}
 .toolbar { justify-content: flex-end; }
 .toolbar-select { width: min(360px, 100%); height: 40px; padding: .4rem 2rem .4rem .8rem; }
 .tag-input, .large-input { background: #f9f9f9; border-color: #f1f1f2; }
@@ -207,7 +226,8 @@ label small { color: var(--muted); font-weight: 500; }
     .header-inner { height: auto; min-height: 72px; flex-wrap: wrap; padding: .85rem 1rem; }
     .app-logo { flex: 1 1 auto; }
     .top-menu { order: 3; width: 100%; flex: 0 0 100%; padding-bottom: .1rem; }
-    .app-main { padding: 1rem; }
+    .app-main { padding: 0 .75rem 1rem; }
+    .page-shell { min-height: auto; padding: 1rem 0; border-left: 0; border-right: 0; background: transparent; }
     .panel-head, .footer-inner, .page-hero, .submit-panel { align-items: flex-start; flex-direction: column; }
     .hero-stats { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .hero-stats div { min-width: 0; }
@@ -215,6 +235,7 @@ label small { color: var(--muted); font-weight: 500; }
     .span-2 { grid-column: auto; }
     .table-toolbar { align-items: stretch; }
     .table-toolbar input[type="search"], .table-toolbar select, .table-toolbar .btn { width: 100%; max-width: none; }
+    .toolbar select, .toolbar .btn, .filter-strip select { width: 100%; max-width: none; }
     .form-actions { width: 100%; flex-direction: column; align-items: stretch; }
     .form-actions .btn { width: 100%; }
 }

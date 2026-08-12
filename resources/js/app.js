@@ -90,22 +90,59 @@ function bindCheckAll(tableSelector) {
 }
 
 async function initDashboard() {
-    const accounts = await request('/api/get-ad-account/');
+    let accounts = await request('/api/get-ad-account/');
     const accountSelect = qs('#ad_account');
-    accountSelect.innerHTML = accounts.adaccount.map((account) => `<option value="${account.id}">${account.name}</option>`).join('');
+    const renderAccountSelect = (selectedAccount = null) => {
+        accountSelect.innerHTML = accounts.adaccount.map((account) => `<option value="${account.id}">${account.name}</option>`).join('');
+        accountSelect.value = selectedAccount || accounts.selected || accounts.adaccount[0]?.id || '';
+    };
+    renderAccountSelect();
+
+    const campaignsForSelectedAccount = () => {
+        const account = (accounts.adaccount || []).find((item) => item.id === accountSelect.value);
+
+        return account?.campaigns?.data || [];
+    };
+
+    const renderCampaignPicker = (selectedCampaigns = []) => {
+        const selected = new Set(selectedCampaigns);
+        qs('#kt_tagify_users').innerHTML = campaignsForSelectedAccount().map((campaign) => (
+            `<option value="${campaign.id}" ${selected.has(campaign.id) ? 'selected' : ''}>${campaign.name}</option>`
+        )).join('');
+    };
+
+    const selectedCampaigns = () => qsa('#kt_tagify_users option:checked').map((option) => option.value);
+
+    const loadInsights = async () => {
+        const insights = await request(`/api/get-ad-insight/?ad_account=${encodeURIComponent(accountSelect.value)}`);
+        renderMetrics(insights.highlight || []);
+        renderCampaignTable(insights.summery || []);
+    };
 
     accountSelect.addEventListener('change', async () => {
         await request('/api/changed-ad-account/', { method: 'POST', body: formBody({ ad_account: accountSelect.value }) });
+        renderCampaignPicker();
+        await loadInsights();
     });
     qs('#reload_ad_account')?.addEventListener('click', async () => {
-        await request('/api/reload-ad-account/', { method: 'POST', body: formBody({}) });
+        const response = await request('/api/reload-ad-account/', { method: 'POST', body: formBody({}) });
+        accounts = { ...accounts, adaccount: response.adaccount || accounts.adaccount };
+        renderAccountSelect(accountSelect.value);
+        renderCampaignPicker();
+        await loadInsights();
         toast('Ad account berhasil direload');
     });
     qs('#update_campaign')?.addEventListener('click', async () => {
-        await request('/api/changed-selected-campaign/', { method: 'POST', body: formBody({ campaigns: qs('#kt_tagify_users').value }) });
+        await request('/api/changed-selected-campaign/', { method: 'POST', body: formBody({ campaigns: selectedCampaigns().join(',') }) });
+        await loadInsights();
         toast('Campaign berhasil diperbarui');
     });
-    qs('#clean_campaign')?.addEventListener('click', () => qs('#kt_tagify_users').value = '');
+    qs('#clean_campaign')?.addEventListener('click', async () => {
+        qsa('#kt_tagify_users option').forEach((option) => option.selected = false);
+        await request('/api/changed-selected-campaign/', { method: 'POST', body: formBody({ campaigns: '' }) });
+        await loadInsights();
+        toast('Filter campaign direset');
+    });
 
     qsa('#funnel_lp, #conversion, #level_mode').forEach((el) => el.addEventListener('change', () => {
         request('/api/changed-settings/', {
@@ -118,16 +155,19 @@ async function initDashboard() {
         });
     }));
 
-    const insights = await request('/api/get-ad-insight/');
-    renderMetrics(insights.highlight || []);
-    renderCampaignTable(insights.summery || []);
+    renderCampaignPicker(accounts.selected_campaigns || []);
+    await loadInsights();
     bindSearch('#search_domain', '#campaign_table');
     bindCheckAll('#campaign_table');
     bindAutomationForm('create');
     qs('#get_metrik_btn')?.addEventListener('click', () => {
         const checked = qs('#campaign_table tbody input[type="checkbox"]:checked');
+        if (!checked) {
+            toast('Pilih campaign dulu dari Campaign Overview');
+            return;
+        }
         qs('#modal_ad_account').value = accountSelect.value;
-        qs('#modal_campaign_id').value = checked?.value || '';
+        qs('#modal_campaign_id').value = checked.value;
         qs('#automation_id').value = '';
         qs('#automation-modal-title').textContent = 'Create Automation Budget';
         qs('#automation-submit-label').textContent = 'Create';

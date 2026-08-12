@@ -3,10 +3,28 @@
 @section('page', 'dashboard')
 
 @section('content')
+<section class="page-hero compact">
+    <div>
+        <span class="eyebrow">Report Dashboard</span>
+        <h1>Meta Ads Overview</h1>
+        <p>Pantau campaign, metrik iklan, dan automation budget dari satu workspace.</p>
+    </div>
+    <div class="hero-stats">
+        <div>
+            <strong>{{ $accounts->count() }}</strong>
+            <span>Ad Account</span>
+        </div>
+        <div>
+            <strong>{{ collect($insights['summery'] ?? [])->count() }}</strong>
+            <span>Campaign</span>
+        </div>
+    </div>
+</section>
+
 <section class="toolbar">
     <select id="ad_account" class="toolbar-select">
         @foreach ($accounts as $account)
-            <option value="{{ $account->external_id }}">{{ $account->name }}</option>
+            <option value="{{ $account->external_id }}" @selected(($selectedAccount ?? null) === $account->external_id)>{{ $account->name }}</option>
         @endforeach
     </select>
     <button class="btn light" type="button" id="reload_ad_account">Reload</button>
@@ -23,7 +41,7 @@
             <button class="btn light" id="clean_campaign" type="button">Reset Data</button>
         </div>
     </div>
-    <input class="tag-input" id="kt_tagify_users" placeholder="Select Campaign">
+    <select class="tag-input" id="kt_tagify_users" multiple size="4" aria-label="Select Campaign"></select>
 </section>
 
 <div class="dash-separator"><span>Data Campaign</span></div>
