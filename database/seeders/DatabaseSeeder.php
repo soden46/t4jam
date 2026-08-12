@@ -3,6 +3,7 @@
 namespace Database\Seeders;
 
 use App\Models\AdAccount;
+use App\Models\AdSet;
 use App\Models\AutomationLog;
 use App\Models\AutomationTask;
 use App\Models\Campaign;
@@ -69,6 +70,25 @@ class DatabaseSeeder extends Seeder
 
             return [$campaign['external_id'] => Campaign::updateOrCreate(['external_id' => $campaign['external_id']], $payload)];
         });
+
+        foreach ($campaignModels as $campaign) {
+            AdSet::updateOrCreate(
+                ['external_id' => 'adset_'.$campaign->external_id],
+                [
+                    'ad_account_id' => $campaign->ad_account_id,
+                    'campaign_id' => $campaign->id,
+                    'name' => $campaign->name.' - Ad Set 1',
+                    'status' => $campaign->status,
+                    'effective_status' => $campaign->effective_status,
+                    'daily_budget' => $campaign->daily_budget,
+                    'spend' => $campaign->spend,
+                    'reach' => $campaign->reach,
+                    'result' => $campaign->result,
+                    'link_click' => $campaign->link_click,
+                    'landing_page_view' => $campaign->landing_page_view,
+                ],
+            );
+        }
 
         foreach ($campaignModels->take(4) as $campaign) {
             $task = AutomationTask::firstOrCreate(

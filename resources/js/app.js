@@ -98,10 +98,14 @@ async function initDashboard() {
     };
     renderAccountSelect();
 
+    const levelMode = () => qs('#level_mode')?.value || 'campaign';
+
     const campaignsForSelectedAccount = () => {
         const account = (accounts.adaccount || []).find((item) => item.id === accountSelect.value);
 
-        return account?.campaigns?.data || [];
+        return levelMode() === 'adset'
+            ? account?.adsets?.data || []
+            : account?.campaigns?.data || [];
     };
 
     const renderCampaignPicker = (selectedCampaigns = []) => {
@@ -114,7 +118,7 @@ async function initDashboard() {
     const selectedCampaigns = () => qsa('#kt_tagify_users option:checked').map((option) => option.value);
 
     const loadInsights = async () => {
-        const insights = await request(`/api/get-ad-insight/?ad_account=${encodeURIComponent(accountSelect.value)}`);
+        const insights = await request(`/api/get-ad-insight/?ad_account=${encodeURIComponent(accountSelect.value)}&level=${encodeURIComponent(levelMode())}`);
         renderMetrics(insights.highlight || []);
         renderCampaignTable(insights.summery || []);
     };
@@ -144,7 +148,7 @@ async function initDashboard() {
         toast('Filter campaign direset');
     });
 
-    qsa('#funnel_lp, #conversion, #level_mode').forEach((el) => el.addEventListener('change', () => {
+    qsa('#funnel_lp, #conversion').forEach((el) => el.addEventListener('change', () => {
         request('/api/changed-settings/', {
             method: 'POST',
             body: formBody({
@@ -154,6 +158,20 @@ async function initDashboard() {
             }),
         });
     }));
+    qs('#level_mode')?.addEventListener('change', async () => {
+        await request('/api/changed-settings/', {
+            method: 'POST',
+            body: formBody({
+                funnel_lp: qs('#funnel_lp').value,
+                conversion: qs('#conversion').value,
+                level_mode: levelMode(),
+            }),
+        });
+        qsa('#kt_tagify_users option').forEach((option) => option.selected = false);
+        await request('/api/changed-selected-campaign/', { method: 'POST', body: formBody({ campaigns: '' }) });
+        renderCampaignPicker();
+        await loadInsights();
+    });
 
     renderCampaignPicker(accounts.selected_campaigns || []);
     await loadInsights();
@@ -168,6 +186,7 @@ async function initDashboard() {
         }
         qs('#modal_ad_account').value = accountSelect.value;
         qs('#modal_campaign_id').value = checked.value;
+        qs('#modal_level').value = checked.dataset.level || levelMode();
         qs('#automation_id').value = '';
         qs('#automation-modal-title').textContent = 'Create Automation Budget';
         qs('#automation-submit-label').textContent = 'Create';
@@ -185,7 +204,7 @@ function renderMetrics(metrics) {
 function renderCampaignTable(rows) {
     qs('#campaign_table tbody').innerHTML = rows.map((row) => `
         <tr>
-            <td><input type="checkbox" value="${row.campaign_id}"></td>
+            <td><input type="checkbox" value="${row.campaign_id}" data-level="${row.level || 'campaign'}"></td>
             <td><span class="campaign-name">${row.campaign_name}</span></td>
             <td class="num">${rupiah(row.budget)}</td>
             <td class="num">${rupiah(row.spend)}</td>
@@ -309,6 +328,7 @@ async function historyTask(id) {
 function resetAutomationForm() {
     qs('#automation-form')?.reset();
     qs('#automation_id').value = '';
+    qs('#modal_level').value = 'campaign';
 }
 
 function bindAutomationForm(defaultMode) {

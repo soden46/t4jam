@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\AdAccount;
+use App\Models\AdSet;
 use App\Models\AdSetup;
 use App\Models\AutomationTask;
 use App\Models\Campaign;
@@ -106,6 +107,25 @@ class ExampleTest extends TestCase
         $this->assertSame([$campaign->external_id], collect($insights)->pluck('campaign_id')->all());
     }
 
+    public function test_dashboard_adset_level_returns_adsets_for_selected_ad_account(): void
+    {
+        $this->seed();
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        $account = AdAccount::with('adSets')->whereHas('adSets')->firstOrFail();
+        $adSet = $account->adSets->first();
+
+        $insights = $this
+            ->withSession(['selected_ad_account' => $account->external_id])
+            ->getJson('/api/get-ad-insight/?ad_account='.$account->external_id.'&level=adset')
+            ->assertOk()
+            ->json('summery');
+
+        $this->assertContains($adSet->external_id, collect($insights)->pluck('campaign_id')->all());
+        $this->assertSame('adset', collect($insights)->firstWhere('campaign_id', $adSet->external_id)['level']);
+    }
+
     public function test_create_automation_requires_campaign_from_selected_ad_account(): void
     {
         $this->seed();
@@ -153,6 +173,48 @@ class ExampleTest extends TestCase
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $task->campaign_external_id)
             && $request['daily_budget'] === 1500000);
+    }
+
+    public function test_update_automation_task_pushes_budget_to_meta_adset(): void
+    {
+        $this->seed();
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $adSet = AdSet::with(['adAccount', 'campaign'])->firstOrFail();
+        $task = AutomationTask::create([
+            'id' => (string) str()->uuid(),
+            'ad_account_id' => $adSet->ad_account_id,
+            'campaign_id' => $adSet->campaign_id,
+            'ad_set_id' => $adSet->id,
+            'campaign_external_id' => $adSet->campaign->external_id,
+            'ad_set_external_id' => $adSet->external_id,
+            'campaign_name' => $adSet->name,
+            'ad_account_name' => $adSet->adAccount->name,
+            'level' => 'adset',
+            'current_budget' => $adSet->daily_budget,
+        ]);
+        Http::fake(['graph.facebook.com/*/'.$adSet->external_id => Http::response(['success' => true])]);
+
+        $this->postJson('/update-automation-tasks/', [
+            'automation_id' => $task->id,
+            'budget_funnel_lp' => 'lp_to_wa',
+            'mode_automation' => 'default',
+            'hold_spend' => 'onhold',
+            'budget_conversion' => 'purchase',
+            'starting_budget' => 20000,
+            'maximum_budget' => 0,
+            'cpr_cap' => 7000,
+            'period' => 10,
+        ])->assertOk()
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.');
+
+        $this->assertDatabaseHas('ad_sets', ['id' => $adSet->id, 'daily_budget' => 20000]);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $adSet->external_id)
+            && $request['daily_budget'] === 20000);
     }
 
     public function test_budget_update_fails_clearly_when_meta_write_mode_is_disabled(): void
@@ -213,6 +275,22 @@ class ExampleTest extends TestCase
                     ],
                 ]],
             ]),
+            'graph.facebook.com/*/cmp_1/adsets?*' => Http::response([
+                'data' => [
+                    ['id' => 'adset_1', 'name' => 'Meta Ad Set', 'status' => 'ACTIVE', 'effective_status' => 'ACTIVE', 'daily_budget' => '150000'],
+                ],
+            ]),
+            'graph.facebook.com/*/adset_1/insights?*' => Http::response([
+                'data' => [[
+                    'spend' => '12000',
+                    'reach' => '900',
+                    'inline_link_clicks' => '30',
+                    'actions' => [
+                        ['action_type' => 'purchase', 'value' => '1'],
+                        ['action_type' => 'landing_page_view', 'value' => '24'],
+                    ],
+                ]],
+            ]),
         ]);
 
         $this->get('/profile/')->assertOk();
@@ -225,6 +303,7 @@ class ExampleTest extends TestCase
 
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_123', 'name' => 'Meta Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_1', 'spend' => 45000, 'result' => 3, 'landing_page_view' => 90]);
+        $this->assertDatabaseHas('ad_sets', ['external_id' => 'adset_1', 'daily_budget' => 150000, 'spend' => 12000]);
         $this->assertDatabaseHas('t4jam_profiles', ['user_id' => $user->id, 'meta_user_name' => 'Meta Tester', 'last_meta_error' => null]);
     }
 
@@ -249,6 +328,7 @@ class ExampleTest extends TestCase
                 ],
             ]),
             'graph.facebook.com/*/cmp_456/insights?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/cmp_456/adsets?*' => Http::response(['data' => []]),
         ]);
 
         $this->from('/profile/')

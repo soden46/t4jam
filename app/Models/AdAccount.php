@@ -13,4 +13,9 @@ class AdAccount extends Model
     {
         return $this->hasMany(Campaign::class);
     }
+
+    public function adSets(): HasMany
+    {
+        return $this->hasMany(AdSet::class);
+    }
 }

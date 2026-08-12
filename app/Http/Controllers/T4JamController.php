@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Exceptions\MetaAdsException;
 use App\Jobs\SyncMetaAdsProfile;
 use App\Models\AdAccount;
+use App\Models\AdSet;
 use App\Models\AutomationLog;
 use App\Models\AutomationTask;
 use App\Models\Campaign;
@@ -26,14 +27,16 @@ class T4JamController extends Controller
 {
     public function dashboard(): View
     {
-        $accounts = AdAccount::with('campaigns')->get();
+        $accounts = AdAccount::with('campaigns.adSets')->get();
         $selectedAccount = session('selected_ad_account', $accounts->first()?->external_id);
+        $settings = session('dashboard_settings', []);
+        $level = $settings['level_mode'] ?? 'campaign';
 
         return view('dashboard', [
             'title' => 'Report Dashboard',
             'accounts' => $accounts,
             'selectedAccount' => $selectedAccount,
-            'insights' => $this->insightsPayload($selectedAccount),
+            'insights' => $this->insightsPayload($selectedAccount, [], $level),
         ]);
     }
 
@@ -76,7 +79,7 @@ class T4JamController extends Controller
 
     public function adAccounts(): JsonResponse
     {
-        $accounts = AdAccount::with('campaigns')->get();
+        $accounts = AdAccount::with('campaigns.adSets')->get();
         $selected = session('selected_ad_account', $accounts->first()?->external_id);
         $selectedAccount = $accounts->firstWhere('external_id', $selected) ?? $accounts->first();
 
@@ -93,9 +96,11 @@ class T4JamController extends Controller
 
     public function adInsights(Request $request): JsonResponse
     {
+        $settings = session('dashboard_settings', []);
         $adAccount = $request->query('ad_account', session('selected_ad_account'));
+        $level = $request->query('level', $settings['level_mode'] ?? 'campaign');
 
-        return response()->json($this->insightsPayload($adAccount, $this->normalizeCampaignIds(session('selected_campaigns', []))));
+        return response()->json($this->insightsPayload($adAccount, $this->normalizeCampaignIds(session('selected_campaigns', [])), $level));
     }
 
     public function changeAdAccount(Request $request): JsonResponse
@@ -135,7 +140,7 @@ class T4JamController extends Controller
         return response()->json([
             'status' => 200,
             'text' => 'Ad account berhasil direload',
-            'adaccount' => AdAccount::with('campaigns')->get()->map(fn (AdAccount $account) => $this->accountPayload($account))->values(),
+            'adaccount' => AdAccount::with('campaigns.adSets')->get()->map(fn (AdAccount $account) => $this->accountPayload($account))->values(),
         ]);
     }
 
@@ -183,14 +188,27 @@ class T4JamController extends Controller
             return response()->json(['status' => 422, 'text' => 'Pilih ad account yang valid dulu.'], 422);
         }
 
-        $campaign = $account->campaigns()->where('external_id', $request->input('campaign_id'))->first();
+        $level = $request->input('level') === 'adset' ? 'adset' : 'campaign';
+        $adSet = null;
+        $campaign = null;
 
-        if (! $campaign) {
-            return response()->json(['status' => 422, 'text' => 'Pilih campaign dari ad account yang aktif dulu.'], 422);
+        if ($level === 'adset') {
+            $adSet = $account->adSets()->with('campaign')->where('external_id', $request->input('campaign_id'))->first();
+            $campaign = $adSet?->campaign;
+
+            if (! $adSet || ! $campaign) {
+                return response()->json(['status' => 422, 'text' => 'Pilih ad set dari ad account yang aktif dulu.'], 422);
+            }
+        } else {
+            $campaign = $account->campaigns()->where('external_id', $request->input('campaign_id'))->first();
+
+            if (! $campaign) {
+                return response()->json(['status' => 422, 'text' => 'Pilih campaign dari ad account yang aktif dulu.'], 422);
+            }
         }
 
         $budget = (int) $request->input('starting_budget', 100000);
-        $metaResult = $this->pushMetaBudget($campaign, $budget, $metaSync);
+        $metaResult = $this->pushMetaBudget($adSet ?? $campaign, $budget, $metaSync);
 
         if (! $metaResult['ok']) {
             return response()->json(['status' => 422, 'text' => $metaResult['text']], 422);
@@ -200,14 +218,16 @@ class T4JamController extends Controller
             'id' => (string) str()->uuid(),
             'ad_account_id' => $account->id,
             'campaign_id' => $campaign->id,
+            'ad_set_id' => $adSet?->id,
             'campaign_external_id' => $campaign->external_id,
-            'campaign_name' => $campaign->name,
+            'ad_set_external_id' => $adSet?->external_id,
+            'campaign_name' => $adSet?->name ?? $campaign->name,
             'ad_account_name' => $account->name,
             'current_budget' => $budget,
             'current_spend' => 0,
             'current_result' => 0,
             'is_active' => true,
-            'level' => 'campaign',
+            'level' => $level,
             'last_log' => 'Automation budget berhasil dibuat'.$metaResult['log'],
             'last_checked_at' => now(),
         ]);
@@ -222,9 +242,12 @@ class T4JamController extends Controller
 
     public function updateAutomationTask(Request $request, MetaAdsSyncService $metaSync): JsonResponse
     {
-        $task = AutomationTask::with('campaign')->findOrFail($request->input('automation_id'));
+        $task = AutomationTask::with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
         $budget = (int) $request->input('starting_budget', $task->current_budget);
-        $metaResult = $this->pushMetaBudget($task->campaign ?? $task->campaign_external_id, $budget, $metaSync);
+        $target = $task->level === 'adset'
+            ? ($task->adSet ?? $task->ad_set_external_id)
+            : ($task->campaign ?? $task->campaign_external_id);
+        $metaResult = $this->pushMetaBudget($target, $budget, $metaSync);
 
         if (! $metaResult['ok']) {
             return response()->json(['status' => 422, 'text' => $metaResult['text']], 422);
@@ -247,7 +270,7 @@ class T4JamController extends Controller
 
     public function updateStatusAutomation(Request $request, MetaAdsSyncService $metaSync): JsonResponse
     {
-        $task = AutomationTask::findOrFail($request->input('automation_id'));
+        $task = AutomationTask::with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
         $isActive = $request->input('status', 'true') === 'true';
         $metaLog = $this->pushMetaStatus($task, $isActive, $metaSync);
 
@@ -286,8 +309,11 @@ class T4JamController extends Controller
 
     public function turunBudget(Request $request, MetaAdsSyncService $metaSync): JsonResponse
     {
-        $task = AutomationTask::with('campaign')->findOrFail($request->input('automation_id'));
-        $metaResult = $this->pushMetaBudget($task->campaign ?? $task->campaign_external_id, (int) $task->starting_budget, $metaSync);
+        $task = AutomationTask::with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
+        $target = $task->level === 'adset'
+            ? ($task->adSet ?? $task->ad_set_external_id)
+            : ($task->campaign ?? $task->campaign_external_id);
+        $metaResult = $this->pushMetaBudget($target, (int) $task->starting_budget, $metaSync);
 
         if (! $metaResult['ok']) {
             return response()->json(['status' => 422, 'text' => $metaResult['text']], 422);
@@ -438,6 +464,7 @@ class T4JamController extends Controller
             'name' => $account->name,
             'currency' => $account->currency,
             'campaigns' => ['data' => $account->campaigns->map(fn (Campaign $campaign) => $this->campaignPayload($campaign))->values()],
+            'adsets' => ['data' => $account->adSets->map(fn (AdSet $adSet) => $this->adSetPayload($adSet))->values()],
         ];
     }
 
@@ -450,6 +477,23 @@ class T4JamController extends Controller
             'status' => $campaign->status,
             'budget_type' => $campaign->budget_type,
             'ad_id' => $campaign->adAccount?->external_id,
+            'level' => 'campaign',
+            'adsets' => ['data' => $campaign->adSets->map(fn (AdSet $adSet) => $this->adSetPayload($adSet))->values()],
+        ];
+    }
+
+    private function adSetPayload(AdSet $adSet): array
+    {
+        return [
+            'daily_budget' => (string) $adSet->daily_budget,
+            'id' => $adSet->external_id,
+            'name' => $adSet->name,
+            'status' => $adSet->status,
+            'budget_type' => 'adset',
+            'ad_id' => $adSet->adAccount?->external_id,
+            'campaign_id' => $adSet->campaign?->external_id,
+            'campaign_name' => $adSet->campaign?->name,
+            'level' => 'adset',
         ];
     }
 
@@ -459,7 +503,9 @@ class T4JamController extends Controller
 
         return [
             'id' => $task->id,
-            'campaign_id' => $task->campaign_external_id,
+            'campaign_id' => $task->level === 'adset' ? $task->ad_set_external_id : $task->campaign_external_id,
+            'parent_campaign_id' => $task->campaign_external_id,
+            'adset_id' => $task->ad_set_external_id,
             'current_budget' => $task->current_budget,
             'current_spend' => $task->current_spend,
             'current_cpr' => $result > 0 ? round($task->current_spend / $result) : $task->current_spend,
@@ -492,33 +538,14 @@ class T4JamController extends Controller
         ];
     }
 
-    private function insightsPayload(?string $adAccountExternalId = null, array $selectedCampaigns = []): array
+    private function insightsPayload(?string $adAccountExternalId = null, array $selectedCampaigns = [], string $level = 'campaign'): array
     {
-        $rows = Campaign::query()
+        $query = $level === 'adset' ? AdSet::query() : Campaign::query();
+        $rows = $query
             ->when($adAccountExternalId, fn ($query) => $query->whereHas('adAccount', fn ($account) => $account->where('external_id', $adAccountExternalId)))
             ->when($selectedCampaigns !== [], fn ($query) => $query->whereIn('external_id', $selectedCampaigns))
             ->get()
-            ->map(function (Campaign $campaign) {
-                $result = max(0, $campaign->result);
-                $cpr = $result > 0 ? round($campaign->spend / $result) : $campaign->spend;
-
-                return [
-                    'campaign_id' => $campaign->external_id,
-                    'campaign_name' => $campaign->name,
-                    'budget' => $campaign->daily_budget,
-                    'spend' => $campaign->spend,
-                    'reach' => $campaign->reach,
-                    'hasil' => $campaign->result,
-                    'cpr' => $cpr,
-                    'link_click' => $campaign->link_click,
-                    'landing_page_view' => $campaign->landing_page_view,
-                    'klik_landas' => $campaign->link_click > 0 ? round(($campaign->landing_page_view / $campaign->link_click) * 100, 1) : 0,
-                    'uang_jangkauan' => $campaign->reach > 0 ? round($campaign->spend / $campaign->reach, 1) : 0,
-                    'uang_klik' => $campaign->link_click > 0 ? round($campaign->spend / $campaign->link_click, 1) : 0,
-                    'landas_hasil' => $result > 0 ? round($campaign->landing_page_view / $result, 1) : 0,
-                    'cpr_10' => round($cpr * 1.1),
-                ];
-            });
+            ->map(fn (Campaign|AdSet $item) => $this->insightRow($item, $level));
 
         $sum = fn (string $key) => $rows->sum($key);
         $results = max(1, $sum('hasil'));
@@ -537,6 +564,31 @@ class T4JamController extends Controller
                 $this->metric('Uang Jangkauan', 'currency', 'uang_jangkauan', round($sum('spend') / max(1, $sum('reach'))), 5),
                 $this->metric('Landas Hasil', 'number', 'landas_hasil', round($sum('landing_page_view') / $results, 1)),
             ],
+        ];
+    }
+
+    private function insightRow(Campaign|AdSet $item, string $level): array
+    {
+        $result = max(0, $item->result);
+        $cpr = $result > 0 ? round($item->spend / $result) : $item->spend;
+
+        return [
+            'campaign_id' => $item->external_id,
+            'campaign_name' => $item->name,
+            'parent_campaign_id' => $item instanceof AdSet ? $item->campaign?->external_id : $item->external_id,
+            'level' => $level,
+            'budget' => $item->daily_budget,
+            'spend' => $item->spend,
+            'reach' => $item->reach,
+            'hasil' => $item->result,
+            'cpr' => $cpr,
+            'link_click' => $item->link_click,
+            'landing_page_view' => $item->landing_page_view,
+            'klik_landas' => $item->link_click > 0 ? round(($item->landing_page_view / $item->link_click) * 100, 1) : 0,
+            'uang_jangkauan' => $item->reach > 0 ? round($item->spend / $item->reach, 1) : 0,
+            'uang_klik' => $item->link_click > 0 ? round($item->spend / $item->link_click, 1) : 0,
+            'landas_hasil' => $result > 0 ? round($item->landing_page_view / $result, 1) : 0,
+            'cpr_10' => round($cpr * 1.1),
         ];
     }
 
@@ -609,15 +661,15 @@ class T4JamController extends Controller
         return T4JamProfile::firstOrCreate(['user_id' => Auth::id()]);
     }
 
-    private function pushMetaBudget(Campaign|string|null $campaign, int $budget, MetaAdsSyncService $metaSync): array
+    private function pushMetaBudget(Campaign|AdSet|string|null $target, int $budget, MetaAdsSyncService $metaSync): array
     {
-        $campaignId = $campaign instanceof Campaign ? $campaign->external_id : $campaign;
+        $targetId = $target instanceof Campaign || $target instanceof AdSet ? $target->external_id : $target;
 
-        if (! $campaignId) {
+        if (! $targetId) {
             return [
                 'ok' => false,
-                'log' => ' (Meta gagal: campaign belum valid)',
-                'text' => 'Campaign belum valid untuk update budget Meta.',
+                'log' => ' (Meta gagal: target belum valid)',
+                'text' => 'Campaign atau ad set belum valid untuk update budget Meta.',
             ];
         }
 
@@ -630,10 +682,17 @@ class T4JamController extends Controller
         }
 
         try {
-            $metaSync->client($this->currentProfile())->updateCampaignBudget($campaignId, $budget);
+            $client = $metaSync->client($this->currentProfile());
 
-            if ($campaign instanceof Campaign) {
-                $campaign->update(['daily_budget' => $budget]);
+            if ($target instanceof AdSet) {
+                $client->updateAdSetBudget($targetId, $budget);
+                $target->update(['daily_budget' => $budget]);
+            } else {
+                $client->updateCampaignBudget($targetId, $budget);
+
+                if ($target instanceof Campaign) {
+                    $target->update(['daily_budget' => $budget]);
+                }
             }
 
             return [
@@ -642,7 +701,7 @@ class T4JamController extends Controller
                 'text' => 'Budget Meta berhasil diupdate.',
             ];
         } catch (MetaAdsException $exception) {
-            $this->reportMetaBudgetFailure($exception, $campaignId, $budget);
+            $this->reportMetaBudgetFailure($exception, $targetId, $budget);
 
             return [
                 'ok' => false,
@@ -659,7 +718,13 @@ class T4JamController extends Controller
         }
 
         try {
-            $metaSync->client($this->currentProfile())->updateCampaignStatus($task->campaign_external_id, $active);
+            $client = $metaSync->client($this->currentProfile());
+
+            if ($task->level === 'adset' && $task->ad_set_external_id) {
+                $client->updateAdSetStatus($task->ad_set_external_id, $active);
+            } else {
+                $client->updateCampaignStatus($task->campaign_external_id, $active);
+            }
 
             return ' (Meta updated)';
         } catch (MetaAdsException $exception) {

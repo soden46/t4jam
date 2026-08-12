@@ -8,9 +8,7 @@ use Illuminate\Support\Facades\Http;
 
 class MetaAdsClient
 {
-    public function __construct(private readonly string $accessToken)
-    {
-    }
+    public function __construct(private readonly string $accessToken) {}
 
     public function validateToken(): array
     {
@@ -45,14 +43,44 @@ class MetaAdsClient
         return $response['data'][0] ?? [];
     }
 
+    public function adSets(string $campaignId): array
+    {
+        return $this->paginate("/{$campaignId}/adsets", [
+            'fields' => 'id,name,status,effective_status,daily_budget',
+            'limit' => 100,
+        ]);
+    }
+
+    public function adSetInsights(string $adSetId, string $datePreset = 'today'): array
+    {
+        $response = $this->get("/{$adSetId}/insights", [
+            'fields' => 'spend,reach,actions,inline_link_clicks',
+            'date_preset' => $datePreset,
+            'level' => 'adset',
+            'limit' => 1,
+        ]);
+
+        return $response['data'][0] ?? [];
+    }
+
     public function updateCampaignBudget(string $campaignId, int $dailyBudget): array
     {
         return $this->post("/{$campaignId}", ['daily_budget' => $dailyBudget]);
     }
 
+    public function updateAdSetBudget(string $adSetId, int $dailyBudget): array
+    {
+        return $this->post("/{$adSetId}", ['daily_budget' => $dailyBudget]);
+    }
+
     public function updateCampaignStatus(string $campaignId, bool $active): array
     {
         return $this->post("/{$campaignId}", ['status' => $active ? 'ACTIVE' : 'PAUSED']);
+    }
+
+    public function updateAdSetStatus(string $adSetId, bool $active): array
+    {
+        return $this->post("/{$adSetId}", ['status' => $active ? 'ACTIVE' : 'PAUSED']);
     }
 
     public function createCampaign(string $adAccountId, array $payload): array
@@ -100,7 +128,6 @@ class MetaAdsClient
 
         return $response->json('access_token') ?? $shortLivedToken;
     }
-
 
     private function paginate(string $path, array $query): array
     {

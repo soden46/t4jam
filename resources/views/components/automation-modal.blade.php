@@ -6,6 +6,7 @@
             <input type="hidden" name="automation_id" id="automation_id">
             <input type="hidden" name="ad_account" id="modal_ad_account">
             <input type="hidden" name="campaign_id" id="modal_campaign_id">
+            <input type="hidden" name="level" id="modal_level" value="campaign">
             <div class="center">
                 <h1 id="automation-modal-title">Create Automation Budget</h1>
                 <p class="muted">Setting ini akan dipakai BOT T4Jam untuk membaca metrik dan mengatur budget campaign.</p>

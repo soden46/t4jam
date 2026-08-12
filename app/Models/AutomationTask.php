@@ -11,7 +11,9 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'id',
     'ad_account_id',
     'campaign_id',
+    'ad_set_id',
     'campaign_external_id',
+    'ad_set_external_id',
     'campaign_name',
     'ad_account_name',
     'level',
@@ -61,6 +63,11 @@ class AutomationTask extends Model
     public function campaign(): BelongsTo
     {
         return $this->belongsTo(Campaign::class);
+    }
+
+    public function adSet(): BelongsTo
+    {
+        return $this->belongsTo(AdSet::class);
     }
 
     public function logs(): HasMany

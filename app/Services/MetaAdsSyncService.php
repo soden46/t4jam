@@ -2,7 +2,9 @@
 
 namespace App\Services;
 
+use App\Exceptions\MetaAdsException;
 use App\Models\AdAccount;
+use App\Models\AdSet;
 use App\Models\Campaign;
 use App\Models\T4JamProfile;
 use Illuminate\Support\Facades\DB;
@@ -15,7 +17,7 @@ class MetaAdsSyncService
         $metaUser = $client->validateToken();
         $accounts = $client->adAccounts();
         $campaignsByAccount = $this->campaignsByAccount($client, $accounts);
-        $counts = ['accounts' => 0, 'campaigns' => 0, 'insights' => 0];
+        $counts = ['accounts' => 0, 'campaigns' => 0, 'adsets' => 0, 'insights' => 0];
 
         DB::transaction(function () use ($profile, $metaUser, $accounts, $campaignsByAccount, &$counts): void {
             $profile->update([
@@ -59,6 +61,27 @@ class MetaAdsSyncService
                         $campaign->update($this->insightPayload($insights));
                         $counts['insights']++;
                     }
+
+                    foreach ($campaignData['adsets'] ?? [] as $adSetData) {
+                        $adSet = AdSet::updateOrCreate(
+                            ['external_id' => $adSetData['id']],
+                            [
+                                'ad_account_id' => $account->id,
+                                'campaign_id' => $campaign->id,
+                                'name' => $adSetData['name'] ?? $adSetData['id'],
+                                'status' => $adSetData['status'] ?? $adSetData['effective_status'] ?? 'UNKNOWN',
+                                'effective_status' => $adSetData['effective_status'] ?? null,
+                                'daily_budget' => (int) ($adSetData['daily_budget'] ?? 0),
+                            ],
+                        );
+                        $counts['adsets']++;
+
+                        $adSetInsights = $adSetData['insights'];
+                        if ($adSetInsights) {
+                            $adSet->update($this->insightPayload($adSetInsights));
+                            $counts['insights']++;
+                        }
+                    }
                 }
             }
         });
@@ -69,7 +92,7 @@ class MetaAdsSyncService
     public function client(T4JamProfile $profile): MetaAdsClient
     {
         if (! $profile->access_token) {
-            throw new \App\Exceptions\MetaAdsException('Access token Meta belum diisi.');
+            throw new MetaAdsException('Access token Meta belum diisi.');
         }
 
         return new MetaAdsClient($profile->access_token);
@@ -85,6 +108,13 @@ class MetaAdsSyncService
 
             foreach ($client->campaigns($accountId) as $campaignData) {
                 $campaignData['insights'] = $client->campaignInsights($campaignData['id']);
+                $campaignData['adsets'] = [];
+
+                foreach ($client->adSets($campaignData['id']) as $adSetData) {
+                    $adSetData['insights'] = $client->adSetInsights($adSetData['id']);
+                    $campaignData['adsets'][] = $adSetData;
+                }
+
                 $campaignsByAccount[$accountId][] = $campaignData;
             }
         }
