@@ -27,14 +27,10 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         $user = User::firstOrCreate(
-            ['email' => env('T4JAM_LOCAL_EMAIL', 'demo@t4jam.local')],
+            ['email' => 'admin@t4jam.local'],
             [
-                'name' => env('T4JAM_LOCAL_NAME', 'Cipto Tukino'),
-                'password' => app()->environment('testing')
-                    ? Hash::make('password')
-                    : (env('T4JAM_LOCAL_PASSWORD_HASH')
-                    ? env('T4JAM_LOCAL_PASSWORD_HASH')
-                    : Hash::make('')),
+                'name' => 'T4Jam Admin',
+                'password' => Hash::make('password'),
             ]
         );
 

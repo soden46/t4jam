@@ -6,10 +6,9 @@ use App\Models\User;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\Hash;
+use Illuminate\View\View;
 use Laravel\Socialite\Facades\Socialite;
 use Throwable;
-use Illuminate\View\View;
 
 class AuthController extends Controller
 {
@@ -26,13 +25,6 @@ class AuthController extends Controller
         ]);
 
         if (Auth::attempt($credentials)) {
-            $request->session()->regenerate();
-
-            return redirect()->intended(route('dashboard'));
-        }
-
-        if ($user = $this->localCloneUser($credentials['email'], $credentials['password'])) {
-            Auth::login($user);
             $request->session()->regenerate();
 
             return redirect()->intended(route('dashboard'));
@@ -123,27 +115,6 @@ class AuthController extends Controller
         $request->session()->regenerateToken();
 
         return redirect()->route('login');
-    }
-
-    private function localCloneUser(string $email, string $password): ?User
-    {
-        $cloneEmail = env('T4JAM_LOCAL_EMAIL');
-        $cloneHash = env('T4JAM_LOCAL_PASSWORD_HASH');
-
-        if (! $cloneEmail || ! $cloneHash || strtolower($email) !== strtolower($cloneEmail) || ! Hash::check($password, $cloneHash)) {
-            return null;
-        }
-
-        $user = User::firstOrCreate(
-            ['email' => $cloneEmail],
-            ['name' => env('T4JAM_LOCAL_NAME', 'Cipto Tukino'), 'password' => $password]
-        );
-
-        if (! Hash::check($password, $user->password)) {
-            $user->update(['password' => $password]);
-        }
-
-        return $user;
     }
 
     private function loginGoogleFallback(): RedirectResponse

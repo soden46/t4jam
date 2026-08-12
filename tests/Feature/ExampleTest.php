@@ -40,6 +40,18 @@ class ExampleTest extends TestCase
         $this->getJson('/get-automation-task/?acc=all&level=all&funnel=all')->assertOk()->assertJsonStructure(['data']);
     }
 
+    public function test_seeded_admin_can_login_with_standard_credentials(): void
+    {
+        $this->seed();
+
+        $this->post('/login/', [
+            'email' => 'admin@t4jam.local',
+            'password' => 'password',
+        ])->assertRedirect('/dashboard/');
+
+        $this->assertAuthenticated();
+    }
+
     public function test_create_automation_task_persists_dynamic_data(): void
     {
         $this->seed();

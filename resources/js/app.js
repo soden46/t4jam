@@ -47,6 +47,9 @@ function toast(message, type = 'success') {
         el = document.createElement('div');
         document.body.appendChild(el);
     }
+    el.removeAttribute('style');
+    el.setAttribute('role', type === 'danger' ? 'alert' : 'status');
+    el.setAttribute('aria-live', type === 'danger' ? 'assertive' : 'polite');
     el.className = `toast-lite alert ${type}`;
     el.textContent = message;
     clearTimeout(el._timer);
