@@ -188,19 +188,30 @@ label small { color: var(--muted); font-weight: 500; }
 .alert.danger { background: rgba(241, 65, 108, .15); color: var(--danger); }
 .toast-lite {
     position: fixed;
-    top: calc(72px + 1rem);
-    right: 1rem;
-    z-index: 300;
-    width: min(420px, calc(100vw - 2rem));
-    border: 1px solid rgba(228, 230, 239, .95);
-    background: rgba(255, 255, 255, .96);
-    box-shadow: 0 1rem 2.5rem rgba(7, 20, 55, .16);
-    backdrop-filter: blur(12px);
+    top: 1rem;
+    left: 50%;
+    z-index: 1000;
+    width: min(520px, calc(100vw - 2rem));
+    transform: translateX(-50%);
+    border: 1px solid #dbe3ef;
+    border-left-width: .35rem;
+    background: #ffffff;
+    color: var(--ink);
+    box-shadow: 0 1.25rem 3rem rgba(7, 20, 55, .24);
+    line-height: 1.45;
+    pointer-events: auto;
+    animation: toast-slide-in .18s ease-out;
 }
-.toast-lite.success { border-color: rgba(80, 205, 137, .34); }
-.toast-lite.warning { border-color: rgba(231, 139, 47, .34); }
-.toast-lite.danger { border-color: rgba(241, 65, 108, .34); }
+.toast-lite.success { border-color: #50cd89; background: #f4fff9; color: #0f7a48; }
+.toast-lite.warning { border-color: #e78b2f; background: #fff9ef; color: #9a5513; }
+.toast-lite.danger { border-color: #f1416c; background: #fff5f8; color: #b0123f; }
+.toast-lite.alert { padding: 1rem 1.1rem; }
 .text-danger { color: var(--danger); }
+
+@keyframes toast-slide-in {
+    from { opacity: 0; transform: translate(-50%, -.45rem); }
+    to { opacity: 1; transform: translate(-50%, 0); }
+}
 
 .modal[hidden] { display: none; }
 .modal { position: fixed; inset: 0; background: rgba(7, 20, 55, .45); z-index: 100; display: grid; place-items: center; padding: 1rem; }
@@ -255,7 +266,7 @@ label small { color: var(--muted); font-weight: 500; }
 }
 
 @media (max-width: 520px) {
-    .toast-lite { top: .75rem; right: .75rem; width: calc(100vw - 1.5rem); }
+    .toast-lite { top: .75rem; width: calc(100vw - 1.5rem); }
     .header-actions { gap: .35rem; }
     .utility-btn:not(.compact) { padding: .5rem .6rem; font-size: .82rem; }
     .panel, .card, .page-hero { padding: 1rem; }
