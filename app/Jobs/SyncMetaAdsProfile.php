@@ -38,7 +38,7 @@ class SyncMetaAdsProfile
                 'message' => $exception->getMessage(),
             ]);
 
-            $profile->update(['last_meta_error' => 'Sync Meta Ads gagal. Coba lagi beberapa saat.']);
+            $profile->update(['last_meta_error' => 'Sync Meta Ads gagal ('.$exception::class.')']);
         }
     }
 

@@ -28,6 +28,7 @@
                     @endif
                 @elseif ($profile->last_meta_error)
                     <p class="text-danger">Meta error: {{ $profile->last_meta_error }}</p>
+                    <p class="muted">Terakhir update: {{ $profile->updated_at->timezone('Asia/Jakarta')->format('d M Y H:i') }}</p>
                 @endif
                 @if (session('status'))
                     <p class="text-success">{{ session('status') }}</p>
