@@ -443,7 +443,7 @@ class T4JamController extends Controller
         return back()->with('status', 'Access token berhasil disimpan. Klik tombol Sync Meta Ads untuk menyinkronkan data.');
     }
 
-    public function syncMetaAds(): RedirectResponse
+    public function syncMetaAds(MetaAdsSyncService $metaSync): RedirectResponse
     {
         $profile = $this->currentProfile();
 
@@ -451,10 +451,14 @@ class T4JamController extends Controller
             return back()->withErrors(['meta' => 'Access token Meta belum diisi.']);
         }
 
-        $profile->update(['last_meta_error' => null]);
-        SyncMetaAdsProfile::dispatchAfterResponse($profile->id);
+        try {
+            $profile->update(['last_meta_error' => null]);
+            $metaSync->sync($profile);
 
-        return back()->with('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
+            return back()->with('status', 'Sync Meta Ads berhasil. Data terbaru sudah ditampilkan.');
+        } catch (MetaAdsException $exception) {
+            return back()->withErrors(['meta' => $exception->getMessage()]);
+        }
     }
 
     private function automationPayload(Request $request): array

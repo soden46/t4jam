@@ -11,6 +11,7 @@ use App\Models\T4JamProfile;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Tests\Feature\TestDataSeeder;
 use Tests\TestCase;
 
 class ExampleTest extends TestCase
@@ -26,7 +27,7 @@ class ExampleTest extends TestCase
 
     public function test_authenticated_user_can_open_clone_pages_and_api(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
 
         $this->actingAs($user);
@@ -42,7 +43,7 @@ class ExampleTest extends TestCase
 
     public function test_seeded_admin_can_login_with_standard_credentials(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
 
         $this->post('/login/', [
             'email' => 'admin@t4jam.local',
@@ -54,7 +55,7 @@ class ExampleTest extends TestCase
 
     public function test_create_automation_task_persists_dynamic_data(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
         $this->actingAs($user);
@@ -87,7 +88,7 @@ class ExampleTest extends TestCase
 
     public function test_dashboard_campaign_data_is_scoped_to_selected_ad_account_and_campaigns(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
 
@@ -121,7 +122,7 @@ class ExampleTest extends TestCase
 
     public function test_dashboard_adset_level_returns_adsets_for_selected_ad_account(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
 
@@ -140,7 +141,7 @@ class ExampleTest extends TestCase
 
     public function test_create_automation_requires_campaign_from_selected_ad_account(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
 
@@ -156,7 +157,7 @@ class ExampleTest extends TestCase
 
     public function test_update_automation_task_pushes_budget_to_meta_campaign(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
         $this->actingAs($user);
@@ -189,7 +190,7 @@ class ExampleTest extends TestCase
 
     public function test_update_automation_task_pushes_budget_to_meta_adset(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
         $this->actingAs($user);
@@ -231,7 +232,7 @@ class ExampleTest extends TestCase
 
     public function test_budget_update_fails_clearly_when_meta_write_mode_is_disabled(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => false]);
         $user = User::firstOrFail();
         $this->actingAs($user);
@@ -259,7 +260,7 @@ class ExampleTest extends TestCase
 
     public function test_meta_ads_sync_persists_accounts_campaigns_and_insights(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
 
@@ -315,7 +316,7 @@ class ExampleTest extends TestCase
 
         $this->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
+            ->assertSessionHas('status', 'Sync Meta Ads berhasil. Data terbaru sudah ditampilkan.');
 
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_123', 'name' => 'Meta Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_1', 'spend' => 45000, 'result' => 3, 'landing_page_view' => 90]);
@@ -325,7 +326,7 @@ class ExampleTest extends TestCase
 
     public function test_manual_meta_ads_sync_redirects_while_sync_runs_after_response(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
 
@@ -350,7 +351,7 @@ class ExampleTest extends TestCase
         $this->from('/profile/')
             ->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
+            ->assertSessionHas('status', 'Sync Meta Ads berhasil. Data terbaru sudah ditampilkan.');
 
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_456', 'name' => 'Manual Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_456', 'daily_budget' => 250000]);
@@ -358,7 +359,7 @@ class ExampleTest extends TestCase
 
     public function test_meta_write_status_uses_graph_api_when_enabled(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
         $this->actingAs($user);
@@ -382,7 +383,7 @@ class ExampleTest extends TestCase
 
     public function test_ad_setup_draft_can_be_saved(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
 
@@ -400,7 +401,7 @@ class ExampleTest extends TestCase
 
     public function test_ad_setup_publish_creates_meta_campaign_adset_creative_and_ad(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
         $this->actingAs($user);
@@ -430,7 +431,7 @@ class ExampleTest extends TestCase
 
     public function test_ad_setup_publish_without_write_mode_marks_ready_without_error(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => false]);
         $user = User::firstOrFail();
         $this->actingAs($user);
@@ -450,7 +451,7 @@ class ExampleTest extends TestCase
 
     public function test_ad_setup_publish_failure_stores_user_friendly_error(): void
     {
-        $this->seed();
+        $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
         $this->actingAs($user);
