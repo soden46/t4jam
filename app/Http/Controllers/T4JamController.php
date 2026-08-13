@@ -418,9 +418,7 @@ class T4JamController extends Controller
             return back()->with('status', 'Access token berhasil disimpan.');
         }
 
-        SyncMetaAdsProfile::dispatchAfterResponse($profile->id);
-
-        return back()->with('status', 'Access token berhasil disimpan. Sync Meta Ads sedang diproses.');
+        return back()->with('status', 'Access token berhasil disimpan. Klik tombol Sync Meta Ads untuk menyinkronkan data.');
     }
 
     public function syncMetaAds(): RedirectResponse

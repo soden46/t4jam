@@ -313,6 +313,10 @@ class ExampleTest extends TestCase
             'access_token_app' => 'token',
         ])->assertRedirect('/profile/');
 
+        $this->post('/profile/sync-meta-ads/')
+            ->assertRedirect('/profile/')
+            ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
+
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_123', 'name' => 'Meta Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_1', 'spend' => 45000, 'result' => 3, 'landing_page_view' => 90]);
         $this->assertDatabaseHas('ad_sets', ['external_id' => 'adset_1', 'daily_budget' => 150000, 'spend' => 12000]);
