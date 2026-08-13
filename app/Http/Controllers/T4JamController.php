@@ -208,7 +208,12 @@ class T4JamController extends Controller
             }
         }
 
-        $budget = (int) $request->input('starting_budget', 100000);
+        $budget = max(1000, (int) $request->input('starting_budget', 100000));
+
+        if ($budget < 1000) {
+            return response()->json(['status' => 422, 'text' => 'Budget minimal adalah Rp. 1.000,-.'], 422);
+        }
+
         $metaResult = $this->pushMetaBudget($adSet ?? $campaign, $budget, $metaSync);
 
         if (! $metaResult['ok']) {
@@ -244,7 +249,12 @@ class T4JamController extends Controller
     public function updateAutomationTask(Request $request, MetaAdsSyncService $metaSync): JsonResponse
     {
         $task = AutomationTask::with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
-        $budget = (int) $request->input('starting_budget', $task->current_budget);
+        $budget = max(1000, (int) $request->input('starting_budget', $task->current_budget));
+
+        if ($budget < 1000) {
+            return response()->json(['status' => 422, 'text' => 'Budget minimal adalah Rp. 1.000,-.'], 422);
+        }
+
         $target = $task->level === 'adset'
             ? ($task->adSet ?? $task->ad_set_external_id)
             : ($task->campaign ?? $task->campaign_external_id);
@@ -314,7 +324,13 @@ class T4JamController extends Controller
         $target = $task->level === 'adset'
             ? ($task->adSet ?? $task->ad_set_external_id)
             : ($task->campaign ?? $task->campaign_external_id);
-        $metaResult = $this->pushMetaBudget($target, (int) $task->starting_budget, $metaSync);
+        $budget = max(1000, (int) $task->starting_budget);
+
+        if ($budget < 1000) {
+            return response()->json(['status' => 422, 'text' => 'Budget minimal adalah Rp. 1.000,-.'], 422);
+        }
+
+        $metaResult = $this->pushMetaBudget($target, $budget, $metaSync);
 
         if (! $metaResult['ok']) {
             return response()->json(['status' => 422, 'text' => $metaResult['text']], 422);
@@ -671,6 +687,14 @@ class T4JamController extends Controller
                 'ok' => false,
                 'log' => ' (Meta gagal: target belum valid)',
                 'text' => 'Campaign atau ad set belum valid untuk update budget Meta.',
+            ];
+        }
+
+        if ($budget < 1000) {
+            return [
+                'ok' => false,
+                'log' => ' (Meta gagal: budget terlalu kecil)',
+                'text' => 'Budget minimal adalah Rp. 1.000,-. Tidak bisa dikirim ke Meta.',
             ];
         }
 
