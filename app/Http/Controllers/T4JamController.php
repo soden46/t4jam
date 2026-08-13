@@ -411,6 +411,7 @@ class T4JamController extends Controller
                 'app_id' => $appId,
                 'app_secret' => $appSecret,
                 'access_token' => $accessToken,
+                'last_meta_error' => null,
             ]
         );
 
