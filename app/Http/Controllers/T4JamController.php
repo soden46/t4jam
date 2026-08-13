@@ -131,6 +131,7 @@ class T4JamController extends Controller
 
         if ($profile->access_token) {
             try {
+                $profile->update(['last_meta_error' => null]);
                 $metaSync->sync($profile);
             } catch (MetaAdsException $exception) {
                 return response()->json(['status' => 422, 'text' => $exception->getMessage()], 422);
@@ -430,6 +431,7 @@ class T4JamController extends Controller
             return back()->withErrors(['meta' => 'Access token Meta belum diisi.']);
         }
 
+        $profile->update(['last_meta_error' => null]);
         SyncMetaAdsProfile::dispatchAfterResponse($profile->id);
 
         return back()->with('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
