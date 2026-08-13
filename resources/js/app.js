@@ -438,6 +438,21 @@ function renderProducts(rows) {
 }
 
 function initProfile() {
+    const syncForm = qs('#sync-meta-form');
+    const syncBtn = qs('#sync-meta-btn');
+
+    syncForm?.addEventListener('submit', async () => {
+        syncBtn.disabled = true;
+        syncBtn.textContent = 'Syncing...';
+    });
+
+    if (page() === 'profile') {
+        const hasStatus = !!qs('.alert') || !!qs('.text-success') || !!qs('.text-danger');
+        if (!hasStatus) {
+            setTimeout(() => location.reload(), 5000);
+        }
+    }
+
     qs('#profile-form')?.addEventListener('submit', async (event) => {
         event.preventDefault();
         await request('/update-profile/', { method: 'PATCH', body: formBody(event.target) });

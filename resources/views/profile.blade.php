@@ -22,15 +22,21 @@
             <div>
                 <h3>Input Access Token</h3>
                 @if ($profile->meta_user_name)
-                    <p>Terhubung sebagai {{ $profile->meta_user_name }}{{ $profile->last_meta_sync_at ? ' - Sync '.$profile->last_meta_sync_at->timezone('Asia/Jakarta')->format('d M Y H:i') : '' }}</p>
+                    <p>Terhubung sebagai {{ $profile->meta_user_name }}</p>
+                    @if ($profile->last_meta_sync_at)
+                        <p class="muted">Terakhir sync: {{ $profile->last_meta_sync_at->timezone('Asia/Jakarta')->format('d M Y H:i') }}</p>
+                    @endif
                 @elseif ($profile->last_meta_error)
                     <p class="text-danger">Meta error: {{ $profile->last_meta_error }}</p>
                 @endif
+                @if (session('status'))
+                    <p class="text-success">{{ session('status') }}</p>
+                @endif
             </div>
             @if ($profile->access_token)
-                <form method="POST" action="{{ route('profile.sync-meta') }}">
+                <form method="POST" action="{{ route('profile.sync-meta') }}" id="sync-meta-form">
                     @csrf
-                    <button class="btn light" type="submit">Sync Meta Ads</button>
+                    <button class="btn light" type="submit" id="sync-meta-btn">Sync Meta Ads</button>
                 </form>
             @endif
         </div>
