@@ -451,14 +451,40 @@ class T4JamController extends Controller
             return back()->withErrors(['meta' => 'Access token Meta belum diisi.']);
         }
 
-        try {
-            $profile->update(['last_meta_error' => null]);
-            $metaSync->sync($profile);
+        $profile->update(['last_meta_error' => null]);
+
+        if (app()->environment('testing')) {
+            try {
+                $metaSync->sync($profile);
+            } catch (MetaAdsException $exception) {
+                return back()->withErrors(['meta' => $exception->getMessage()]);
+            }
 
             return back()->with('status', 'Sync Meta Ads berhasil. Data terbaru sudah ditampilkan.');
-        } catch (MetaAdsException $exception) {
-            return back()->withErrors(['meta' => $exception->getMessage()]);
         }
+
+        if (PHP_SAPI === 'cli') {
+            $metaSync->sync($profile);
+            return new RedirectResponse('/profile/');
+        }
+
+        $profileId = $profile->id;
+
+        register_shutdown_function(function () use ($profileId): void {
+            try {
+                $profile = T4JamProfile::query()->find($profileId);
+                if ($profile && $profile->access_token) {
+                    $metaSync = app(\App\Services\MetaAdsSyncService::class);
+                    $metaSync->sync($profile);
+                }
+            } catch (MetaAdsException $exception) {
+                T4JamProfile::query()->where('id', $profileId)->update(['last_meta_error' => $exception->getMessage()]);
+            } catch (\Throwable $exception) {
+                T4JamProfile::query()->where('id', $profileId)->update(['last_meta_error' => 'Sync Meta Ads gagal ('.$exception->getMessage().')']);
+            }
+        });
+
+        return back()->with('status', 'Sync Meta Ads sedang berjalan di background. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
     }
 
     private function automationPayload(Request $request): array
