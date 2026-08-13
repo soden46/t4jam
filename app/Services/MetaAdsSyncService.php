@@ -7,87 +7,49 @@ use App\Models\AdAccount;
 use App\Models\AdSet;
 use App\Models\Campaign;
 use App\Models\T4JamProfile;
-use Illuminate\Support\Facades\DB;
 
 class MetaAdsSyncService
 {
     private const RATE_LIMIT_ERROR_CODES = [4, 17, 613, 80000, 80001, 80002, 80003, 80004];
-    private const MIN_DELAY_MICROSECONDS = 200000;
 
     public function sync(T4JamProfile $profile): array
     {
         $client = $this->client($profile);
-        $metaUser = $client->validateToken();
-        $accounts = $client->adAccounts();
-        $campaignsByAccount = $this->campaignsByAccount($client, $accounts);
         $counts = ['accounts' => 0, 'campaigns' => 0, 'adsets' => 0, 'insights' => 0];
 
-        DB::transaction(function () use ($profile, $metaUser, $accounts, $campaignsByAccount, &$counts): void {
-            $profile->update([
-                'meta_user_id' => $metaUser['id'] ?? null,
-                'meta_user_name' => $metaUser['name'] ?? null,
-                'meta_connected_at' => now(),
-                'last_meta_sync_at' => now(),
-                'last_meta_error' => null,
-            ]);
+        try {
+            $metaUser = $client->validateToken();
+            $accounts = $client->adAccounts();
+        } catch (MetaAdsException $exception) {
+            $this->failSync($profile, $exception);
+        }
 
-            foreach ($accounts as $accountData) {
-                $account = AdAccount::updateOrCreate(
-                    ['external_id' => $accountData['id']],
-                    [
-                        'account_id' => (string) ($accountData['account_id'] ?? str_replace('act_', '', $accountData['id'])),
-                        'name' => $accountData['name'] ?? $accountData['id'],
-                        'currency' => $accountData['currency'] ?? 'IDR',
-                        'account_status' => $accountData['account_status'] ?? null,
-                    ],
-                );
-                $counts['accounts']++;
+        $profile->update([
+            'meta_user_id' => $metaUser['id'] ?? null,
+            'meta_user_name' => $metaUser['name'] ?? null,
+            'meta_connected_at' => now(),
+            'last_meta_sync_at' => now(),
+            'last_meta_error' => null,
+        ]);
 
-                foreach ($campaignsByAccount[$accountData['id']] ?? [] as $campaignData) {
-                    $campaign = Campaign::updateOrCreate(
-                        ['external_id' => $campaignData['id']],
-                        [
-                            'ad_account_id' => $account->id,
-                            'name' => $campaignData['name'] ?? $campaignData['id'],
-                            'status' => $campaignData['status'] ?? $campaignData['effective_status'] ?? 'UNKNOWN',
-                            'effective_status' => $campaignData['effective_status'] ?? null,
-                            'budget_type' => 'campaign',
-                            'level' => 'campaign',
-                            'objective' => $campaignData['objective'] ?? null,
-                            'daily_budget' => (int) ($campaignData['daily_budget'] ?? 0),
-                        ],
-                    );
-                    $counts['campaigns']++;
+        foreach ($accounts as $accountData) {
+            $account = $this->upsertAccount($accountData);
+            $counts['accounts']++;
 
-                    $insights = $campaignData['insights'];
-                    if ($insights) {
-                        $campaign->update($this->insightPayload($insights));
-                        $counts['insights']++;
-                    }
-
-                    foreach ($campaignData['adsets'] ?? [] as $adSetData) {
-                        $adSet = AdSet::updateOrCreate(
-                            ['external_id' => $adSetData['id']],
-                            [
-                                'ad_account_id' => $account->id,
-                                'campaign_id' => $campaign->id,
-                                'name' => $adSetData['name'] ?? $adSetData['id'],
-                                'status' => $adSetData['status'] ?? $adSetData['effective_status'] ?? 'UNKNOWN',
-                                'effective_status' => $adSetData['effective_status'] ?? null,
-                                'daily_budget' => (int) ($adSetData['daily_budget'] ?? 0),
-                            ],
-                        );
-                        $counts['adsets']++;
-
-                        $adSetInsights = $adSetData['insights'];
-                        if ($adSetInsights) {
-                            $adSet->update($this->insightPayload($adSetInsights));
-                            $counts['insights']++;
-                        }
-                    }
-                }
+            try {
+                $campaigns = $client->campaigns($accountData['id']);
+            } catch (MetaAdsException $exception) {
+                $this->failSync($profile, $exception);
             }
-        });
+
+            foreach ($campaigns as $campaignData) {
+                $campaign = $this->upsertCampaign($account, $campaignData);
+                $counts['campaigns']++;
+
+                $this->syncCampaignInsights($profile, $client, $campaign, $counts);
+                $this->syncAdSets($profile, $client, $account, $campaign, $counts);
+            }
+        }
 
         return $counts;
     }
@@ -101,28 +63,83 @@ class MetaAdsSyncService
         return new MetaAdsClient($profile->access_token);
     }
 
-    private function campaignsByAccount(MetaAdsClient $client, array $accounts): array
+    private function upsertAccount(array $accountData): AdAccount
     {
-        $campaignsByAccount = [];
+        return AdAccount::updateOrCreate(
+            ['external_id' => $accountData['id']],
+            [
+                'account_id' => (string) ($accountData['account_id'] ?? str_replace('act_', '', $accountData['id'])),
+                'name' => $accountData['name'] ?? $accountData['id'],
+                'currency' => $accountData['currency'] ?? 'IDR',
+                'account_status' => $accountData['account_status'] ?? null,
+            ],
+        );
+    }
 
-        foreach ($accounts as $accountData) {
-            $accountId = $accountData['id'];
-            $campaignsByAccount[$accountId] = [];
+    private function upsertCampaign(AdAccount $account, array $campaignData): Campaign
+    {
+        return Campaign::updateOrCreate(
+            ['external_id' => $campaignData['id']],
+            [
+                'ad_account_id' => $account->id,
+                'name' => $campaignData['name'] ?? $campaignData['id'],
+                'status' => $campaignData['status'] ?? $campaignData['effective_status'] ?? 'UNKNOWN',
+                'effective_status' => $campaignData['effective_status'] ?? null,
+                'budget_type' => 'campaign',
+                'level' => 'campaign',
+                'objective' => $campaignData['objective'] ?? null,
+                'daily_budget' => (int) ($campaignData['daily_budget'] ?? 0),
+            ],
+        );
+    }
 
-            foreach ($client->campaigns($accountId) as $campaignData) {
-                $campaignData['insights'] = $client->campaignInsights($campaignData['id']);
-                $campaignData['adsets'] = [];
-
-                foreach ($client->adSets($campaignData['id']) as $adSetData) {
-                    $adSetData['insights'] = $client->adSetInsights($adSetData['id']);
-                    $campaignData['adsets'][] = $adSetData;
-                }
-
-                $campaignsByAccount[$accountId][] = $campaignData;
-            }
+    private function syncCampaignInsights(T4JamProfile $profile, MetaAdsClient $client, Campaign $campaign, array &$counts): void
+    {
+        try {
+            $insights = $client->campaignInsights($campaign->external_id);
+        } catch (MetaAdsException $exception) {
+            $this->failSync($profile, $exception);
         }
 
-        return $campaignsByAccount;
+        if ($insights) {
+            $campaign->update($this->insightPayload($insights));
+            $counts['insights']++;
+        }
+    }
+
+    private function syncAdSets(T4JamProfile $profile, MetaAdsClient $client, AdAccount $account, Campaign $campaign, array &$counts): void
+    {
+        try {
+            $adSets = $client->adSets($campaign->external_id);
+        } catch (MetaAdsException $exception) {
+            $this->failSync($profile, $exception);
+        }
+
+        foreach ($adSets as $adSetData) {
+            $adSet = AdSet::updateOrCreate(
+                ['external_id' => $adSetData['id']],
+                [
+                    'ad_account_id' => $account->id,
+                    'campaign_id' => $campaign->id,
+                    'name' => $adSetData['name'] ?? $adSetData['id'],
+                    'status' => $adSetData['status'] ?? $adSetData['effective_status'] ?? 'UNKNOWN',
+                    'effective_status' => $adSetData['effective_status'] ?? null,
+                    'daily_budget' => (int) ($adSetData['daily_budget'] ?? 0),
+                ],
+            );
+            $counts['adsets']++;
+
+            try {
+                $adSetInsights = $client->adSetInsights($adSet->external_id);
+            } catch (MetaAdsException $exception) {
+                $this->failSync($profile, $exception);
+            }
+
+            if ($adSetInsights) {
+                $adSet->update($this->insightPayload($adSetInsights));
+                $counts['insights']++;
+            }
+        }
     }
 
     private function insightPayload(array $insights): array
@@ -145,5 +162,32 @@ class MetaAdsSyncService
         return (int) $actions
             ->whereIn('action_type', $types)
             ->sum(fn (array $action) => (int) ($action['value'] ?? 0));
+    }
+
+    private function failSync(T4JamProfile $profile, MetaAdsException $exception): never
+    {
+        $message = $this->syncErrorMessage($exception);
+        $profile->update(['last_meta_error' => $message]);
+
+        throw new MetaAdsException(
+            $message,
+            $exception->httpStatus,
+            $exception->metaCode,
+            $exception->metaType,
+        );
+    }
+
+    private function syncErrorMessage(MetaAdsException $exception): string
+    {
+        if ($this->isRateLimitError($exception)) {
+            return 'Meta rate limit tercapai. Data yang sudah terbaca tetap disimpan. Tunggu beberapa menit lalu sync lagi.';
+        }
+
+        return $exception->getMessage();
+    }
+
+    private function isRateLimitError(MetaAdsException $exception): bool
+    {
+        return in_array($exception->metaCode, self::RATE_LIMIT_ERROR_CODES, true);
     }
 }

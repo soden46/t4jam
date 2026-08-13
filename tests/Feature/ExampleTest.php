@@ -357,6 +357,48 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_456', 'daily_budget' => 250000]);
     }
 
+    public function test_meta_ads_sync_keeps_saved_rows_when_insights_hit_rate_limit(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        Http::fake([
+            'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
+            'graph.facebook.com/*/me/adaccounts?*' => Http::response([
+                'data' => [
+                    ['account_id' => '789', 'id' => 'act_789', 'name' => 'Rate Limited Account', 'currency' => 'IDR', 'account_status' => 1],
+                ],
+            ]),
+            'graph.facebook.com/*/act_789/campaigns?*' => Http::response([
+                'data' => [
+                    ['id' => 'cmp_789', 'name' => 'Rate Limited Campaign', 'status' => 'ACTIVE', 'daily_budget' => '300000'],
+                ],
+            ]),
+            'graph.facebook.com/*/cmp_789/insights?*' => Http::response([
+                'error' => [
+                    'message' => 'User request limit reached',
+                    'code' => 17,
+                    'type' => 'OAuthException',
+                ],
+            ], 400),
+        ]);
+
+        $this->from('/profile/')
+            ->post('/profile/sync-meta-ads/')
+            ->assertRedirect('/profile/')
+            ->assertSessionHasErrors(['meta' => 'Meta rate limit tercapai. Data yang sudah terbaca tetap disimpan. Tunggu beberapa menit lalu sync lagi.']);
+
+        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_789', 'name' => 'Rate Limited Account']);
+        $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_789', 'daily_budget' => 300000]);
+        $this->assertDatabaseHas('t4jam_profiles', [
+            'user_id' => $user->id,
+            'last_meta_error' => 'Meta rate limit tercapai. Data yang sudah terbaca tetap disimpan. Tunggu beberapa menit lalu sync lagi.',
+        ]);
+    }
+
     public function test_meta_write_status_uses_graph_api_when_enabled(): void
     {
         $this->seed(TestDataSeeder::class);

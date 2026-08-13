@@ -3,7 +3,6 @@
 namespace App\Http\Controllers;
 
 use App\Exceptions\MetaAdsException;
-use App\Jobs\SyncMetaAdsProfile;
 use App\Models\AdAccount;
 use App\Models\AdSet;
 use App\Models\AutomationLog;
@@ -474,7 +473,7 @@ class T4JamController extends Controller
             try {
                 $profile = T4JamProfile::query()->find($profileId);
                 if ($profile && $profile->access_token) {
-                    $metaSync = app(\App\Services\MetaAdsSyncService::class);
+                    $metaSync = app(MetaAdsSyncService::class);
                     $metaSync->sync($profile);
                 }
             } catch (MetaAdsException $exception) {
