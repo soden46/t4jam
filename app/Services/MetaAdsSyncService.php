@@ -11,6 +11,9 @@ use Illuminate\Support\Facades\DB;
 
 class MetaAdsSyncService
 {
+    private const RATE_LIMIT_ERROR_CODES = [4, 17, 613, 80000, 80001, 80002, 80003, 80004];
+    private const MIN_DELAY_MICROSECONDS = 200000;
+
     public function sync(T4JamProfile $profile): array
     {
         $client = $this->client($profile);

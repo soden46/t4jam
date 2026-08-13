@@ -26,7 +26,11 @@ class SyncMetaAdsProfile
         try {
             $metaSync->sync($profile);
         } catch (MetaAdsException $exception) {
-            $profile->update(['last_meta_error' => $exception->getMessage()]);
+            if ($this->isRateLimitError($exception)) {
+                $this->releaseOnRateLimit($profile, $exception);
+            } else {
+                $profile->update(['last_meta_error' => $exception->getMessage()]);
+            }
         } catch (Throwable $exception) {
             Log::warning('Meta ads sync failed after response', [
                 'profile_id' => $this->profileId,
@@ -36,5 +40,36 @@ class SyncMetaAdsProfile
 
             $profile->update(['last_meta_error' => 'Sync Meta Ads gagal. Coba lagi beberapa saat.']);
         }
+    }
+
+    private function isRateLimitError(MetaAdsException $exception): bool
+    {
+        $metaCode = $exception->metaCode;
+
+        return in_array($metaCode, [4, 17, 613, 80000, 80001, 80002, 80003, 80004], true);
+    }
+
+    private function releaseOnRateLimit(T4JamProfile $profile, MetaAdsException $exception): void
+    {
+        $message = strtolower($exception->getMessage());
+        $retryAfter = match (true) {
+            str_contains($message, 'user request limit') => 60,
+            str_contains($message, 'application request limit') => 120,
+            str_contains($message, 'rate limit') => 60,
+            default => 30,
+        };
+
+        Log::warning('Meta rate limit during sync, releasing job', [
+            'profile_id' => $this->profileId,
+            'meta_code' => $exception->metaCode,
+            'retry_after_seconds' => $retryAfter,
+        ]);
+
+        self::dispatch($this->profileId)
+            ->delay(now()->addSeconds($retryAfter));
+
+        $profile->update([
+            'last_meta_error' => 'Meta rate limit tercapai. Sync akan dicoba otomatis '.$retryAfter.' detik lagi.',
+        ]);
     }
 }

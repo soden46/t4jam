@@ -184,12 +184,54 @@ class MetaAdsClient
     private function throwMetaException(Response $response): never
     {
         $error = $response->json('error') ?? [];
+        $metaCode = $error['code'] ?? null;
+        $metaType = $error['type'] ?? null;
+
+        if ($this->isRateLimitError($metaCode)) {
+            $retryAfter = $this->parseRetryAfter($response);
+            Log::warning('Meta rate limit hit', [
+                'meta_code' => $metaCode,
+                'meta_type' => $metaType,
+                'retry_after_seconds' => $retryAfter,
+            ]);
+        }
 
         throw new MetaAdsException(
             $error['message'] ?? 'Meta Graph API request failed.',
             $response->status(),
-            $error['code'] ?? null,
-            $error['type'] ?? null,
+            $metaCode,
+            $metaType,
         );
+    }
+
+    private function isRateLimitError(?int $metaCode): bool
+    {
+        if ($metaCode === null) {
+            return false;
+        }
+
+        return in_array($metaCode, [4, 17, 613, 80000, 80001, 80002, 80003, 80004], true);
+    }
+
+    private function parseRetryAfter(Response $response): ?int
+    {
+        $retryAfter = $response->header('Retry-After');
+        if ($retryAfter !== null) {
+            return (int) $retryAfter;
+        }
+
+        $businessUsage = $response->header('X-Business-Use-Case-Usage');
+        if ($businessUsage) {
+            $decoded = json_decode($businessUsage, true);
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                foreach ($decoded as $usages) {
+                    if (isset($usages[0]['estimated_time_to_regain_access'])) {
+                        return (int) $usages[0]['estimated_time_to_regain_access'];
+                    }
+                }
+            }
+        }
+
+        return null;
     }
 }

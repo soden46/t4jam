@@ -134,6 +134,10 @@ class T4JamController extends Controller
                 $profile->update(['last_meta_error' => null]);
                 $metaSync->sync($profile);
             } catch (MetaAdsException $exception) {
+                if (in_array($exception->metaCode, [17, 4, 613, 80000, 80001, 80002, 80003, 80004], true)) {
+                    return response()->json(['status' => 422, 'text' => 'Meta rate limit tercapai. Tunggu sebentar lalu coba reload lagi.'], 422);
+                }
+
                 return response()->json(['status' => 422, 'text' => $exception->getMessage()], 422);
             }
         }
@@ -763,6 +767,10 @@ class T4JamController extends Controller
 
         if ($exception->metaCode === 190 || str_contains($message, 'token')) {
             return 'Access token Meta tidak valid atau sudah expired. Silakan simpan ulang access token di Profile.';
+        }
+
+        if (in_array($exception->metaCode, [17, 4, 613, 80000, 80001, 80002, 80003, 80004], true)) {
+            return 'Meta rate limit tercapai. Tunggu sebentar lalu coba lagi.';
         }
 
         if ($exception->httpStatus === 403 || str_contains($message, 'permission')) {

@@ -143,6 +143,10 @@ class AdSetupController extends Controller
             return 'Access token Meta tidak valid atau sudah expired. Silakan simpan ulang access token di Profile.';
         }
 
+        if (in_array($exception->metaCode, [17, 4, 613, 80000, 80001, 80002, 80003, 80004], true)) {
+            return 'Meta rate limit tercapai. Tunggu sebentar lalu coba lagi.';
+        }
+
         if ($exception->httpStatus === 403 || str_contains($message, 'permission')) {
             return 'Akses Meta belum punya izin untuk membuat iklan di ad account ini.';
         }
