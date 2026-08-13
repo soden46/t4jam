@@ -218,6 +218,7 @@
                     @php
                         $badgeClass = match ($setup->status) {
                             'published' => 'active',
+                            'publishing' => 'ready',
                             'ready' => 'ready',
                             'failed' => 'failed',
                             default => 'draft',
@@ -234,7 +235,9 @@
                         </td>
                         <td data-label="Last Error">{{ $setup->last_error ?: '-' }}</td>
                         <td data-label="Action">
-                            @if ($setup->status !== 'published')
+                            @if ($setup->status === 'publishing')
+                                <span class="muted">Queued</span>
+                            @elseif ($setup->status !== 'published')
                                 <form method="POST" action="{{ route('ad-setups.publish', $setup) }}">
                                     @csrf
                                     <button class="btn light-primary" type="submit">Publish</button>

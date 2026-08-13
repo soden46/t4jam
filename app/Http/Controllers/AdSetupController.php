@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Exceptions\MetaAdsException;
+use App\Jobs\PublishMetaAdSetup;
 use App\Models\AdAccount;
 use App\Models\AdSetup;
 use App\Models\T4JamProfile;
@@ -68,8 +69,37 @@ class AdSetupController extends Controller
             return redirect()->route('ad-setups.index')->with('status', 'Draft setup iklan berhasil disimpan.');
         }
 
+        return $this->publishOrQueue($setup, $publisher);
+    }
+
+    public function publish(AdSetup $adSetup, MetaAdSetupPublisher $publisher): RedirectResponse
+    {
+        abort_unless($adSetup->user_id === Auth::id(), 403);
+
+        $adSetup->update(['status' => 'publishing', 'last_error' => null]);
+
+        return $this->publishOrQueue($adSetup, $publisher);
+    }
+
+    private function publishOrQueue(AdSetup $setup, MetaAdSetupPublisher $publisher): RedirectResponse
+    {
         try {
-            $setup = $publisher->publish($setup, T4JamProfile::firstOrCreate(['user_id' => Auth::id()]));
+            $profile = T4JamProfile::firstOrCreate(['user_id' => Auth::id()]);
+
+            if (! config('services.meta.enable_writes')) {
+                $publisher->publish($setup, $profile);
+
+                return redirect()->route('ad-setups.index')->with('warning', 'Setup iklan sudah siap. Publish ke Meta belum dijalankan karena write mode belum aktif.');
+            }
+
+            if (! $profile->access_token) {
+                $message = 'Access token Meta belum diisi. Silakan simpan access token di Profile.';
+                $setup->update(['status' => 'failed', 'last_error' => $message]);
+
+                return redirect()->route('ad-setups.index')->withErrors(['meta' => $message]);
+            }
+
+            PublishMetaAdSetup::dispatch($setup->id, $profile->id)->afterCommit();
         } catch (MetaAdsException $exception) {
             $message = $this->metaErrorMessage($exception);
             $setup->update(['status' => 'failed', 'last_error' => $message]);
@@ -78,32 +108,7 @@ class AdSetupController extends Controller
             return redirect()->route('ad-setups.index')->withErrors(['meta' => $message]);
         }
 
-        if ($setup->status === 'ready') {
-            return redirect()->route('ad-setups.index')->with('warning', 'Setup iklan sudah siap. Publish ke Meta belum dijalankan karena write mode belum aktif.');
-        }
-
-        return redirect()->route('ad-setups.index')->with('status', 'Setup iklan berhasil dipublish ke Meta.');
-    }
-
-    public function publish(AdSetup $adSetup, MetaAdSetupPublisher $publisher): RedirectResponse
-    {
-        abort_unless($adSetup->user_id === Auth::id(), 403);
-
-        try {
-            $adSetup = $publisher->publish($adSetup, T4JamProfile::firstOrCreate(['user_id' => Auth::id()]));
-        } catch (MetaAdsException $exception) {
-            $message = $this->metaErrorMessage($exception);
-            $adSetup->update(['status' => 'failed', 'last_error' => $message]);
-            $this->reportMetaPublishFailure($exception, $adSetup);
-
-            return redirect()->route('ad-setups.index')->withErrors(['meta' => $message]);
-        }
-
-        if ($adSetup->status === 'ready') {
-            return redirect()->route('ad-setups.index')->with('warning', 'Setup iklan sudah siap. Publish ke Meta belum dijalankan karena write mode belum aktif.');
-        }
-
-        return redirect()->route('ad-setups.index')->with('status', 'Setup iklan berhasil dipublish ke Meta.');
+        return redirect()->route('ad-setups.index')->with('status', 'Setup iklan masuk antrean queue. Worker akan publish ke Meta di background.');
     }
 
     private function payload(array $data): array

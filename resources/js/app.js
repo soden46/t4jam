@@ -94,9 +94,19 @@ function bindCheckAll(tableSelector) {
 async function initDashboard() {
     let accounts = await request('/api/get-ad-account/');
     const accountSelect = qs('#ad_account');
+    const reloadBtn = qs('#reload_ad_account');
+    const reloadStatus = qs('#reload_status');
+    const setReloadStatus = (message = '') => {
+        if (reloadStatus) reloadStatus.textContent = message;
+    };
+    const setStat = (selector, value) => {
+        const el = qs(selector);
+        if (el) el.textContent = number(value);
+    };
     const renderAccountSelect = (selectedAccount = null) => {
         accountSelect.innerHTML = accounts.adaccount.map((account) => `<option value="${account.id}">${account.name}</option>`).join('');
         accountSelect.value = selectedAccount || accounts.selected || accounts.adaccount[0]?.id || '';
+        setStat('#ad_account_count', accounts.adaccount.length);
     };
     renderAccountSelect();
 
@@ -123,6 +133,7 @@ async function initDashboard() {
         const insights = await request(`/api/get-ad-insight/?ad_account=${encodeURIComponent(accountSelect.value)}&level=${encodeURIComponent(levelMode())}`);
         renderMetrics(insights.highlight || []);
         renderCampaignTable(insights.summery || []);
+        setStat('#campaign_count', (insights.summery || []).length);
     };
 
     accountSelect.addEventListener('change', async () => {
@@ -130,13 +141,28 @@ async function initDashboard() {
         renderCampaignPicker();
         await loadInsights();
     });
-    qs('#reload_ad_account')?.addEventListener('click', async () => {
-        const response = await request('/api/reload-ad-account/', { method: 'POST', body: formBody({}) });
-        accounts = { ...accounts, adaccount: response.adaccount || accounts.adaccount };
-        renderAccountSelect(accountSelect.value);
-        renderCampaignPicker();
-        await loadInsights();
-        toast('Ad account berhasil direload');
+    reloadBtn?.addEventListener('click', async () => {
+        reloadBtn.disabled = true;
+        reloadBtn.textContent = 'Reloading...';
+        setReloadStatus('Mengirim sync Meta ke queue...');
+
+        try {
+            const selectedBeforeReload = accountSelect.value;
+            const response = await request('/api/reload-ad-account/', { method: 'POST', body: formBody({}) });
+            accounts = { ...accounts, adaccount: response.adaccount || accounts.adaccount };
+            renderAccountSelect(selectedBeforeReload);
+            renderCampaignPicker();
+            await loadInsights();
+            setStat('#ad_account_count', response.ad_account_count ?? accounts.adaccount.length);
+            setReloadStatus(response.text || 'Dashboard direfresh.');
+            toast(response.text || 'Dashboard direfresh');
+        } catch (error) {
+            setReloadStatus(error.message);
+            toast(error.message, 'danger');
+        } finally {
+            reloadBtn.disabled = false;
+            reloadBtn.textContent = 'Reload';
+        }
     });
     qs('#update_campaign')?.addEventListener('click', async () => {
         await request('/api/changed-selected-campaign/', { method: 'POST', body: formBody({ campaigns: selectedCampaigns().join(',') }) });
@@ -271,23 +297,35 @@ function renderAutomationTable(rows) {
     `).join('');
 
     qsa('[data-toggle-task]').forEach((button) => button.addEventListener('click', async () => {
+        const originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = 'queue...';
+
         try {
             const response = await request('/update-status-automation-tasks/', { method: 'POST', body: formBody({ automation_id: button.dataset.toggleTask, status: button.dataset.status }) });
             toast(response.text || 'Status automation berhasil diperbarui');
             await loadAutomationTasks();
         } catch (error) {
             toast(error.message, 'danger');
+            button.disabled = false;
+            button.textContent = originalText;
         }
     }));
     qsa('[data-edit]').forEach((button) => button.addEventListener('click', () => editTask(button.dataset.edit)));
     qsa('[data-history]').forEach((button) => button.addEventListener('click', () => historyTask(button.dataset.history)));
     qsa('[data-budget-down]').forEach((button) => button.addEventListener('click', async () => {
+        const originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Queue...';
+
         try {
             const response = await request('/turun-budget-manual/', { method: 'POST', body: formBody({ automation_id: button.dataset.budgetDown }) });
             toast(response.text || 'Budget berhasil diturunkan manual');
             await loadAutomationTasks();
         } catch (error) {
             toast(error.message, 'danger');
+            button.disabled = false;
+            button.textContent = originalText;
         }
     }));
 }
@@ -340,6 +378,14 @@ function bindAutomationForm(defaultMode) {
     form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const isUpdate = qs('#automation_id').value;
+        const submitLabel = qs('#automation-submit-label');
+        const submit = submitLabel?.closest('button');
+        const originalText = submitLabel?.textContent || '';
+        if (submit) {
+            submit.disabled = true;
+            submitLabel.textContent = 'Queue...';
+        }
+
         try {
             const response = await request(isUpdate ? '/update-automation-tasks/' : '/create-automation-tasks/', { method: 'POST', body: formBody(form) });
             closeModals();
@@ -347,6 +393,11 @@ function bindAutomationForm(defaultMode) {
             if (page() === 'automation') await loadAutomationTasks();
         } catch (error) {
             toast(error.message, 'danger');
+        } finally {
+            if (submit) {
+                submit.disabled = false;
+                submitLabel.textContent = originalText || (isUpdate ? 'Update' : 'Create');
+            }
         }
     });
     if (defaultMode === 'create') qs('#activation-row')?.setAttribute('hidden', 'hidden');

@@ -11,11 +11,11 @@
     </div>
     <div class="hero-stats">
         <div>
-            <strong>{{ $accounts->count() }}</strong>
+            <strong id="ad_account_count">{{ $accounts->count() }}</strong>
             <span>Ad Account</span>
         </div>
         <div>
-            <strong>{{ collect($insights['summery'] ?? [])->count() }}</strong>
+            <strong id="campaign_count">{{ collect($insights['summery'] ?? [])->count() }}</strong>
             <span>Campaign</span>
         </div>
     </div>
@@ -28,6 +28,7 @@
         @endforeach
     </select>
     <button class="btn light" type="button" id="reload_ad_account">Reload</button>
+    <span class="toolbar-status muted" id="reload_status" role="status" aria-live="polite"></span>
 </section>
 
 <section class="panel">

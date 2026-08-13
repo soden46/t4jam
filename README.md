@@ -76,6 +76,21 @@ Flow saat ini:
 
 Sync ini sengaja memakai queue karena request Meta bisa lama dan sering kena rate limit. Jangan jalankan sync panjang langsung dari request web.
 
+## Meta Write Actions
+
+Action yang mengirim perubahan ke Meta juga memakai queue `meta`:
+
+- `Reload` di dashboard memasukkan job sync data Meta.
+- `Sync Meta Ads` di Profile memasukkan job sync data Meta.
+- `Create` dan `Update` automation budget menyimpan data lokal, lalu memasukkan update budget Meta ke queue.
+- Toggle status automation menyimpan status lokal, lalu memasukkan update status Meta ke queue.
+- `Turun` budget menyimpan budget lokal, lalu memasukkan update budget Meta ke queue.
+- `Publish / Prepare Meta` dan tombol `Publish` setup iklan memasukkan publish campaign/ad set/creative/ad ke queue saat write mode aktif.
+
+Tombol yang hanya memfilter, memilih campaign, mencari interest/produk, reset data pilihan, update profile, atau update password tetap berjalan langsung karena tidak melakukan request Meta yang panjang.
+
+Saat `META_ADS_ENABLE_WRITES=false`, automation budget/status tidak dikirim ke Meta dan API memberi error yang jelas. Setup iklan akan masuk status `ready` tanpa publish ke Meta.
+
 ## Queue Worker
 
 Database queue sudah dipakai oleh default project. Jalankan migration dulu:

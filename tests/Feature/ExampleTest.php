@@ -3,6 +3,8 @@
 namespace Tests\Feature;
 
 use App\Jobs\SyncMetaAdsProfile;
+use App\Jobs\PublishMetaAdSetup;
+use App\Jobs\PushMetaAutomationTaskUpdate;
 use App\Models\AdAccount;
 use App\Models\AdSet;
 use App\Models\AdSetup;
@@ -141,6 +143,24 @@ class ExampleTest extends TestCase
         $this->assertSame('adset', collect($insights)->firstWhere('campaign_id', $adSet->external_id)['level']);
     }
 
+    public function test_dashboard_reload_dispatches_meta_sync_queue_job(): void
+    {
+        Queue::fake();
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $this->postJson('/api/reload-ad-account/')
+            ->assertOk()
+            ->assertJsonPath('status', 200)
+            ->assertJsonPath('text', 'Sync Meta Ads masuk antrean queue. Data dashboard akan berubah setelah worker selesai.')
+            ->assertJsonPath('ad_account_count', AdAccount::count());
+
+        Queue::assertPushed(SyncMetaAdsProfile::class, fn (SyncMetaAdsProfile $job) => $job->queue === 'meta');
+    }
+
     public function test_create_automation_requires_campaign_from_selected_ad_account(): void
     {
         $this->seed(TestDataSeeder::class);
@@ -179,7 +199,7 @@ class ExampleTest extends TestCase
             'cpr_cap' => 7000,
             'period' => 10,
         ])->assertOk()
-            ->assertJsonPath('text', 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.');
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Update budget Meta masuk antrean queue.');
 
         $task->refresh();
 
@@ -224,7 +244,7 @@ class ExampleTest extends TestCase
             'cpr_cap' => 7000,
             'period' => 10,
         ])->assertOk()
-            ->assertJsonPath('text', 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.');
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Update budget Meta masuk antrean queue.');
 
         $this->assertDatabaseHas('ad_sets', ['id' => $adSet->id, 'daily_budget' => 20000]);
         Http::assertSent(fn ($request) => $request->method() === 'POST'
@@ -249,6 +269,27 @@ class ExampleTest extends TestCase
             ->assertJsonPath('text', 'Budget belum dikirim ke Meta karena write mode belum aktif.');
 
         $this->assertSame($originalBudget, $task->fresh()->current_budget);
+    }
+
+    public function test_update_automation_task_dispatches_meta_queue_job(): void
+    {
+        Queue::fake();
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $task = AutomationTask::firstOrFail();
+
+        $this->postJson('/update-automation-tasks/', [
+            'automation_id' => $task->id,
+            'starting_budget' => 200000,
+        ])->assertOk()
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Update budget Meta masuk antrean queue.');
+
+        Queue::assertPushed(PushMetaAutomationTaskUpdate::class, fn (PushMetaAutomationTaskUpdate $job) => $job->queue === 'meta');
+        $this->assertSame(200000, $task->fresh()->current_budget);
     }
 
     public function test_google_sign_in_button_logs_in_with_local_fallback(): void
@@ -532,12 +573,31 @@ class ExampleTest extends TestCase
 
         $this->post('/setup-iklan/', $this->adSetupPayload($account->id, ['publish' => 1]))
             ->assertRedirect('/setup-iklan/')
-            ->assertSessionHasErrors(['meta' => 'Meta menolak data setup iklan. Cek Page ID, targeting, budget, dan URL landing page.']);
+            ->assertSessionHas('status', 'Setup iklan masuk antrean queue. Worker akan publish ke Meta di background.');
 
         $setup = AdSetup::where('name', 'Setup Test')->firstOrFail();
 
         $this->assertSame('failed', $setup->status);
         $this->assertSame('Meta menolak data setup iklan. Cek Page ID, targeting, budget, dan URL landing page.', $setup->last_error);
+    }
+
+    public function test_ad_setup_publish_dispatches_queue_job(): void
+    {
+        Queue::fake();
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $account = AdAccount::firstOrFail();
+
+        $this->post('/setup-iklan/', $this->adSetupPayload($account->id, ['publish' => 1]))
+            ->assertRedirect('/setup-iklan/')
+            ->assertSessionHas('status', 'Setup iklan masuk antrean queue. Worker akan publish ke Meta di background.');
+
+        Queue::assertPushed(PublishMetaAdSetup::class, fn (PublishMetaAdSetup $job) => $job->queue === 'meta');
+        $this->assertSame('publishing', AdSetup::where('name', 'Setup Test')->firstOrFail()->status);
     }
 
     private function adSetupPayload(int $accountId, array $overrides = []): array
