@@ -444,12 +444,20 @@ function initProfile() {
     syncForm?.addEventListener('submit', async () => {
         syncBtn.disabled = true;
         syncBtn.textContent = 'Syncing...';
+        sessionStorage.setItem('meta-sync-pending', '1');
     });
 
-    if (page() === 'profile') {
+    if (page() === 'profile' && sessionStorage.getItem('meta-sync-pending') === '1') {
+        const stop = () => sessionStorage.removeItem('meta-sync-pending');
         const hasStatus = !!qs('.alert') || !!qs('.text-success') || !!qs('.text-danger');
-        if (!hasStatus) {
-            setTimeout(() => location.reload(), 5000);
+        const hasSyncTime = !!qs('.muted')?.textContent?.includes('Terakhir sync');
+
+        if (!hasStatus && !hasSyncTime) {
+            setTimeout(() => {
+                location.reload();
+            }, 3000);
+        } else {
+            stop();
         }
     }
 
