@@ -32,9 +32,9 @@ return [
         'graph_version' => env('META_GRAPH_VERSION', 'v23.0'),
         'base_url' => env('META_GRAPH_BASE_URL', 'https://graph.facebook.com'),
         'enable_writes' => env('META_ADS_ENABLE_WRITES', false),
-        'timeout' => (int) env('META_GRAPH_TIMEOUT', 20),
-        'retry_times' => (int) env('META_GRAPH_RETRY_TIMES', 2),
-        'retry_sleep_ms' => (int) env('META_GRAPH_RETRY_SLEEP_MS', 300),
+        'timeout' => (int) env('META_GRAPH_TIMEOUT', 45),
+        'retry_times' => (int) env('META_GRAPH_RETRY_TIMES', 3),
+        'retry_sleep_ms' => (int) env('META_GRAPH_RETRY_SLEEP_MS', 500),
     ],
 
     'ses' => [
