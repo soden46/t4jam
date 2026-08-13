@@ -1,58 +1,172 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# T4Jam Tools Laravel
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+T4Jam Tools adalah aplikasi Laravel untuk membawa workflow T4Jam ke aplikasi yang data-driven: dashboard Meta Ads, automation budget, interest tools, riset produk, setup iklan, dan profile token Meta.
 
-## About Laravel
+Fokus proyek ini bukan mockup statis. Route, form, tabel, modal, AJAX/API contract, dan data utama harus jalan dari database Laravel.
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+## Stack
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+- Laravel 13
+- PHP 8.3
+- MySQL
+- Blade, Vite, Tailwind
+- Laravel database queue
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+## Data Utama
 
-## Learning Laravel
+Aplikasi memakai data Eloquent untuk:
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+- `ad_accounts`
+- `campaigns`
+- `ad_sets`
+- `automation_tasks`
+- `automation_logs`
+- `interests`
+- `product_categories`
+- `products`
+- `t4jam_profiles`
+- `ad_setups`
 
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+Seeder lokal menyiapkan data awal supaya halaman bisa diuji tanpa bergantung ke Meta.
 
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
+## Setup Lokal
 
 ```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+composer install
+npm install
+cp .env.example .env
+php artisan key:generate
+php artisan migrate --seed
+npm run build
+php artisan serve
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+Pastikan `.env` mengarah ke database lokal yang benar.
 
-## Contributing
+## Environment Penting
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+```env
+APP_URL=http://localhost:8000
+DB_CONNECTION=mysql
+QUEUE_CONNECTION=database
+DB_QUEUE_RETRY_AFTER=900
 
-## Code of Conduct
+META_GRAPH_VERSION=v23.0
+META_GRAPH_BASE_URL=https://graph.facebook.com
+META_GRAPH_TIMEOUT=45
+META_GRAPH_RETRY_TIMES=3
+META_GRAPH_RETRY_SLEEP_MS=500
+META_ADS_ENABLE_WRITES=false
+```
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+`META_ADS_ENABLE_WRITES=false` artinya publish setup iklan dan update budget tidak dikirim ke Meta. Data tetap disimpan di aplikasi dan UI harus memberi warning yang jelas. Aktifkan hanya saat token, permission, dan ad account sudah siap.
 
-## Security Vulnerabilities
+## Meta Ads Sync
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+User menyimpan token di halaman `Profile`, lalu klik `Sync Meta Ads`.
 
-## License
+Flow saat ini:
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+1. Controller memvalidasi profile punya access token.
+2. Controller dispatch `App\Jobs\SyncMetaAdsProfile` ke queue `meta`.
+3. Worker menjalankan `App\Services\MetaAdsSyncService`.
+4. Account dan campaign disimpan bertahap begitu berhasil dibaca.
+5. Insight dan ad set ikut disimpan jika Meta tidak menolak request.
+6. Error terakhir disimpan di `t4jam_profiles.last_meta_error` dan ditampilkan di Profile.
+
+Sync ini sengaja memakai queue karena request Meta bisa lama dan sering kena rate limit. Jangan jalankan sync panjang langsung dari request web.
+
+## Queue Worker
+
+Database queue sudah dipakai oleh default project. Jalankan migration dulu:
+
+```bash
+php artisan migrate --force
+```
+
+Untuk menjalankan worker manual di server dev:
+
+```bash
+php artisan queue:work database --queue=meta,default --sleep=3 --tries=3 --timeout=650
+```
+
+Setelah deploy perubahan kode:
+
+```bash
+php artisan optimize:clear
+php artisan queue:restart
+```
+
+Worker harus tetap hidup di server. Untuk production/dev server yang long-running, gunakan Supervisor atau process manager lain.
+
+Contoh Supervisor:
+
+```ini
+[program:t4jam-meta-worker]
+process_name=%(program_name)s_%(process_num)02d
+command=php /var/www/demo-digmartools.prosesin.id/artisan queue:work database --queue=meta,default --sleep=3 --tries=3 --timeout=650
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+user=www-data
+numprocs=1
+redirect_stderr=true
+stdout_logfile=/var/www/demo-digmartools.prosesin.id/storage/logs/queue-worker.log
+stopwaitsecs=700
+```
+
+Reload Supervisor setelah file config dibuat:
+
+```bash
+supervisorctl reread
+supervisorctl update
+supervisorctl restart t4jam-meta-worker:*
+```
+
+Sesuaikan `user` dengan user web server di server masing-masing.
+
+## Rate Limit Meta
+
+Meta dapat mengembalikan rate limit, misalnya:
+
+```text
+Meta rate limit hit {"meta_code":17,"meta_type":"OAuthException"}
+```
+
+Jika rate limit terjadi setelah account/campaign terbaca, data yang sudah berhasil dibaca tetap disimpan. Job akan dilepas kembali ke queue dengan delay dan `last_meta_error` akan memberi pesan retry.
+
+Hal yang perlu dicek saat dashboard masih `0`:
+
+```bash
+php artisan tinker --execute="dump(App\Models\AdAccount::count(), App\Models\Campaign::count(), App\Models\T4JamProfile::first()?->last_meta_error);"
+php artisan queue:failed
+tail -f storage/logs/laravel.log
+tail -f storage/logs/queue-worker.log
+```
+
+Jika `ad_accounts` tetap `0`, rate limit atau token error kemungkinan terjadi sebelum endpoint `/me/adaccounts` berhasil. Tunggu beberapa menit, pastikan token masih valid, lalu sync ulang sekali.
+
+## Deployment Checklist
+
+```bash
+git pull
+composer install --no-dev --optimize-autoloader
+npm ci
+npm run build
+php artisan migrate --force
+php artisan optimize:clear
+php artisan queue:restart
+```
+
+Pastikan worker `meta,default` aktif setelah deploy.
+
+## Quality Check
+
+```bash
+php artisan test
+npm run build
+git diff --check
+```
+
+Catatan lokal Windows: warning PHP tentang `imagick` missing tidak terkait dengan Meta sync selama test tetap hijau.

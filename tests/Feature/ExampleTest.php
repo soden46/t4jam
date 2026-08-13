@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\SyncMetaAdsProfile;
 use App\Models\AdAccount;
 use App\Models\AdSet;
 use App\Models\AdSetup;
@@ -11,6 +12,7 @@ use App\Models\T4JamProfile;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Tests\Feature\TestDataSeeder;
 use Tests\TestCase;
 
@@ -316,7 +318,7 @@ class ExampleTest extends TestCase
 
         $this->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads berhasil. Data terbaru sudah ditampilkan.');
+            ->assertSessionHas('status', 'Sync Meta Ads masuk antrean queue. Worker akan memproses data di background.');
 
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_123', 'name' => 'Meta Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_1', 'spend' => 45000, 'result' => 3, 'landing_page_view' => 90]);
@@ -351,10 +353,27 @@ class ExampleTest extends TestCase
         $this->from('/profile/')
             ->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads berhasil. Data terbaru sudah ditampilkan.');
+            ->assertSessionHas('status', 'Sync Meta Ads masuk antrean queue. Worker akan memproses data di background.');
 
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_456', 'name' => 'Manual Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_456', 'daily_budget' => 250000]);
+    }
+
+    public function test_meta_ads_sync_dispatches_queue_job(): void
+    {
+        Queue::fake();
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $this->from('/profile/')
+            ->post('/profile/sync-meta-ads/')
+            ->assertRedirect('/profile/')
+            ->assertSessionHas('status', 'Sync Meta Ads masuk antrean queue. Worker akan memproses data di background.');
+
+        Queue::assertPushed(SyncMetaAdsProfile::class, fn (SyncMetaAdsProfile $job) => $job->queue === 'meta');
     }
 
     public function test_meta_ads_sync_keeps_saved_rows_when_insights_hit_rate_limit(): void
@@ -389,13 +408,13 @@ class ExampleTest extends TestCase
         $this->from('/profile/')
             ->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHasErrors(['meta' => 'Meta rate limit tercapai. Data yang sudah terbaca tetap disimpan. Tunggu beberapa menit lalu sync lagi.']);
+            ->assertSessionHas('status', 'Sync Meta Ads masuk antrean queue. Worker akan memproses data di background.');
 
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_789', 'name' => 'Rate Limited Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_789', 'daily_budget' => 300000]);
         $this->assertDatabaseHas('t4jam_profiles', [
             'user_id' => $user->id,
-            'last_meta_error' => 'Meta rate limit tercapai. Data yang sudah terbaca tetap disimpan. Tunggu beberapa menit lalu sync lagi.',
+            'last_meta_error' => 'Meta rate limit tercapai. Sync akan dicoba otomatis 60 detik lagi.',
         ]);
     }
 

@@ -5,15 +5,36 @@ namespace App\Jobs;
 use App\Exceptions\MetaAdsException;
 use App\Models\T4JamProfile;
 use App\Services\MetaAdsSyncService;
-use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
-class SyncMetaAdsProfile
+class SyncMetaAdsProfile implements ShouldQueue, ShouldBeUnique
 {
-    use Dispatchable;
+    use Queueable;
 
-    public function __construct(private readonly int $profileId) {}
+    public int $tries = 3;
+
+    public int $timeout = 600;
+
+    public int $uniqueFor = 1800;
+
+    public function __construct(private readonly int $profileId)
+    {
+        $this->onQueue('meta');
+    }
+
+    public function uniqueId(): string
+    {
+        return (string) $this->profileId;
+    }
+
+    public function backoff(): array
+    {
+        return [60, 180, 300];
+    }
 
     public function handle(MetaAdsSyncService $metaSync): void
     {
@@ -28,9 +49,13 @@ class SyncMetaAdsProfile
         } catch (MetaAdsException $exception) {
             if ($this->isRateLimitError($exception)) {
                 $this->releaseOnRateLimit($profile, $exception);
-            } else {
-                $profile->update(['last_meta_error' => $exception->getMessage()]);
+
+                return;
             }
+
+            $profile->update(['last_meta_error' => $exception->getMessage()]);
+
+            throw $exception;
         } catch (Throwable $exception) {
             Log::warning('Meta ads sync failed after response', [
                 'profile_id' => $this->profileId,
@@ -39,6 +64,8 @@ class SyncMetaAdsProfile
             ]);
 
             $profile->update(['last_meta_error' => 'Sync Meta Ads gagal ('.$exception::class.')']);
+
+            throw $exception;
         }
     }
 
@@ -65,11 +92,21 @@ class SyncMetaAdsProfile
             'retry_after_seconds' => $retryAfter,
         ]);
 
-        self::dispatch($this->profileId)
-            ->delay(now()->addSeconds($retryAfter));
+        $this->release($retryAfter);
 
         $profile->update([
             'last_meta_error' => 'Meta rate limit tercapai. Sync akan dicoba otomatis '.$retryAfter.' detik lagi.',
         ]);
+    }
+
+    public function failed(?Throwable $exception): void
+    {
+        if (! $exception) {
+            return;
+        }
+
+        T4JamProfile::query()
+            ->where('id', $this->profileId)
+            ->update(['last_meta_error' => 'Sync Meta Ads gagal ('.$exception::class.')']);
     }
 }
