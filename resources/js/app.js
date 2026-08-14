@@ -13,6 +13,7 @@ const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => 
     '"': '&quot;',
     "'": '&#039;',
 }[char]));
+let automationAccounts = [];
 
 async function request(url, options = {}) {
     const response = await fetch(url, {
@@ -339,10 +340,12 @@ async function initAutomation() {
     qsa('#add_account_filter, #level_filter, #event_tracking_filter').forEach((el) => el.addEventListener('change', loadAutomationTasks));
     qs('#new_automation')?.addEventListener('click', () => {
         resetAutomationForm();
+        showAutomationTargetFields();
         qs('#automation-modal-title').textContent = 'Create Automation Budget';
         qs('#automation-submit-label').textContent = 'Create';
         openModal('#automation-modal');
     });
+    await loadAutomationTargetAccounts();
     await loadAutomationTasks();
 }
 
@@ -419,6 +422,7 @@ async function editTask(id) {
     const response = await request(`/get-specific-task/?automation_id=${encodeURIComponent(id)}`);
     const task = response.data;
     resetAutomationForm();
+    hideAutomationTargetFields();
     Object.entries({
         automation_id: task.id,
         budget_funnel_lp: task.event_flow,
@@ -454,12 +458,86 @@ function resetAutomationForm() {
     qs('#automation-form')?.reset();
     qs('#automation_id').value = '';
     qs('#modal_level').value = 'campaign';
+    hideAutomationTargetFields();
+}
+
+async function loadAutomationTargetAccounts() {
+    const response = await request('/api/get-ad-account/');
+    automationAccounts = response.adaccount || [];
+    renderAutomationAccountOptions(response.selected || '');
+}
+
+function renderAutomationAccountOptions(selected = '') {
+    const accountSelect = qs('#modal_target_ad_account');
+    if (!accountSelect) return;
+
+    const filterAccount = qs('#add_account_filter')?.value;
+    const selectedAccount = filterAccount && filterAccount !== 'all'
+        ? filterAccount
+        : selected || automationAccounts[0]?.id || '';
+
+    accountSelect.innerHTML = [
+        '<option value="">Pilih Ad Account</option>',
+        ...automationAccounts.map((account) => `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)}</option>`),
+    ].join('');
+    accountSelect.value = selectedAccount;
+    qs('#modal_target_level').value = ['campaign', 'adset'].includes(qs('#level_filter')?.value)
+        ? qs('#level_filter').value
+        : 'campaign';
+
+    syncAutomationTargetFields();
+}
+
+function showAutomationTargetFields() {
+    const fields = qs('#automation-target-fields');
+    if (fields) fields.hidden = false;
+
+    renderAutomationAccountOptions(qs('#modal_target_ad_account')?.value || '');
+}
+
+function hideAutomationTargetFields() {
+    const fields = qs('#automation-target-fields');
+    if (fields) fields.hidden = true;
+}
+
+function syncAutomationTargetFields() {
+    const accountId = qs('#modal_target_ad_account')?.value || '';
+    const level = qs('#modal_target_level')?.value === 'adset' ? 'adset' : 'campaign';
+    const account = automationAccounts.find((item) => item.id === accountId);
+    const rows = level === 'adset'
+        ? account?.adsets?.data || []
+        : account?.campaigns?.data || [];
+    const targetSelect = qs('#modal_target_campaign');
+    const selectedTarget = targetSelect?.value || '';
+
+    if (targetSelect) {
+        targetSelect.innerHTML = [
+            `<option value="">Pilih ${level === 'adset' ? 'Adset' : 'Campaign'}</option>`,
+            ...rows.map((row) => `<option value="${escapeHtml(row.id)}">${escapeHtml(row.name)}</option>`),
+        ].join('');
+        targetSelect.value = rows.some((row) => row.id === selectedTarget)
+            ? selectedTarget
+            : rows[0]?.id || '';
+    }
+
+    qs('#modal_ad_account').value = accountId;
+    qs('#modal_level').value = level;
+    qs('#modal_campaign_id').value = targetSelect?.value || '';
+}
+
+function bindAutomationTargetFields() {
+    qsa('#modal_target_ad_account, #modal_target_level, #modal_target_campaign').forEach((select) => {
+        if (select.dataset.bound) return;
+        select.dataset.bound = '1';
+        select.addEventListener('change', syncAutomationTargetFields);
+    });
 }
 
 function bindAutomationForm(defaultMode) {
     const form = qs('#automation-form');
     if (!form || form.dataset.bound) return;
     form.dataset.bound = '1';
+    bindAutomationTargetFields();
     form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const isUpdate = qs('#automation_id').value;

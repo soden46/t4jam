@@ -11,6 +11,20 @@
                 <h1 id="automation-modal-title">Create Automation Budget</h1>
                 <p class="muted">Setting ini akan dipakai BOT T4Jam untuk membaca metrik dan mengatur budget campaign.</p>
             </div>
+            <div class="grid-3" id="automation-target-fields" hidden>
+                <label>Ad Account
+                    <select id="modal_target_ad_account"></select>
+                </label>
+                <label>Level
+                    <select id="modal_target_level">
+                        <option value="campaign">Campaign</option>
+                        <option value="adset">Adset</option>
+                    </select>
+                </label>
+                <label>Campaign / Adset
+                    <select id="modal_target_campaign"></select>
+                </label>
+            </div>
             <div class="grid-2">
                 <label>LP Funnel
                     <select name="budget_funnel_lp" id="budget_funnel_lp">
