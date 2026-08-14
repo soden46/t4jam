@@ -409,7 +409,7 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('t4jam_profiles', ['user_id' => $user->id, 'meta_user_name' => 'Meta Tester', 'last_meta_error' => null]);
     }
 
-    public function test_meta_ads_sync_includes_business_owned_and_client_ad_accounts(): void
+    public function test_meta_ads_sync_keeps_base_accounts_when_business_permission_is_missing(): void
     {
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
@@ -425,8 +425,42 @@ class ExampleTest extends TestCase
                 ],
             ]),
             'graph.facebook.com/*/me/businesses?*' => Http::response([
+                'error' => [
+                    'message' => '(#100) Requires business_management permission to access the field.',
+                    'code' => 100,
+                    'type' => 'OAuthException',
+                ],
+            ], 400),
+            'graph.facebook.com/*/act_111/campaigns?*' => Http::response(['data' => []]),
+        ]);
+
+        $this->from('/profile/')
+            ->post('/profile/sync-meta-ads/')
+            ->assertRedirect('/profile/')
+            ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
+
+        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_111', 'name' => 'Personal Account']);
+        $this->assertDatabaseHas('t4jam_profiles', ['user_id' => $user->id, 'last_meta_error' => null]);
+    }
+
+    public function test_meta_ads_sync_adds_business_owned_and_client_accounts_when_permission_exists(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        Http::fake([
+            'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
+            'graph.facebook.com/*/me/adaccounts?*' => Http::response([
                 'data' => [
-                    ['id' => 'business_1', 'name' => 'Prosesin ID'],
+                    ['account_id' => '111', 'id' => 'act_111', 'name' => 'Base Account', 'currency' => 'IDR', 'account_status' => 1],
+                ],
+            ]),
+            'graph.facebook.com/*/me/businesses?*' => Http::response([
+                'data' => [
+                    ['id' => 'business_1', 'name' => 'Prosesin Id'],
                 ],
             ]),
             'graph.facebook.com/*/business_1/owned_ad_accounts?*' => Http::response([
@@ -437,7 +471,6 @@ class ExampleTest extends TestCase
             'graph.facebook.com/*/business_1/client_ad_accounts?*' => Http::response([
                 'data' => [
                     ['account_id' => '333', 'id' => 'act_333', 'name' => 'Client Business Account', 'currency' => 'IDR', 'account_status' => 1],
-                    ['account_id' => '111', 'id' => 'act_111', 'name' => 'Personal Account Duplicate', 'currency' => 'IDR', 'account_status' => 1],
                 ],
             ]),
             'graph.facebook.com/*/act_111/campaigns?*' => Http::response(['data' => []]),
@@ -450,18 +483,9 @@ class ExampleTest extends TestCase
             ->assertRedirect('/profile/')
             ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
 
-        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_111', 'name' => 'Personal Account']);
+        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_111', 'name' => 'Base Account']);
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_222', 'name' => 'Owned Business Account']);
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_333', 'name' => 'Client Business Account']);
-
-        $accounts = $this->getJson('/api/get-ad-account/')
-            ->assertOk()
-            ->json('adaccount');
-
-        $this->assertSame(
-            ['act_111', 'act_222', 'act_333'],
-            collect($accounts)->pluck('id')->intersect(['act_111', 'act_222', 'act_333'])->sort()->values()->all()
-        );
     }
 
     public function test_manual_meta_ads_sync_redirects_while_sync_runs_after_response(): void

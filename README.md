@@ -70,10 +70,12 @@ Flow saat ini:
 1. Controller memvalidasi profile punya access token.
 2. Tombol `Sync Meta Ads` di Profile menjalankan `App\Jobs\SyncMetaAdsProfile` after-response, jadi tidak bergantung pada worker queue.
 3. Tombol `Reload` di dashboard menjalankan `App\Services\MetaAdsSyncService` langsung dan mengembalikan data account terbaru.
-4. Account dibaca dari `/me/adaccounts` serta Business Manager `owned_ad_accounts` dan `client_ad_accounts`, lalu di-dedupe sebelum disimpan.
-5. Account dan campaign disimpan bertahap begitu berhasil dibaca.
-6. Insight dan ad set ikut disimpan jika Meta tidak menolak request.
-7. Error terakhir disimpan di `t4jam_profiles.last_meta_error` dan ditampilkan di Profile.
+4. Account utama dibaca dari `/me/adaccounts`, mengikuti flow awal yang sudah cocok dengan dashboard pilihan akun iklan.
+5. Jika token punya permission Business Manager, sync juga mencoba `/me/businesses`, `owned_ad_accounts`, dan `client_ad_accounts` untuk menambah akun dari portfolio bisnis.
+6. Jika Meta menolak lookup Business Manager dengan error permission seperti `business_management`, lookup tambahan dilewati dan account dari `/me/adaccounts` tetap disimpan.
+7. Account dan campaign disimpan bertahap begitu berhasil dibaca.
+8. Insight dan ad set ikut disimpan jika Meta tidak menolak request.
+9. Error terakhir disimpan di `t4jam_profiles.last_meta_error` dan ditampilkan di Profile.
 
 Sync account sengaja mengikuti flow lama yang tidak membutuhkan queue worker karena client perlu melihat akun iklan terbaru setelah sync/reload. Jika request Meta terlalu lama atau terkena rate limit, data yang sudah terbaca tetap disimpan dan error terakhir ditampilkan di Profile.
 
@@ -161,6 +163,8 @@ tail -f storage/logs/queue-worker.log
 ```
 
 Jika `ad_accounts` tetap `0`, rate limit atau token error kemungkinan terjadi sebelum endpoint `/me/adaccounts` berhasil. Tunggu beberapa menit, pastikan token masih valid, lalu sync ulang sekali.
+
+Jika hanya sebagian account muncul dan log berisi `Requires business_management permission`, berarti token/app belum bisa membaca Business Manager. Account dasar dari `/me/adaccounts` tetap masuk, tetapi account tambahan dari portfolio bisnis baru masuk setelah permission Business Manager aktif dan access token diotorisasi ulang.
 
 ## Deployment Checklist
 
