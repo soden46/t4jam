@@ -477,6 +477,7 @@ function bindAutomationForm(defaultMode) {
             toast(response.text || (isUpdate ? 'Automation strategy berhasil diupdate' : 'Automation budget berhasil dibuat'));
             if (page() === 'automation') await loadAutomationTasks();
         } catch (error) {
+            closeModals();
             toast(error.message, 'danger');
             if (page() === 'automation') await loadAutomationTasks();
         } finally {
