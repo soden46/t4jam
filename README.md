@@ -70,9 +70,10 @@ Flow saat ini:
 1. Controller memvalidasi profile punya access token.
 2. Controller dispatch `App\Jobs\SyncMetaAdsProfile` ke queue `meta`.
 3. Worker menjalankan `App\Services\MetaAdsSyncService`.
-4. Account dan campaign disimpan bertahap begitu berhasil dibaca.
-5. Insight dan ad set ikut disimpan jika Meta tidak menolak request.
-6. Error terakhir disimpan di `t4jam_profiles.last_meta_error` dan ditampilkan di Profile.
+4. Account dibaca dari `/me/adaccounts` serta Business Manager `owned_ad_accounts` dan `client_ad_accounts`, lalu di-dedupe sebelum disimpan.
+5. Account dan campaign disimpan bertahap begitu berhasil dibaca.
+6. Insight dan ad set ikut disimpan jika Meta tidak menolak request.
+7. Error terakhir disimpan di `t4jam_profiles.last_meta_error` dan ditampilkan di Profile.
 
 Sync ini sengaja memakai queue karena request Meta bisa lama dan sering kena rate limit. Jangan jalankan sync panjang langsung dari request web.
 

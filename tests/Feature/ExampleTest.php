@@ -2,9 +2,9 @@
 
 namespace Tests\Feature;
 
-use App\Jobs\SyncMetaAdsProfile;
 use App\Jobs\PublishMetaAdSetup;
 use App\Jobs\PushMetaAutomationTaskUpdate;
+use App\Jobs\SyncMetaAdsProfile;
 use App\Models\AdAccount;
 use App\Models\AdSet;
 use App\Models\AdSetup;
@@ -15,7 +15,6 @@ use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
-use Tests\Feature\TestDataSeeder;
 use Tests\TestCase;
 
 class ExampleTest extends TestCase
@@ -315,6 +314,7 @@ class ExampleTest extends TestCase
                     ['account_id' => '123', 'id' => 'act_123', 'name' => 'Meta Account', 'currency' => 'IDR', 'account_status' => 1],
                 ],
             ]),
+            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_123/campaigns?*' => Http::response([
                 'data' => [
                     ['id' => 'cmp_1', 'name' => 'Meta Campaign', 'status' => 'ACTIVE', 'effective_status' => 'ACTIVE', 'daily_budget' => '150000', 'objective' => 'OUTCOME_SALES'],
@@ -357,7 +357,8 @@ class ExampleTest extends TestCase
             'access_token_app' => 'token',
         ])->assertRedirect('/profile/');
 
-        $this->post('/profile/sync-meta-ads/')
+        $this->from('/profile/')
+            ->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
             ->assertSessionHas('status', 'Sync Meta Ads masuk antrean queue. Worker akan memproses data di background.');
 
@@ -365,6 +366,52 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_1', 'spend' => 45000, 'result' => 3, 'landing_page_view' => 90]);
         $this->assertDatabaseHas('ad_sets', ['external_id' => 'adset_1', 'daily_budget' => 150000, 'spend' => 12000]);
         $this->assertDatabaseHas('t4jam_profiles', ['user_id' => $user->id, 'meta_user_name' => 'Meta Tester', 'last_meta_error' => null]);
+    }
+
+    public function test_meta_ads_sync_includes_business_owned_and_client_ad_accounts(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        Http::fake([
+            'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
+            'graph.facebook.com/*/me/adaccounts?*' => Http::response([
+                'data' => [
+                    ['account_id' => '111', 'id' => 'act_111', 'name' => 'Personal Account', 'currency' => 'IDR', 'account_status' => 1],
+                ],
+            ]),
+            'graph.facebook.com/*/me/businesses?*' => Http::response([
+                'data' => [
+                    ['id' => 'business_1', 'name' => 'Prosesin ID'],
+                ],
+            ]),
+            'graph.facebook.com/*/business_1/owned_ad_accounts?*' => Http::response([
+                'data' => [
+                    ['account_id' => '222', 'id' => 'act_222', 'name' => 'Owned Business Account', 'currency' => 'IDR', 'account_status' => 1],
+                ],
+            ]),
+            'graph.facebook.com/*/business_1/client_ad_accounts?*' => Http::response([
+                'data' => [
+                    ['account_id' => '333', 'id' => 'act_333', 'name' => 'Client Business Account', 'currency' => 'IDR', 'account_status' => 1],
+                    ['account_id' => '111', 'id' => 'act_111', 'name' => 'Personal Account Duplicate', 'currency' => 'IDR', 'account_status' => 1],
+                ],
+            ]),
+            'graph.facebook.com/*/act_111/campaigns?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/act_222/campaigns?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/act_333/campaigns?*' => Http::response(['data' => []]),
+        ]);
+
+        $this->from('/profile/')
+            ->post('/profile/sync-meta-ads/')
+            ->assertRedirect('/profile/')
+            ->assertSessionHas('status', 'Sync Meta Ads masuk antrean queue. Worker akan memproses data di background.');
+
+        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_111', 'name' => 'Personal Account']);
+        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_222', 'name' => 'Owned Business Account']);
+        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_333', 'name' => 'Client Business Account']);
     }
 
     public function test_manual_meta_ads_sync_redirects_while_sync_runs_after_response(): void
@@ -382,6 +429,7 @@ class ExampleTest extends TestCase
                     ['account_id' => '456', 'id' => 'act_456', 'name' => 'Manual Account', 'currency' => 'IDR', 'account_status' => 1],
                 ],
             ]),
+            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_456/campaigns?*' => Http::response([
                 'data' => [
                     ['id' => 'cmp_456', 'name' => 'Manual Campaign', 'status' => 'ACTIVE', 'daily_budget' => '250000'],
@@ -432,6 +480,7 @@ class ExampleTest extends TestCase
                     ['account_id' => '789', 'id' => 'act_789', 'name' => 'Rate Limited Account', 'currency' => 'IDR', 'account_status' => 1],
                 ],
             ]),
+            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_789/campaigns?*' => Http::response([
                 'data' => [
                     ['id' => 'cmp_789', 'name' => 'Rate Limited Campaign', 'status' => 'ACTIVE', 'daily_budget' => '300000'],
