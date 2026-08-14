@@ -106,7 +106,7 @@ async function initDashboard() {
     const renderAccountSelect = (selectedAccount = null) => {
         accountSelect.innerHTML = accounts.adaccount.map((account) => `<option value="${account.id}">${account.name}</option>`).join('');
         accountSelect.value = selectedAccount || accounts.selected || accounts.adaccount[0]?.id || '';
-        setStat('#ad_account_count', accounts.adaccount.length);
+        setStat('#ad_account_count', accounts.ad_account_count ?? accounts.adaccount.length);
     };
     renderAccountSelect();
 
@@ -144,7 +144,7 @@ async function initDashboard() {
     reloadBtn?.addEventListener('click', async () => {
         reloadBtn.disabled = true;
         reloadBtn.textContent = 'Reloading...';
-        setReloadStatus('Mengirim sync Meta ke queue...');
+        setReloadStatus('Menyinkronkan akun iklan Meta...');
 
         try {
             const selectedBeforeReload = accountSelect.value;
@@ -214,6 +214,7 @@ async function initDashboard() {
         }
         qs('#modal_ad_account').value = accountSelect.value;
         qs('#modal_campaign_id').value = checked.value;
+        if (checked.dataset.adAccount) qs('#modal_ad_account').value = checked.dataset.adAccount;
         qs('#modal_level').value = checked.dataset.level || levelMode();
         qs('#automation_id').value = '';
         qs('#automation-modal-title').textContent = 'Create Automation Budget';
@@ -232,7 +233,7 @@ function renderMetrics(metrics) {
 function renderCampaignTable(rows) {
     qs('#campaign_table tbody').innerHTML = rows.map((row) => `
         <tr>
-            <td><input type="checkbox" value="${row.campaign_id}" data-level="${row.level || 'campaign'}"></td>
+            <td><input type="checkbox" value="${row.campaign_id}" data-level="${row.level || 'campaign'}" data-ad-account="${row.ad_id || ''}"></td>
             <td><span class="campaign-name">${row.campaign_name}</span></td>
             <td class="num">${rupiah(row.budget)}</td>
             <td class="num">${rupiah(row.spend)}</td>

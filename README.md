@@ -68,21 +68,20 @@ User menyimpan token di halaman `Profile`, lalu klik `Sync Meta Ads`.
 Flow saat ini:
 
 1. Controller memvalidasi profile punya access token.
-2. Controller dispatch `App\Jobs\SyncMetaAdsProfile` ke queue `meta`.
-3. Worker menjalankan `App\Services\MetaAdsSyncService`.
+2. Tombol `Sync Meta Ads` di Profile menjalankan `App\Jobs\SyncMetaAdsProfile` after-response, jadi tidak bergantung pada worker queue.
+3. Tombol `Reload` di dashboard menjalankan `App\Services\MetaAdsSyncService` langsung dan mengembalikan data account terbaru.
 4. Account dibaca dari `/me/adaccounts` serta Business Manager `owned_ad_accounts` dan `client_ad_accounts`, lalu di-dedupe sebelum disimpan.
 5. Account dan campaign disimpan bertahap begitu berhasil dibaca.
 6. Insight dan ad set ikut disimpan jika Meta tidak menolak request.
 7. Error terakhir disimpan di `t4jam_profiles.last_meta_error` dan ditampilkan di Profile.
 
-Sync ini sengaja memakai queue karena request Meta bisa lama dan sering kena rate limit. Jangan jalankan sync panjang langsung dari request web.
+Sync account sengaja mengikuti flow lama yang tidak membutuhkan queue worker karena client perlu melihat akun iklan terbaru setelah sync/reload. Jika request Meta terlalu lama atau terkena rate limit, data yang sudah terbaca tetap disimpan dan error terakhir ditampilkan di Profile.
 
 ## Meta Write Actions
 
 Action yang mengirim perubahan ke Meta juga memakai queue `meta`:
 
-- `Reload` di dashboard memasukkan job sync data Meta.
-- `Sync Meta Ads` di Profile memasukkan job sync data Meta.
+- `Reload` di dashboard dan `Sync Meta Ads` di Profile menjalankan sync baca data akun iklan, bukan write action.
 - `Create` dan `Update` automation budget menyimpan data lokal, lalu memasukkan update budget Meta ke queue.
 - Toggle status automation menyimpan status lokal, lalu memasukkan update status Meta ke queue.
 - `Turun` budget menyimpan budget lokal, lalu memasukkan update budget Meta ke queue.
@@ -150,7 +149,7 @@ Meta dapat mengembalikan rate limit, misalnya:
 Meta rate limit hit {"meta_code":17,"meta_type":"OAuthException"}
 ```
 
-Jika rate limit terjadi setelah account/campaign terbaca, data yang sudah berhasil dibaca tetap disimpan. Job akan dilepas kembali ke queue dengan delay dan `last_meta_error` akan memberi pesan retry.
+Jika rate limit terjadi setelah account/campaign terbaca, data yang sudah berhasil dibaca tetap disimpan dan `last_meta_error` akan memberi pesan agar user sync ulang setelah beberapa menit.
 
 Hal yang perlu dicek saat dashboard masih `0`:
 

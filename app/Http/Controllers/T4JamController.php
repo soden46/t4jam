@@ -86,6 +86,7 @@ class T4JamController extends Controller
         return response()->json([
             'status' => 200,
             'adaccount' => $accounts->map(fn (AdAccount $account) => $this->accountPayload($account))->values(),
+            'ad_account_count' => $accounts->count(),
             'selected' => $selectedAccount?->external_id,
             'selected_campaigns' => $this->normalizeCampaignIds(session('selected_campaigns', [])),
             'fix_campaign_list' => $selectedAccount
@@ -125,15 +126,19 @@ class T4JamController extends Controller
         return response()->json(['status' => 200, 'text' => 'Settings dashboard tersimpan']);
     }
 
-    public function reloadAdAccount(): JsonResponse
+    public function reloadAdAccount(MetaAdsSyncService $metaSync): JsonResponse
     {
         $profile = $this->currentProfile();
         $message = 'Dashboard direfresh dari data terakhir di database.';
 
         if ($profile->access_token) {
-            $profile->update(['last_meta_error' => null]);
-            SyncMetaAdsProfile::dispatch($profile->id)->afterCommit();
-            $message = 'Sync Meta Ads masuk antrean queue. Data dashboard akan berubah setelah worker selesai.';
+            try {
+                $profile->update(['last_meta_error' => null]);
+                $metaSync->sync($profile);
+                $message = 'Ad account berhasil direload';
+            } catch (MetaAdsException $exception) {
+                return response()->json(['status' => 422, 'text' => $exception->getMessage()], 422);
+            }
         }
 
         $accounts = AdAccount::with('campaigns.adSets')->get();
@@ -254,38 +259,44 @@ class T4JamController extends Controller
     public function updateAutomationTask(Request $request): JsonResponse
     {
         $task = AutomationTask::with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
-        $budget = max(1000, (int) $request->input('starting_budget', $task->current_budget));
+        $budget = max(1000, (int) $request->input('starting_budget', $task->starting_budget));
 
         if ($budget < 1000) {
             return response()->json(['status' => 422, 'text' => 'Budget minimal adalah Rp. 1.000,-.'], 422);
         }
 
-        $target = $task->level === 'adset'
-            ? ($task->adSet ?? $task->ad_set_external_id)
-            : ($task->campaign ?? $task->campaign_external_id);
-        $metaQueue = $this->metaWriteReadiness('Budget belum dikirim ke Meta karena write mode belum aktif.');
-        if (! $metaQueue['ok']) {
-            return response()->json(['status' => 422, 'text' => $metaQueue['text']], 422);
+        $budgetChanged = $budget !== (int) $task->starting_budget;
+        $baseMessage = 'Automation strategy berhasil diupdate';
+        $metaQueue = null;
+
+        if ($budgetChanged) {
+            $target = $task->level === 'adset'
+                ? ($task->adSet ?? $task->ad_set_external_id)
+                : ($task->campaign ?? $task->campaign_external_id);
+            $metaQueue = $this->metaWriteReadiness('Budget belum dikirim ke Meta karena write mode belum aktif.');
+            if (! $metaQueue['ok']) {
+                return response()->json(['status' => 422, 'text' => $metaQueue['text']], 422);
+            }
+
+            $this->persistLocalBudget($target, $budget, $task->level);
         }
 
-        $this->persistLocalBudget($target, $budget, $task->level);
-        $baseMessage = 'Automation strategy berhasil diupdate';
-
         $task->update($this->automationPayload($request) + [
-            'current_budget' => $budget,
-            'last_log' => $baseMessage.'; update Meta masuk antrean queue',
+            'last_log' => $budgetChanged ? $baseMessage.'; update Meta masuk antrean queue' : $baseMessage,
             'last_checked_at' => now(),
             'is_active' => $request->input('automation_activation', 'active') === 'active',
-        ]);
+        ] + ($budgetChanged ? ['current_budget' => $budget] : []));
 
         AutomationLog::create([
             'automation_task_id' => $task->id,
-            'messages' => [$baseMessage.'; update Meta masuk antrean queue'],
+            'messages' => [$budgetChanged ? $baseMessage.'; update Meta masuk antrean queue' : $baseMessage],
         ]);
 
-        $this->queueMetaAutomationTask($metaQueue['profile_id'], $task, 'budget', $baseMessage, $budget);
+        if ($budgetChanged && $metaQueue) {
+            $this->queueMetaAutomationTask($metaQueue['profile_id'], $task, 'budget', $baseMessage, $budget);
+        }
 
-        return response()->json(['status' => 200, 'text' => 'Automation strategy berhasil diupdate. Update budget Meta masuk antrean queue.']);
+        return response()->json(['status' => 200, 'text' => $budgetChanged ? 'Automation strategy berhasil diupdate. Update budget Meta masuk antrean queue.' : 'Automation strategy berhasil diupdate.']);
     }
 
     public function updateStatusAutomation(Request $request): JsonResponse
@@ -456,7 +467,9 @@ class T4JamController extends Controller
             return back()->with('status', 'Access token berhasil disimpan.');
         }
 
-        return back()->with('status', 'Access token berhasil disimpan. Klik tombol Sync Meta Ads untuk menyinkronkan data.');
+        SyncMetaAdsProfile::dispatchAfterResponse($profile->id);
+
+        return back()->with('status', 'Access token berhasil disimpan. Sync Meta Ads sedang diproses.');
     }
 
     public function syncMetaAds(): RedirectResponse
@@ -469,9 +482,9 @@ class T4JamController extends Controller
 
         $profile->update(['last_meta_error' => null]);
 
-        SyncMetaAdsProfile::dispatch($profile->id)->afterCommit();
+        SyncMetaAdsProfile::dispatchAfterResponse($profile->id);
 
-        return back()->with('status', 'Sync Meta Ads masuk antrean queue. Worker akan memproses data di background.');
+        return back()->with('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
     }
 
     private function automationPayload(Request $request): array
@@ -744,5 +757,4 @@ class T4JamController extends Controller
     {
         return T4JamProfile::firstOrCreate(['user_id' => Auth::id()]);
     }
-
 }

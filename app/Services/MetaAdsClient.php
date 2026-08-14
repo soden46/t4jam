@@ -19,11 +19,11 @@ class MetaAdsClient
     public function adAccounts(): array
     {
         $accounts = $this->paginate('/me/adaccounts', [
-            'fields' => 'account_id,id,name,currency,account_status',
+            'fields' => 'account_id,id,name,currency,account_status,business{id,name}',
             'limit' => 100,
         ]);
 
-        foreach ($this->businesses() as $business) {
+        foreach ($this->businessPortfolios() as $business) {
             $businessId = $business['id'] ?? null;
 
             if (! $businessId) {
@@ -32,12 +32,17 @@ class MetaAdsClient
 
             $accounts = array_merge(
                 $accounts,
-                $this->businessAdAccounts($businessId, 'owned_ad_accounts'),
-                $this->businessAdAccounts($businessId, 'client_ad_accounts'),
+                $this->businessAdAccounts($business, 'owned_ad_accounts'),
+                $this->businessAdAccounts($business, 'client_ad_accounts'),
             );
         }
 
         return $this->uniqueAdAccounts($accounts);
+    }
+
+    public function businessPortfolios(): array
+    {
+        return $this->businesses();
     }
 
     public function campaigns(string $adAccountId): array
@@ -164,13 +169,30 @@ class MetaAdsClient
         }
     }
 
-    private function businessAdAccounts(string $businessId, string $edge): array
+    private function businessAdAccounts(array $business, string $edge): array
     {
+        $businessId = $business['id'] ?? null;
+
+        if (! $businessId) {
+            return [];
+        }
+
         try {
-            return $this->paginate("/{$businessId}/{$edge}", [
-                'fields' => 'account_id,id,name,currency,account_status',
+            $accounts = $this->paginate("/{$businessId}/{$edge}", [
+                'fields' => 'account_id,id,name,currency,account_status,business{id,name}',
                 'limit' => 100,
             ]);
+
+            return collect($accounts)
+                ->map(function (array $account) use ($business): array {
+                    $account['business'] ??= [
+                        'id' => $business['id'],
+                        'name' => $business['name'] ?? $business['id'],
+                    ];
+
+                    return $account;
+                })
+                ->all();
         } catch (MetaAdsException $exception) {
             Log::info('Meta business ad account lookup skipped', [
                 'business_id' => $businessId,
@@ -188,7 +210,17 @@ class MetaAdsClient
     {
         return collect($accounts)
             ->filter(fn (array $account) => ! empty($account['id']))
-            ->unique('id')
+            ->groupBy('id')
+            ->map(function ($matches) {
+                $account = $matches->first();
+                $businessAccount = $matches->first(fn (array $match) => ! empty($match['business']['id']));
+
+                if ($businessAccount && empty($account['business']['id'])) {
+                    $account['business'] = $businessAccount['business'];
+                }
+
+                return $account;
+            })
             ->values()
             ->all();
     }
