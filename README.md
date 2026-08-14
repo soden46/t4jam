@@ -68,7 +68,7 @@ User menyimpan token di halaman `Profile`, lalu klik `Sync Meta Ads`.
 Flow saat ini:
 
 1. Controller memvalidasi profile punya access token.
-2. Tombol `Sync Meta Ads` di Profile menjalankan `App\Jobs\SyncMetaAdsProfile` after-response, jadi tidak bergantung pada worker queue.
+2. Tombol `Sync Meta Ads` di Profile menjalankan `App\Services\MetaAdsSyncService` langsung, mengikuti flow first commit agar data langsung tersedia setelah request selesai.
 3. Tombol `Reload` di dashboard menjalankan `App\Services\MetaAdsSyncService` langsung dan mengembalikan data account terbaru.
 4. Account dibaca dari `/me/adaccounts`, mengikuti flow first commit yang sudah cocok dengan dashboard pilihan akun iklan.
 5. Campaign dibaca dari masing-masing ad account.

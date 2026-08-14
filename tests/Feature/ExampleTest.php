@@ -378,19 +378,20 @@ class ExampleTest extends TestCase
             'id_aplikasi' => 'app-id',
             'kunci_rahasia' => 'secret',
             'access_token_app' => 'token',
-        ])->assertRedirect('/profile/');
+        ])->assertRedirect('/profile/')
+            ->assertSessionHas('status', 'Access token valid. Sync 1 ad account, 1 campaign, 1 insight.');
 
         $this->from('/profile/')
             ->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
+            ->assertSessionHas('status', 'Sync Meta Ads selesai: 1 ad account, 1 campaign, 1 insight.');
 
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_123', 'name' => 'Meta Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_1', 'spend' => 45000, 'result' => 3, 'landing_page_view' => 90]);
         $this->assertDatabaseHas('t4jam_profiles', ['user_id' => $user->id, 'meta_user_name' => 'Meta Tester', 'last_meta_error' => null]);
     }
 
-    public function test_manual_meta_ads_sync_redirects_while_sync_runs_after_response(): void
+    public function test_manual_meta_ads_sync_redirects_after_immediate_sync(): void
     {
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
@@ -416,13 +417,13 @@ class ExampleTest extends TestCase
         $this->from('/profile/')
             ->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
+            ->assertSessionHas('status', 'Sync Meta Ads selesai: 1 ad account, 1 campaign, 0 insight.');
 
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_456', 'name' => 'Manual Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_456', 'daily_budget' => 250000]);
     }
 
-    public function test_meta_ads_sync_runs_after_response_without_queue_worker(): void
+    public function test_meta_ads_sync_runs_immediately_without_queue_worker(): void
     {
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
@@ -443,7 +444,7 @@ class ExampleTest extends TestCase
         $this->from('/profile/')
             ->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
+            ->assertSessionHas('status', 'Sync Meta Ads selesai: 1 ad account, 0 campaign, 0 insight.');
 
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_654', 'name' => 'After Response Account']);
     }
@@ -480,7 +481,7 @@ class ExampleTest extends TestCase
         $this->from('/profile/')
             ->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
+            ->assertSessionHasErrors(['meta' => 'User request limit reached']);
 
         $this->assertDatabaseMissing('ad_accounts', ['external_id' => 'act_789']);
         $this->assertDatabaseMissing('campaigns', ['external_id' => 'cmp_789']);
