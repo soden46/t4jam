@@ -390,6 +390,7 @@ function renderAutomationTable(rows) {
             await loadAutomationTasks();
         } catch (error) {
             toast(error.message, 'danger');
+            if (page() === 'automation') await loadAutomationTasks();
             button.disabled = false;
             button.textContent = originalText;
         }
@@ -407,6 +408,7 @@ function renderAutomationTable(rows) {
             await loadAutomationTasks();
         } catch (error) {
             toast(error.message, 'danger');
+            if (page() === 'automation') await loadAutomationTasks();
             button.disabled = false;
             button.textContent = originalText;
         }
@@ -476,6 +478,7 @@ function bindAutomationForm(defaultMode) {
             if (page() === 'automation') await loadAutomationTasks();
         } catch (error) {
             toast(error.message, 'danger');
+            if (page() === 'automation') await loadAutomationTasks();
         } finally {
             if (submit) {
                 submit.disabled = false;
