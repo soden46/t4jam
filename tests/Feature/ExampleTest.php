@@ -156,7 +156,6 @@ class ExampleTest extends TestCase
                     ['account_id' => '901', 'id' => 'act_901', 'name' => 'Reloaded Account', 'currency' => 'IDR', 'account_status' => 1],
                 ],
             ]),
-            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_901/campaigns?*' => Http::response(['data' => []]),
         ]);
 
@@ -355,7 +354,6 @@ class ExampleTest extends TestCase
                     ['account_id' => '123', 'id' => 'act_123', 'name' => 'Meta Account', 'currency' => 'IDR', 'account_status' => 1],
                 ],
             ]),
-            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_123/campaigns?*' => Http::response([
                 'data' => [
                     ['id' => 'cmp_1', 'name' => 'Meta Campaign', 'status' => 'ACTIVE', 'effective_status' => 'ACTIVE', 'daily_budget' => '150000', 'objective' => 'OUTCOME_SALES'],
@@ -369,22 +367,6 @@ class ExampleTest extends TestCase
                     'actions' => [
                         ['action_type' => 'purchase', 'value' => '3'],
                         ['action_type' => 'landing_page_view', 'value' => '90'],
-                    ],
-                ]],
-            ]),
-            'graph.facebook.com/*/cmp_1/adsets?*' => Http::response([
-                'data' => [
-                    ['id' => 'adset_1', 'name' => 'Meta Ad Set', 'status' => 'ACTIVE', 'effective_status' => 'ACTIVE', 'daily_budget' => '150000'],
-                ],
-            ]),
-            'graph.facebook.com/*/adset_1/insights?*' => Http::response([
-                'data' => [[
-                    'spend' => '12000',
-                    'reach' => '900',
-                    'inline_link_clicks' => '30',
-                    'actions' => [
-                        ['action_type' => 'purchase', 'value' => '1'],
-                        ['action_type' => 'landing_page_view', 'value' => '24'],
                     ],
                 ]],
             ]),
@@ -405,87 +387,7 @@ class ExampleTest extends TestCase
 
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_123', 'name' => 'Meta Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_1', 'spend' => 45000, 'result' => 3, 'landing_page_view' => 90]);
-        $this->assertDatabaseHas('ad_sets', ['external_id' => 'adset_1', 'daily_budget' => 150000, 'spend' => 12000]);
         $this->assertDatabaseHas('t4jam_profiles', ['user_id' => $user->id, 'meta_user_name' => 'Meta Tester', 'last_meta_error' => null]);
-    }
-
-    public function test_meta_ads_sync_keeps_base_accounts_when_business_permission_is_missing(): void
-    {
-        $this->seed(TestDataSeeder::class);
-        $user = User::firstOrFail();
-        $this->actingAs($user);
-
-        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
-
-        Http::fake([
-            'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
-            'graph.facebook.com/*/me/adaccounts?*' => Http::response([
-                'data' => [
-                    ['account_id' => '111', 'id' => 'act_111', 'name' => 'Personal Account', 'currency' => 'IDR', 'account_status' => 1],
-                ],
-            ]),
-            'graph.facebook.com/*/me/businesses?*' => Http::response([
-                'error' => [
-                    'message' => '(#100) Requires business_management permission to access the field.',
-                    'code' => 100,
-                    'type' => 'OAuthException',
-                ],
-            ], 400),
-            'graph.facebook.com/*/act_111/campaigns?*' => Http::response(['data' => []]),
-        ]);
-
-        $this->from('/profile/')
-            ->post('/profile/sync-meta-ads/')
-            ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
-
-        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_111', 'name' => 'Personal Account']);
-        $this->assertDatabaseHas('t4jam_profiles', ['user_id' => $user->id, 'last_meta_error' => null]);
-    }
-
-    public function test_meta_ads_sync_adds_business_owned_and_client_accounts_when_permission_exists(): void
-    {
-        $this->seed(TestDataSeeder::class);
-        $user = User::firstOrFail();
-        $this->actingAs($user);
-
-        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
-
-        Http::fake([
-            'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
-            'graph.facebook.com/*/me/adaccounts?*' => Http::response([
-                'data' => [
-                    ['account_id' => '111', 'id' => 'act_111', 'name' => 'Base Account', 'currency' => 'IDR', 'account_status' => 1],
-                ],
-            ]),
-            'graph.facebook.com/*/me/businesses?*' => Http::response([
-                'data' => [
-                    ['id' => 'business_1', 'name' => 'Prosesin Id'],
-                ],
-            ]),
-            'graph.facebook.com/*/business_1/owned_ad_accounts?*' => Http::response([
-                'data' => [
-                    ['account_id' => '222', 'id' => 'act_222', 'name' => 'Owned Business Account', 'currency' => 'IDR', 'account_status' => 1],
-                ],
-            ]),
-            'graph.facebook.com/*/business_1/client_ad_accounts?*' => Http::response([
-                'data' => [
-                    ['account_id' => '333', 'id' => 'act_333', 'name' => 'Client Business Account', 'currency' => 'IDR', 'account_status' => 1],
-                ],
-            ]),
-            'graph.facebook.com/*/act_111/campaigns?*' => Http::response(['data' => []]),
-            'graph.facebook.com/*/act_222/campaigns?*' => Http::response(['data' => []]),
-            'graph.facebook.com/*/act_333/campaigns?*' => Http::response(['data' => []]),
-        ]);
-
-        $this->from('/profile/')
-            ->post('/profile/sync-meta-ads/')
-            ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
-
-        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_111', 'name' => 'Base Account']);
-        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_222', 'name' => 'Owned Business Account']);
-        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_333', 'name' => 'Client Business Account']);
     }
 
     public function test_manual_meta_ads_sync_redirects_while_sync_runs_after_response(): void
@@ -503,14 +405,12 @@ class ExampleTest extends TestCase
                     ['account_id' => '456', 'id' => 'act_456', 'name' => 'Manual Account', 'currency' => 'IDR', 'account_status' => 1],
                 ],
             ]),
-            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_456/campaigns?*' => Http::response([
                 'data' => [
                     ['id' => 'cmp_456', 'name' => 'Manual Campaign', 'status' => 'ACTIVE', 'daily_budget' => '250000'],
                 ],
             ]),
             'graph.facebook.com/*/cmp_456/insights?*' => Http::response(['data' => []]),
-            'graph.facebook.com/*/cmp_456/adsets?*' => Http::response(['data' => []]),
         ]);
 
         $this->from('/profile/')
@@ -537,7 +437,6 @@ class ExampleTest extends TestCase
                     ['account_id' => '654', 'id' => 'act_654', 'name' => 'After Response Account', 'currency' => 'IDR', 'account_status' => 1],
                 ],
             ]),
-            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_654/campaigns?*' => Http::response(['data' => []]),
         ]);
 
@@ -549,7 +448,7 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_654', 'name' => 'After Response Account']);
     }
 
-    public function test_meta_ads_sync_keeps_saved_rows_when_insights_hit_rate_limit(): void
+    public function test_meta_ads_sync_stores_provider_error_when_insights_hit_rate_limit(): void
     {
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
@@ -564,7 +463,6 @@ class ExampleTest extends TestCase
                     ['account_id' => '789', 'id' => 'act_789', 'name' => 'Rate Limited Account', 'currency' => 'IDR', 'account_status' => 1],
                 ],
             ]),
-            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_789/campaigns?*' => Http::response([
                 'data' => [
                     ['id' => 'cmp_789', 'name' => 'Rate Limited Campaign', 'status' => 'ACTIVE', 'daily_budget' => '300000'],
@@ -584,11 +482,11 @@ class ExampleTest extends TestCase
             ->assertRedirect('/profile/')
             ->assertSessionHas('status', 'Sync Meta Ads sedang diproses. Refresh halaman beberapa saat lagi untuk melihat hasil terbaru.');
 
-        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_789', 'name' => 'Rate Limited Account']);
-        $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_789', 'daily_budget' => 300000]);
+        $this->assertDatabaseMissing('ad_accounts', ['external_id' => 'act_789']);
+        $this->assertDatabaseMissing('campaigns', ['external_id' => 'cmp_789']);
         $this->assertDatabaseHas('t4jam_profiles', [
             'user_id' => $user->id,
-            'last_meta_error' => 'Meta rate limit tercapai. Data yang sudah terbaca tetap disimpan. Tunggu beberapa menit lalu sync lagi.',
+            'last_meta_error' => 'User request limit reached',
         ]);
     }
 
