@@ -283,28 +283,34 @@ class T4JamController extends Controller
         $budgetChanged = $budget !== (int) $task->starting_budget;
         $baseMessage = 'Automation strategy berhasil diupdate';
         $metaQueue = null;
+        $metaPushed = false;
+        $target = $task->level === 'adset'
+            ? ($task->adSet ?? $task->ad_set_external_id)
+            : ($task->campaign ?? $task->campaign_external_id);
 
-        if ($budgetChanged) {
-            $target = $task->level === 'adset'
-                ? ($task->adSet ?? $task->ad_set_external_id)
-                : ($task->campaign ?? $task->campaign_external_id);
+        if ($budgetChanged || $this->shouldRefreshMetaBudget()) {
             $metaQueue = $this->metaWriteReadiness('Budget belum dikirim ke Meta karena write mode belum aktif.');
             if (! $metaQueue['ok']) {
-                return response()->json(['status' => 422, 'text' => $metaQueue['text']], 422);
+                if ($budgetChanged) {
+                    return response()->json(['status' => 422, 'text' => $metaQueue['text']], 422);
+                }
+            } else {
+                try {
+                    $this->pushMetaBudgetNow($metaQueue['profile_id'], $target, $budget, $task->level);
+                    $metaPushed = true;
+                } catch (Throwable $exception) {
+                    $text = $this->markAutomationMetaFailed($task, $baseMessage, $exception);
+
+                    return response()->json(['status' => 422, 'text' => $text], 422);
+                }
             }
 
-            try {
-                $this->pushMetaBudgetNow($metaQueue['profile_id'], $target, $budget, $task->level);
-            } catch (Throwable $exception) {
-                $text = $this->markAutomationMetaFailed($task, $baseMessage, $exception);
-
-                return response()->json(['status' => 422, 'text' => $text], 422);
+            if ($budgetChanged) {
+                $this->persistLocalBudget($target, $budget, $task->level);
             }
-
-            $this->persistLocalBudget($target, $budget, $task->level);
         }
 
-        $logMessage = $budgetChanged ? $baseMessage.'; Meta berhasil diupdate.' : $baseMessage;
+        $logMessage = $metaPushed ? $baseMessage.'; Meta berhasil diupdate.' : $baseMessage;
 
         $task->update($this->automationPayload($request) + [
             'last_log' => $logMessage,
@@ -317,7 +323,7 @@ class T4JamController extends Controller
             'messages' => [$logMessage],
         ]);
 
-        return response()->json(['status' => 200, 'text' => $budgetChanged ? 'Automation strategy berhasil diupdate. Budget Meta berhasil diupdate.' : 'Automation strategy berhasil diupdate.']);
+        return response()->json(['status' => 200, 'text' => $metaPushed ? 'Automation strategy berhasil diupdate. Budget Meta berhasil diupdate.' : 'Automation strategy berhasil diupdate.']);
     }
 
     public function updateStatusAutomation(Request $request): JsonResponse
@@ -651,6 +657,11 @@ class T4JamController extends Controller
         }
 
         return ['ok' => true, 'profile_id' => $profile->id];
+    }
+
+    private function shouldRefreshMetaBudget(): bool
+    {
+        return (bool) config('services.meta.enable_writes') && (bool) $this->currentProfile()->access_token;
     }
 
     private function persistLocalBudget(Campaign|AdSet|string|null $target, int $budget, string $level): void
