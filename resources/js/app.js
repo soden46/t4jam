@@ -6,6 +6,13 @@ const rupiah = (value) => `Rp. ${Number(value || 0).toLocaleString('id-ID')},-`;
 const number = (value) => Number(value || 0).toLocaleString('id-ID');
 const qs = (selector, root = document) => root.querySelector(selector);
 const qsa = (selector, root = document) => [...root.querySelectorAll(selector)];
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;',
+}[char]));
 
 async function request(url, options = {}) {
     const response = await fetch(url, {
@@ -94,6 +101,13 @@ function bindCheckAll(tableSelector) {
 async function initDashboard() {
     let accounts = await request('/api/get-ad-account/');
     const accountSelect = qs('#ad_account');
+    const accountPicker = qs('#account_picker');
+    const accountPickerButton = qs('#account_picker_button');
+    const accountPickerLabel = qs('#account_picker_label');
+    const accountPickerMenu = qs('#account_picker_menu');
+    const accountPickerSearch = qs('#account_picker_search');
+    const accountPickerList = qs('#account_picker_list');
+    const accountPickerEmpty = qs('#account_picker_empty');
     const reloadBtn = qs('#reload_ad_account');
     const reloadStatus = qs('#reload_status');
     const setReloadStatus = (message = '') => {
@@ -104,11 +118,12 @@ async function initDashboard() {
         if (el) el.textContent = number(value);
     };
     const renderAccountSelect = (selectedAccount = null) => {
-        accountSelect.innerHTML = accounts.adaccount.map((account) => `<option value="${account.id}">${account.name}</option>`).join('');
+        accountSelect.innerHTML = accounts.adaccount.map((account) => `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)}</option>`).join('');
         accountSelect.value = selectedAccount || accounts.selected || accounts.adaccount[0]?.id || '';
+        if (!accountSelect.value && accounts.adaccount[0]) accountSelect.value = accounts.adaccount[0].id;
         setStat('#ad_account_count', accounts.ad_account_count ?? accounts.adaccount.length);
+        renderAccountPicker();
     };
-    renderAccountSelect();
 
     const levelMode = () => qs('#level_mode')?.value || 'campaign';
 
@@ -136,11 +151,78 @@ async function initDashboard() {
         setStat('#campaign_count', (insights.summery || []).length);
     };
 
-    accountSelect.addEventListener('change', async () => {
+    const selectedAccount = () => (accounts.adaccount || []).find((item) => item.id === accountSelect.value);
+
+    function renderAccountPicker() {
+        if (!accountPicker) return;
+
+        const keyword = (accountPickerSearch?.value || '').trim().toLowerCase();
+        const rows = (accounts.adaccount || []).filter((account) => {
+            const haystack = `${account.name || ''} ${account.id || ''} ${account.account_id || ''}`.toLowerCase();
+
+            return !keyword || haystack.includes(keyword);
+        });
+        const account = selectedAccount();
+
+        if (accountPickerLabel) accountPickerLabel.textContent = account?.name || 'Pilih ad account';
+        if (accountPickerEmpty) accountPickerEmpty.hidden = rows.length > 0;
+        if (!accountPickerList) return;
+
+        accountPickerList.innerHTML = rows.map((item) => `
+            <button class="account-combobox__option" type="button" role="option" data-account-id="${escapeHtml(item.id)}" aria-selected="${item.id === accountSelect.value ? 'true' : 'false'}">
+                <span>${escapeHtml(item.name || item.id)}</span>
+                <small>${escapeHtml(item.account_id || item.id)}</small>
+            </button>
+        `).join('');
+    }
+
+    const closeAccountPicker = () => {
+        if (!accountPickerMenu || accountPickerMenu.hidden) return;
+        accountPickerMenu.hidden = true;
+        accountPickerButton?.setAttribute('aria-expanded', 'false');
+    };
+
+    const openAccountPicker = () => {
+        if (!accountPickerMenu) return;
+        accountPickerMenu.hidden = false;
+        accountPickerButton?.setAttribute('aria-expanded', 'true');
+        renderAccountPicker();
+        requestAnimationFrame(() => accountPickerSearch?.focus());
+    };
+
+    const changeSelectedAccount = async () => {
         await request('/api/changed-ad-account/', { method: 'POST', body: formBody({ ad_account: accountSelect.value }) });
         renderCampaignPicker();
         await loadInsights();
+        renderAccountPicker();
+    };
+
+    accountSelect.addEventListener('change', changeSelectedAccount);
+    accountPickerButton?.addEventListener('click', () => {
+        if (accountPickerMenu?.hidden) {
+            openAccountPicker();
+        } else {
+            closeAccountPicker();
+        }
     });
+    accountPickerSearch?.addEventListener('input', renderAccountPicker);
+    accountPickerList?.addEventListener('click', (event) => {
+        const option = event.target.closest('[data-account-id]');
+        if (!option) return;
+
+        accountSelect.value = option.dataset.accountId;
+        closeAccountPicker();
+        accountSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    document.addEventListener('click', (event) => {
+        if (accountPicker && !accountPicker.contains(event.target)) closeAccountPicker();
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') closeAccountPicker();
+    });
+
+    renderAccountSelect();
+
     reloadBtn?.addEventListener('click', async () => {
         reloadBtn.disabled = true;
         reloadBtn.textContent = 'Reloading...';

@@ -22,11 +22,22 @@
 </section>
 
 <section class="toolbar">
-    <select id="ad_account" class="toolbar-select">
-        @foreach ($accounts as $account)
-            <option value="{{ $account->external_id }}" @selected(($selectedAccount ?? null) === $account->external_id)>{{ $account->name }}</option>
-        @endforeach
-    </select>
+    <div class="account-combobox" id="account_picker">
+        <select id="ad_account" class="toolbar-select native-select-hidden" tabindex="-1" aria-hidden="true">
+            @foreach ($accounts as $account)
+                <option value="{{ $account->external_id }}" @selected(($selectedAccount ?? null) === $account->external_id)>{{ $account->name }}</option>
+            @endforeach
+        </select>
+        <button class="account-combobox__button" id="account_picker_button" type="button" aria-haspopup="listbox" aria-expanded="false">
+            <span id="account_picker_label">{{ $accounts->firstWhere('external_id', $selectedAccount ?? null)?->name ?? $accounts->first()?->name ?? 'Pilih ad account' }}</span>
+            <span class="account-combobox__chevron" aria-hidden="true"></span>
+        </button>
+        <div class="account-combobox__menu" id="account_picker_menu" hidden>
+            <input id="account_picker_search" type="search" autocomplete="off" placeholder="Search ad account">
+            <div class="account-combobox__list" id="account_picker_list" role="listbox" aria-label="Ad account"></div>
+            <div class="account-combobox__empty muted" id="account_picker_empty" hidden>Tidak ada ad account.</div>
+        </div>
+    </div>
     <button class="btn light" type="button" id="reload_ad_account">Reload</button>
     <span class="toolbar-status muted" id="reload_status" role="status" aria-live="polite"></span>
 </section>
