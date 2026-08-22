@@ -3,6 +3,8 @@
 namespace Tests\Feature;
 
 use App\Jobs\PublishMetaAdSetup;
+use App\Jobs\PushMetaAutomationTaskUpdate;
+use App\Jobs\SyncMetaAdsProfile;
 use App\Models\AdAccount;
 use App\Models\AdSet;
 use App\Models\AdSetup;
@@ -10,6 +12,7 @@ use App\Models\AutomationTask;
 use App\Models\Campaign;
 use App\Models\T4JamProfile;
 use App\Models\User;
+use App\Services\MetaAdsSyncService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
@@ -140,8 +143,9 @@ class ExampleTest extends TestCase
         $this->assertSame('adset', collect($insights)->firstWhere('campaign_id', $adSet->external_id)['level']);
     }
 
-    public function test_dashboard_reload_syncs_meta_accounts_immediately(): void
+    public function test_dashboard_reload_dispatches_meta_sync_job(): void
     {
+        Queue::fake();
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
@@ -161,10 +165,11 @@ class ExampleTest extends TestCase
         $this->postJson('/api/reload-ad-account/')
             ->assertOk()
             ->assertJsonPath('status', 200)
-            ->assertJsonPath('text', 'Ad account berhasil direload')
-            ->assertJsonPath('ad_account_count', 3);
+            ->assertJsonPath('text', 'Reload Meta Ads masuk antrean queue. Data dashboard ditampilkan dari database terakhir.')
+            ->assertJsonPath('ad_account_count', 2);
 
-        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_901', 'name' => 'Reloaded Account']);
+        Queue::assertPushed(SyncMetaAdsProfile::class, fn (SyncMetaAdsProfile $job) => $job->queue === 'meta');
+        $this->assertDatabaseMissing('ad_accounts', ['external_id' => 'act_901']);
     }
 
     public function test_create_automation_requires_campaign_from_selected_ad_account(): void
@@ -185,6 +190,7 @@ class ExampleTest extends TestCase
 
     public function test_update_automation_task_pushes_budget_to_meta_campaign(): void
     {
+        Queue::fake();
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
@@ -192,7 +198,6 @@ class ExampleTest extends TestCase
         T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
 
         $task = AutomationTask::with('campaign')->firstOrFail();
-        Http::fake(['graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true])]);
 
         $this->postJson('/update-automation-tasks/', [
             'automation_id' => $task->id,
@@ -205,19 +210,18 @@ class ExampleTest extends TestCase
             'cpr_cap' => 7000,
             'period' => 10,
         ])->assertOk()
-            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Budget Meta berhasil diupdate.');
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Update Meta masuk antrean queue.');
 
         $task->refresh();
 
         $this->assertSame(1500000, $task->current_budget);
         $this->assertDatabaseHas('campaigns', ['id' => $task->campaign_id, 'daily_budget' => 1500000]);
-        Http::assertSent(fn ($request) => $request->method() === 'POST'
-            && str_contains($request->url(), $task->campaign_external_id)
-            && $request['daily_budget'] === 1500000);
+        Queue::assertPushed(PushMetaAutomationTaskUpdate::class, fn (PushMetaAutomationTaskUpdate $job) => $job->queue === 'meta');
     }
 
     public function test_update_automation_task_pushes_budget_to_meta_adset(): void
     {
+        Queue::fake();
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
@@ -250,12 +254,10 @@ class ExampleTest extends TestCase
             'cpr_cap' => 7000,
             'period' => 10,
         ])->assertOk()
-            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Budget Meta berhasil diupdate.');
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Update Meta masuk antrean queue.');
 
         $this->assertDatabaseHas('ad_sets', ['id' => $adSet->id, 'daily_budget' => 20000]);
-        Http::assertSent(fn ($request) => $request->method() === 'POST'
-            && str_contains($request->url(), $adSet->external_id)
-            && $request['daily_budget'] === 20000);
+        Queue::assertPushed(PushMetaAutomationTaskUpdate::class, fn (PushMetaAutomationTaskUpdate $job) => $job->queue === 'meta');
     }
 
     public function test_budget_update_fails_clearly_when_meta_write_mode_is_disabled(): void
@@ -311,6 +313,7 @@ class ExampleTest extends TestCase
 
     public function test_rule_update_refreshes_meta_budget_when_writes_are_enabled(): void
     {
+        Queue::fake();
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
@@ -323,9 +326,6 @@ class ExampleTest extends TestCase
             'current_budget' => 999988,
         ]);
         $task->campaign->update(['daily_budget' => 999988]);
-
-        Http::fake(['graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true])]);
-
         $this->postJson('/update-automation-tasks/', [
             'automation_id' => $task->id,
             'budget_funnel_lp' => 'lp_to_form',
@@ -338,15 +338,14 @@ class ExampleTest extends TestCase
             'period' => 15,
             'automation_activation' => 'active',
         ])->assertOk()
-            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Budget Meta berhasil diupdate.');
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Update Meta masuk antrean queue.');
 
-        Http::assertSent(fn ($request) => $request->method() === 'POST'
-            && str_contains($request->url(), $task->campaign_external_id)
-            && $request['daily_budget'] === 999988);
+        Queue::assertPushed(PushMetaAutomationTaskUpdate::class, fn (PushMetaAutomationTaskUpdate $job) => $job->queue === 'meta');
     }
 
-    public function test_update_automation_task_updates_meta_immediately_without_queue_worker(): void
+    public function test_update_automation_task_dispatches_meta_update_queue_job(): void
     {
+        Queue::fake();
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
@@ -354,18 +353,15 @@ class ExampleTest extends TestCase
         T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
 
         $task = AutomationTask::firstOrFail();
-        Http::fake(['graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true])]);
 
         $this->postJson('/update-automation-tasks/', [
             'automation_id' => $task->id,
             'starting_budget' => 200000,
         ])->assertOk()
-            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Budget Meta berhasil diupdate.');
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Update Meta masuk antrean queue.');
 
         $this->assertSame(200000, $task->fresh()->current_budget);
-        Http::assertSent(fn ($request) => $request->method() === 'POST'
-            && str_contains($request->url(), $task->campaign_external_id)
-            && $request['daily_budget'] === 200000);
+        Queue::assertPushed(PushMetaAutomationTaskUpdate::class, fn (PushMetaAutomationTaskUpdate $job) => $job->queue === 'meta');
     }
 
     public function test_google_sign_in_button_logs_in_with_local_fallback(): void
@@ -379,6 +375,7 @@ class ExampleTest extends TestCase
 
     public function test_meta_ads_sync_persists_accounts_campaigns_and_insights(): void
     {
+        Queue::fake();
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
@@ -391,11 +388,13 @@ class ExampleTest extends TestCase
                     ['account_id' => '123', 'id' => 'act_123', 'name' => 'Meta Account', 'currency' => 'IDR', 'account_status' => 1],
                 ],
             ]),
+            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_123/campaigns?*' => Http::response([
                 'data' => [
                     ['id' => 'cmp_1', 'name' => 'Meta Campaign', 'status' => 'ACTIVE', 'effective_status' => 'ACTIVE', 'daily_budget' => '150000', 'objective' => 'OUTCOME_SALES'],
                 ],
             ]),
+            'graph.facebook.com/*/cmp_1/adsets?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/cmp_1/insights?*' => Http::response([
                 'data' => [[
                     'spend' => '45000',
@@ -416,20 +415,25 @@ class ExampleTest extends TestCase
             'kunci_rahasia' => 'secret',
             'access_token_app' => 'token',
         ])->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Access token valid. Sync 1 ad account, 1 campaign, 1 insight.');
+            ->assertSessionHas('status', 'Access token valid. Sync Meta Ads masuk antrean queue.');
+
+        $profile = T4JamProfile::where('user_id', $user->id)->firstOrFail();
+        Queue::assertPushed(SyncMetaAdsProfile::class, fn (SyncMetaAdsProfile $job) => $job->queue === 'meta');
+        $this->runMetaSyncJob($profile);
 
         $this->from('/profile/')
             ->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads selesai: 1 ad account, 1 campaign, 1 insight.');
+            ->assertSessionHas('status', 'Sync Meta Ads masuk antrean queue. Data akan masuk setelah worker selesai.');
 
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_123', 'name' => 'Meta Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_1', 'spend' => 45000, 'result' => 3, 'landing_page_view' => 90]);
         $this->assertDatabaseHas('t4jam_profiles', ['user_id' => $user->id, 'meta_user_name' => 'Meta Tester', 'last_meta_error' => null]);
     }
 
-    public function test_manual_meta_ads_sync_redirects_after_immediate_sync(): void
+    public function test_manual_meta_ads_sync_dispatches_queue_job(): void
     {
+        Queue::fake();
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
@@ -454,45 +458,63 @@ class ExampleTest extends TestCase
         $this->from('/profile/')
             ->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads selesai: 1 ad account, 1 campaign, 0 insight.');
+            ->assertSessionHas('status', 'Sync Meta Ads masuk antrean queue. Data akan masuk setelah worker selesai.');
 
-        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_456', 'name' => 'Manual Account']);
-        $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_456', 'daily_budget' => 250000]);
+        Queue::assertPushed(SyncMetaAdsProfile::class, fn (SyncMetaAdsProfile $job) => $job->queue === 'meta');
+        $this->assertDatabaseMissing('ad_accounts', ['external_id' => 'act_456']);
     }
 
-    public function test_meta_ads_sync_runs_immediately_without_queue_worker(): void
+    public function test_meta_ads_sync_job_includes_business_manager_accounts(): void
     {
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
 
-        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
 
         Http::fake([
             'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
             'graph.facebook.com/*/me/adaccounts?*' => Http::response([
                 'data' => [
-                    ['account_id' => '654', 'id' => 'act_654', 'name' => 'After Response Account', 'currency' => 'IDR', 'account_status' => 1],
+                    ['account_id' => '654', 'id' => 'act_654', 'name' => 'Personal Account', 'currency' => 'IDR', 'account_status' => 1],
+                ],
+            ]),
+            'graph.facebook.com/*/me/businesses?*' => Http::response([
+                'data' => [
+                    ['id' => 'biz_1', 'name' => 'Business 1'],
+                ],
+            ]),
+            'graph.facebook.com/*/biz_1/owned_ad_accounts?*' => Http::response([
+                'data' => [
+                    ['account_id' => '777', 'id' => 'act_777', 'name' => 'Owned Business Account', 'currency' => 'IDR', 'account_status' => 1],
+                ],
+            ]),
+            'graph.facebook.com/*/biz_1/client_ad_accounts?*' => Http::response([
+                'data' => [
+                    ['account_id' => '888', 'id' => 'act_888', 'name' => 'Client Business Account', 'currency' => 'IDR', 'account_status' => 1],
+                    ['account_id' => '777', 'id' => 'act_777', 'name' => 'Owned Business Account Duplicate', 'currency' => 'IDR', 'account_status' => 1],
                 ],
             ]),
             'graph.facebook.com/*/act_654/campaigns?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/act_777/campaigns?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/act_888/campaigns?*' => Http::response(['data' => []]),
         ]);
 
-        $this->from('/profile/')
-            ->post('/profile/sync-meta-ads/')
-            ->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Sync Meta Ads selesai: 1 ad account, 0 campaign, 0 insight.');
+        $this->runMetaSyncJob($profile);
 
-        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_654', 'name' => 'After Response Account']);
+        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_654', 'name' => 'Personal Account']);
+        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_777', 'name' => 'Owned Business Account']);
+        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_888', 'name' => 'Client Business Account']);
     }
 
     public function test_meta_ads_sync_stores_provider_error_when_insights_hit_rate_limit(): void
     {
+        Queue::fake();
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
 
-        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
 
         Http::fake([
             'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
@@ -501,6 +523,7 @@ class ExampleTest extends TestCase
                     ['account_id' => '789', 'id' => 'act_789', 'name' => 'Rate Limited Account', 'currency' => 'IDR', 'account_status' => 1],
                 ],
             ]),
+            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_789/campaigns?*' => Http::response([
                 'data' => [
                     ['id' => 'cmp_789', 'name' => 'Rate Limited Campaign', 'status' => 'ACTIVE', 'daily_budget' => '300000'],
@@ -518,7 +541,9 @@ class ExampleTest extends TestCase
         $this->from('/profile/')
             ->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHasErrors(['meta' => 'User request limit reached']);
+            ->assertSessionHas('status', 'Sync Meta Ads masuk antrean queue. Data akan masuk setelah worker selesai.');
+
+        $this->runMetaSyncJob($profile);
 
         $this->assertDatabaseMissing('ad_accounts', ['external_id' => 'act_789']);
         $this->assertDatabaseMissing('campaigns', ['external_id' => 'cmp_789']);
@@ -667,6 +692,11 @@ class ExampleTest extends TestCase
 
         Queue::assertPushed(PublishMetaAdSetup::class, fn (PublishMetaAdSetup $job) => $job->queue === 'meta');
         $this->assertSame('publishing', AdSetup::where('name', 'Setup Test')->firstOrFail()->status);
+    }
+
+    private function runMetaSyncJob(T4JamProfile $profile): void
+    {
+        (new SyncMetaAdsProfile($profile->id))->handle(app(MetaAdsSyncService::class));
     }
 
     private function adSetupPayload(int $accountId, array $overrides = []): array

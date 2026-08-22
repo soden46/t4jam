@@ -18,10 +18,34 @@ class MetaAdsClient
 
     public function adAccounts(): array
     {
-        return $this->paginate('/me/adaccounts', [
+        $accounts = $this->paginate('/me/adaccounts', [
             'fields' => 'account_id,id,name,currency,account_status',
             'limit' => 100,
         ]);
+
+        try {
+            foreach ($this->businesses() as $business) {
+                $businessId = $business['id'] ?? null;
+
+                if (! $businessId) {
+                    continue;
+                }
+
+                $accounts = array_merge(
+                    $accounts,
+                    $this->businessAdAccounts($businessId, 'owned_ad_accounts'),
+                    $this->businessAdAccounts($businessId, 'client_ad_accounts'),
+                );
+            }
+        } catch (MetaAdsException $exception) {
+            Log::warning('Meta business account lookup skipped', [
+                'http_status' => $exception->httpStatus,
+                'meta_code' => $exception->metaCode,
+                'meta_type' => $exception->metaType,
+            ]);
+        }
+
+        return $this->uniqueAdAccounts($accounts);
     }
 
     public function campaigns(string $adAccountId): array
@@ -128,6 +152,51 @@ class MetaAdsClient
         }
 
         return $response->json('access_token') ?? $shortLivedToken;
+    }
+
+    private function businesses(): array
+    {
+        return $this->paginate('/me/businesses', [
+            'fields' => 'id,name',
+            'limit' => 100,
+        ]);
+    }
+
+    private function businessAdAccounts(string $businessId, string $edge): array
+    {
+        try {
+            return $this->paginate("/{$businessId}/{$edge}", [
+                'fields' => 'account_id,id,name,currency,account_status',
+                'limit' => 100,
+            ]);
+        } catch (MetaAdsException $exception) {
+            Log::warning('Meta business ad account edge skipped', [
+                'business_id' => $businessId,
+                'edge' => $edge,
+                'http_status' => $exception->httpStatus,
+                'meta_code' => $exception->metaCode,
+                'meta_type' => $exception->metaType,
+            ]);
+
+            return [];
+        }
+    }
+
+    private function uniqueAdAccounts(array $accounts): array
+    {
+        $unique = [];
+
+        foreach ($accounts as $account) {
+            $id = $account['id'] ?? null;
+
+            if (! $id) {
+                continue;
+            }
+
+            $unique[$id] ??= $account;
+        }
+
+        return array_values($unique);
     }
 
     private function paginate(string $path, array $query): array

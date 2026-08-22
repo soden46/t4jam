@@ -3,6 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Exceptions\MetaAdsException;
+use App\Jobs\PushMetaAutomationTaskUpdate;
+use App\Jobs\SyncMetaAdsProfile;
 use App\Models\AdAccount;
 use App\Models\AdSet;
 use App\Models\AutomationLog;
@@ -18,10 +20,9 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Log;
 use Illuminate\View\View;
-use Throwable;
 
 class T4JamController extends Controller
 {
@@ -126,19 +127,14 @@ class T4JamController extends Controller
         return response()->json(['status' => 200, 'text' => 'Settings dashboard tersimpan']);
     }
 
-    public function reloadAdAccount(MetaAdsSyncService $metaSync): JsonResponse
+    public function reloadAdAccount(): JsonResponse
     {
         $profile = $this->currentProfile();
         $message = 'Dashboard direfresh dari data terakhir di database.';
 
         if ($profile->access_token) {
-            try {
-                $profile->update(['last_meta_error' => null]);
-                $metaSync->sync($profile);
-                $message = 'Ad account berhasil direload';
-            } catch (MetaAdsException $exception) {
-                return response()->json(['status' => 422, 'text' => $exception->getMessage()], 422);
-            }
+            SyncMetaAdsProfile::dispatch($profile->id)->afterCommit();
+            $message = 'Reload Meta Ads masuk antrean queue. Data dashboard ditampilkan dari database terakhir.';
         }
 
         $accounts = AdAccount::with('campaigns.adSets')->get();
@@ -225,50 +221,41 @@ class T4JamController extends Controller
             return response()->json(['status' => 422, 'text' => $metaQueue['text']], 422);
         }
 
-        try {
-            $this->pushMetaBudgetNow($metaQueue['profile_id'], $adSet ?? $campaign, $budget, $level);
-        } catch (Throwable $exception) {
-            $text = $this->metaWriteFailureText($exception);
+        $baseMessage = 'Automation budget berhasil dibuat';
+        $queuedMessage = $baseMessage.'; update Meta masuk antrean queue.';
 
-            Log::warning('Meta automation create failed before local persistence', [
-                'action' => 'budget',
+        $task = DB::transaction(function () use ($request, $account, $campaign, $adSet, $budget, $level, $queuedMessage, $metaQueue, $baseMessage): AutomationTask {
+            $this->persistLocalBudget($adSet ?? $campaign, $budget, $level);
+
+            $task = AutomationTask::create($this->automationPayload($request) + [
+                'id' => (string) str()->uuid(),
+                'ad_account_id' => $account->id,
+                'campaign_id' => $campaign->id,
+                'ad_set_id' => $adSet?->id,
                 'campaign_external_id' => $campaign->external_id,
                 'ad_set_external_id' => $adSet?->external_id,
-                'exception' => $exception::class,
-                'message' => $exception->getMessage(),
+                'campaign_name' => $adSet?->name ?? $campaign->name,
+                'ad_account_name' => $account->name,
+                'current_budget' => $budget,
+                'current_spend' => 0,
+                'current_result' => 0,
+                'is_active' => true,
+                'level' => $level,
+                'last_log' => $queuedMessage,
+                'last_checked_at' => now(),
             ]);
 
-            return response()->json(['status' => 422, 'text' => 'Automation budget belum dibuat. '.$text], 422);
-        }
+            AutomationLog::create([
+                'automation_task_id' => $task->id,
+                'messages' => [$queuedMessage, 'BOT siap membaca metrik campaign'],
+            ]);
 
-        $this->persistLocalBudget($adSet ?? $campaign, $budget, $level);
-        $baseMessage = 'Automation budget berhasil dibuat';
-        $successMessage = $baseMessage.'; Meta berhasil diupdate.';
+            PushMetaAutomationTaskUpdate::dispatch($metaQueue['profile_id'], $task->id, 'budget', $baseMessage, $budget)->afterCommit();
 
-        $task = AutomationTask::create($this->automationPayload($request) + [
-            'id' => (string) str()->uuid(),
-            'ad_account_id' => $account->id,
-            'campaign_id' => $campaign->id,
-            'ad_set_id' => $adSet?->id,
-            'campaign_external_id' => $campaign->external_id,
-            'ad_set_external_id' => $adSet?->external_id,
-            'campaign_name' => $adSet?->name ?? $campaign->name,
-            'ad_account_name' => $account->name,
-            'current_budget' => $budget,
-            'current_spend' => 0,
-            'current_result' => 0,
-            'is_active' => true,
-            'level' => $level,
-            'last_log' => $successMessage,
-            'last_checked_at' => now(),
-        ]);
+            return $task;
+        });
 
-        AutomationLog::create([
-            'automation_task_id' => $task->id,
-            'messages' => [$successMessage, 'BOT siap membaca metrik campaign'],
-        ]);
-
-        return response()->json(['status' => 200, 'text' => 'Automation budget berhasil dibuat. Budget Meta berhasil diupdate.', 'data' => $this->taskPayload($task->load(['adAccount', 'campaign']))]);
+        return response()->json(['status' => 200, 'text' => 'Automation budget berhasil dibuat. Update Meta masuk antrean queue.', 'data' => $this->taskPayload($task->load(['adAccount', 'campaign']))]);
     }
 
     public function updateAutomationTask(Request $request): JsonResponse
@@ -283,7 +270,7 @@ class T4JamController extends Controller
         $budgetChanged = $budget !== (int) $task->starting_budget;
         $baseMessage = 'Automation strategy berhasil diupdate';
         $metaQueue = null;
-        $metaPushed = false;
+        $metaQueued = false;
         $target = $task->level === 'adset'
             ? ($task->adSet ?? $task->ad_set_external_id)
             : ($task->campaign ?? $task->campaign_external_id);
@@ -295,35 +282,35 @@ class T4JamController extends Controller
                     return response()->json(['status' => 422, 'text' => $metaQueue['text']], 422);
                 }
             } else {
-                try {
-                    $this->pushMetaBudgetNow($metaQueue['profile_id'], $target, $budget, $task->level);
-                    $metaPushed = true;
-                } catch (Throwable $exception) {
-                    $text = $this->markAutomationMetaFailed($task, $baseMessage, $exception);
-
-                    return response()->json(['status' => 422, 'text' => $text], 422);
-                }
+                $metaQueued = true;
             }
 
+        }
+
+        $logMessage = $metaQueued ? $baseMessage.'; update Meta masuk antrean queue.' : $baseMessage;
+
+        DB::transaction(function () use ($request, $task, $target, $logMessage, $budgetChanged, $budget, $metaQueued, $metaQueue, $baseMessage): void {
             if ($budgetChanged) {
                 $this->persistLocalBudget($target, $budget, $task->level);
             }
-        }
 
-        $logMessage = $metaPushed ? $baseMessage.'; Meta berhasil diupdate.' : $baseMessage;
+            $task->update($this->automationPayload($request) + [
+                'last_log' => $logMessage,
+                'last_checked_at' => now(),
+                'is_active' => $request->input('automation_activation', 'active') === 'active',
+            ] + ($budgetChanged ? ['current_budget' => $budget] : []));
 
-        $task->update($this->automationPayload($request) + [
-            'last_log' => $logMessage,
-            'last_checked_at' => now(),
-            'is_active' => $request->input('automation_activation', 'active') === 'active',
-        ] + ($budgetChanged ? ['current_budget' => $budget] : []));
+            AutomationLog::create([
+                'automation_task_id' => $task->id,
+                'messages' => [$logMessage],
+            ]);
 
-        AutomationLog::create([
-            'automation_task_id' => $task->id,
-            'messages' => [$logMessage],
-        ]);
+            if ($metaQueued) {
+                PushMetaAutomationTaskUpdate::dispatch($metaQueue['profile_id'], $task->id, 'budget', $baseMessage, $budget)->afterCommit();
+            }
+        });
 
-        return response()->json(['status' => 200, 'text' => $metaPushed ? 'Automation strategy berhasil diupdate. Budget Meta berhasil diupdate.' : 'Automation strategy berhasil diupdate.']);
+        return response()->json(['status' => 200, 'text' => $metaQueued ? 'Automation strategy berhasil diupdate. Update Meta masuk antrean queue.' : 'Automation strategy berhasil diupdate.']);
     }
 
     public function updateStatusAutomation(Request $request): JsonResponse
@@ -336,28 +323,23 @@ class T4JamController extends Controller
         }
 
         $baseMessage = 'Status automation berhasil diperbarui';
+        $queuedMessage = $baseMessage.'; update Meta masuk antrean queue.';
 
-        try {
-            $this->pushMetaStatusNow($metaQueue['profile_id'], $task, $isActive);
-        } catch (Throwable $exception) {
-            $text = $this->markAutomationMetaFailed($task, $baseMessage, $exception);
+        DB::transaction(function () use ($task, $isActive, $queuedMessage, $metaQueue, $baseMessage): void {
+            $task->update([
+                'is_active' => $isActive,
+                'last_log' => $queuedMessage,
+                'last_checked_at' => now(),
+            ]);
+            AutomationLog::create([
+                'automation_task_id' => $task->id,
+                'messages' => [$queuedMessage],
+            ]);
 
-            return response()->json(['status' => 422, 'text' => $text], 422);
-        }
+            PushMetaAutomationTaskUpdate::dispatch($metaQueue['profile_id'], $task->id, 'status', $baseMessage, active: $isActive)->afterCommit();
+        });
 
-        $successMessage = $baseMessage.'; Meta berhasil diupdate.';
-
-        $task->update([
-            'is_active' => $isActive,
-            'last_log' => $successMessage,
-            'last_checked_at' => now(),
-        ]);
-        AutomationLog::create([
-            'automation_task_id' => $task->id,
-            'messages' => [$successMessage],
-        ]);
-
-        return response()->json(['status' => 200, 'text' => 'Status automation berhasil diperbarui. Status Meta berhasil diupdate.']);
+        return response()->json(['status' => 200, 'text' => 'Status automation berhasil diperbarui. Update Meta masuk antrean queue.']);
     }
 
     public function specificTask(Request $request): JsonResponse
@@ -398,29 +380,25 @@ class T4JamController extends Controller
         }
 
         $baseMessage = 'Menurunkan budget manual berhasil';
+        $queuedMessage = $baseMessage.'; update Meta masuk antrean queue.';
 
-        try {
-            $this->pushMetaBudgetNow($metaQueue['profile_id'], $target, $budget, $task->level);
-        } catch (Throwable $exception) {
-            $text = $this->markAutomationMetaFailed($task, $baseMessage, $exception);
+        DB::transaction(function () use ($target, $budget, $task, $queuedMessage, $metaQueue, $baseMessage): void {
+            $this->persistLocalBudget($target, $budget, $task->level);
 
-            return response()->json(['status' => 422, 'text' => $text], 422);
-        }
+            $task->update([
+                'current_budget' => $task->starting_budget,
+                'last_log' => $queuedMessage,
+                'last_checked_at' => now(),
+            ]);
+            AutomationLog::create([
+                'automation_task_id' => $task->id,
+                'messages' => [$queuedMessage],
+            ]);
 
-        $this->persistLocalBudget($target, $budget, $task->level);
-        $successMessage = $baseMessage.'; Meta berhasil diupdate.';
+            PushMetaAutomationTaskUpdate::dispatch($metaQueue['profile_id'], $task->id, 'budget', $baseMessage, $budget)->afterCommit();
+        });
 
-        $task->update([
-            'current_budget' => $task->starting_budget,
-            'last_log' => $successMessage,
-            'last_checked_at' => now(),
-        ]);
-        AutomationLog::create([
-            'automation_task_id' => $task->id,
-            'messages' => [$successMessage],
-        ]);
-
-        return response()->json(['status' => 200, 'text' => 'Budget berhasil diturunkan manual. Budget Meta berhasil diupdate.']);
+        return response()->json(['status' => 200, 'text' => 'Budget berhasil diturunkan manual. Update Meta masuk antrean queue.']);
     }
 
     public function getInterest(Request $request): JsonResponse
@@ -482,7 +460,7 @@ class T4JamController extends Controller
         return response()->json(['status' => 200, 'text' => 'Password berhasil diupdate']);
     }
 
-    public function saveAccessToken(Request $request, MetaAdsSyncService $metaSync): RedirectResponse
+    public function saveAccessToken(Request $request): RedirectResponse
     {
         $accessToken = $request->input('access_token_app');
         $appId = $request->input('id_aplikasi');
@@ -510,18 +488,12 @@ class T4JamController extends Controller
             return back()->with('status', 'Access token berhasil disimpan.');
         }
 
-        try {
-            $counts = $metaSync->sync($profile);
-        } catch (MetaAdsException $exception) {
-            $profile->update(['last_meta_error' => $exception->getMessage()]);
+        SyncMetaAdsProfile::dispatch($profile->id)->afterCommit();
 
-            return back()->withErrors(['meta' => $exception->getMessage()]);
-        }
-
-        return back()->with('status', "Access token valid. Sync {$counts['accounts']} ad account, {$counts['campaigns']} campaign, {$counts['insights']} insight.");
+        return back()->with('status', 'Access token valid. Sync Meta Ads masuk antrean queue.');
     }
 
-    public function syncMetaAds(MetaAdsSyncService $metaSync): RedirectResponse
+    public function syncMetaAds(): RedirectResponse
     {
         $profile = $this->currentProfile();
 
@@ -529,17 +501,9 @@ class T4JamController extends Controller
             return back()->withErrors(['meta' => 'Access token Meta belum diisi.']);
         }
 
-        $profile->update(['last_meta_error' => null]);
+        SyncMetaAdsProfile::dispatch($profile->id)->afterCommit();
 
-        try {
-            $counts = $metaSync->sync($profile);
-        } catch (MetaAdsException $exception) {
-            $profile->update(['last_meta_error' => $exception->getMessage()]);
-
-            return back()->withErrors(['meta' => $exception->getMessage()]);
-        }
-
-        return back()->with('status', "Sync Meta Ads selesai: {$counts['accounts']} ad account, {$counts['campaigns']} campaign, {$counts['insights']} insight.");
+        return back()->with('status', 'Sync Meta Ads masuk antrean queue. Data akan masuk setelah worker selesai.');
     }
 
     private function automationPayload(Request $request): array
@@ -681,109 +645,6 @@ class T4JamController extends Controller
         } else {
             Campaign::query()->where('external_id', $target)->update(['daily_budget' => $budget]);
         }
-    }
-
-    private function pushMetaBudgetNow(int $profileId, Campaign|AdSet|string|null $target, int $budget, string $level): void
-    {
-        $targetId = $this->targetMetaId($target);
-
-        if (! $targetId) {
-            throw new MetaAdsException('Target campaign/ad set tidak ditemukan.');
-        }
-
-        $client = $this->metaClient($profileId);
-
-        if ($level === 'adset') {
-            $client->updateAdSetBudget($targetId, $budget);
-
-            return;
-        }
-
-        $client->updateCampaignBudget($targetId, $budget);
-    }
-
-    private function pushMetaStatusNow(int $profileId, AutomationTask $task, bool $active): void
-    {
-        $targetId = $task->level === 'adset'
-            ? $task->ad_set_external_id
-            : $task->campaign_external_id;
-
-        if (! $targetId) {
-            throw new MetaAdsException('Target campaign/ad set tidak ditemukan.');
-        }
-
-        $client = $this->metaClient($profileId);
-
-        if ($task->level === 'adset') {
-            $client->updateAdSetStatus($targetId, $active);
-
-            return;
-        }
-
-        $client->updateCampaignStatus($targetId, $active);
-    }
-
-    private function metaClient(int $profileId): MetaAdsClient
-    {
-        $profile = T4JamProfile::query()->findOrFail($profileId);
-
-        return app(MetaAdsSyncService::class)->client($profile);
-    }
-
-    private function targetMetaId(Campaign|AdSet|string|null $target): ?string
-    {
-        if ($target instanceof Campaign || $target instanceof AdSet) {
-            return $target->external_id;
-        }
-
-        return is_string($target) && $target !== '' ? $target : null;
-    }
-
-    private function markAutomationMetaFailed(AutomationTask $task, string $baseMessage, Throwable $exception): string
-    {
-        $text = $this->metaWriteFailureText($exception);
-        $log = $baseMessage.'; '.$text;
-
-        Log::warning('Meta automation update failed', [
-            'automation_task_id' => $task->id,
-            'exception' => $exception::class,
-            'message' => $exception->getMessage(),
-        ]);
-
-        $task->update([
-            'last_log' => $log,
-            'last_checked_at' => now(),
-        ]);
-
-        AutomationLog::create([
-            'automation_task_id' => $task->id,
-            'messages' => [$log],
-        ]);
-
-        return $text;
-    }
-
-    private function metaWriteFailureText(Throwable $exception): string
-    {
-        if (! $exception instanceof MetaAdsException) {
-            return 'Update Meta gagal. Coba lagi beberapa saat.';
-        }
-
-        $message = strtolower($exception->getMessage());
-
-        if ($exception->metaCode === 190 || str_contains($message, 'token')) {
-            return 'Access token Meta tidak valid atau sudah expired.';
-        }
-
-        if ($exception->httpStatus === 403 || str_contains($message, 'permission')) {
-            return 'Akses Meta belum punya izin untuk mengubah campaign/ad set ini.';
-        }
-
-        if ($exception->httpStatus === 400) {
-            return 'Meta menolak update. Cek minimum budget, status campaign/ad set, dan permission ad account.';
-        }
-
-        return 'Update Meta belum berhasil. Coba lagi beberapa saat.';
     }
 
     private function insightsPayload(?string $adAccountExternalId = null, array $selectedCampaigns = [], string $level = 'campaign'): array

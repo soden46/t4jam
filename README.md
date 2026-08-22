@@ -68,20 +68,20 @@ User menyimpan token di halaman `Profile`, lalu klik `Sync Meta Ads`.
 Flow saat ini:
 
 1. Controller memvalidasi profile punya access token.
-2. Tombol `Sync Meta Ads` di Profile menjalankan `App\Services\MetaAdsSyncService` langsung, mengikuti flow first commit agar data langsung tersedia setelah request selesai.
-3. Tombol `Reload` di dashboard menjalankan `App\Services\MetaAdsSyncService` langsung dan mengembalikan data account terbaru.
-4. Account dibaca dari `/me/adaccounts`, mengikuti flow first commit yang sudah cocok dengan dashboard pilihan akun iklan.
-5. Campaign dibaca dari masing-masing ad account.
-6. Campaign insight ikut dibaca jika Meta tidak menolak request.
+2. Tombol `Sync Meta Ads` di Profile memasukkan `App\Jobs\SyncMetaAdsProfile` ke queue `meta`, lalu halaman langsung redirect dengan status antrean.
+3. Tombol `Reload` di dashboard juga memasukkan job sync ke queue `meta` dan mengembalikan data terakhir yang sudah ada di database.
+4. Account dibaca dari `/me/adaccounts`, lalu dilengkapi dari Business Manager `/me/businesses` melalui edge `owned_ad_accounts` dan `client_ad_accounts` jika token punya akses.
+5. Campaign dan ad set dibaca dari masing-masing ad account/campaign.
+6. Campaign/ad set insight ikut dibaca jika Meta tidak menolak request.
 7. Error terakhir disimpan di `t4jam_profiles.last_meta_error` dan ditampilkan di Profile.
 
-Sync account sengaja mengikuti flow lama yang tidak membutuhkan queue worker karena client perlu melihat akun iklan terbaru setelah sync/reload. Flow ini tidak memanggil Business Manager, `owned_ad_accounts`, `client_ad_accounts`, atau sync ad set saat membaca account.
+`MetaAdsSyncService` mengambil data Meta terlebih dulu, lalu membuka transaksi database hanya saat menulis account/campaign/ad set/insight. Ini mencegah request network menahan lock MySQL di `t4jam_profiles` terlalu lama.
 
 ## Meta Write Actions
 
 Action yang mengirim perubahan ke Meta juga memakai queue `meta`:
 
-- `Reload` di dashboard dan `Sync Meta Ads` di Profile menjalankan sync baca data akun iklan, bukan write action.
+- `Reload` di dashboard dan `Sync Meta Ads` di Profile menjalankan sync baca data akun iklan melalui job `SyncMetaAdsProfile`.
 - `Create` dan `Update` automation budget menyimpan data lokal, lalu memasukkan update budget Meta ke queue.
 - Toggle status automation menyimpan status lokal, lalu memasukkan update status Meta ke queue.
 - `Turun` budget menyimpan budget lokal, lalu memasukkan update budget Meta ke queue.

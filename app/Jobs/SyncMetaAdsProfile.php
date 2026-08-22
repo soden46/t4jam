@@ -5,15 +5,36 @@ namespace App\Jobs;
 use App\Exceptions\MetaAdsException;
 use App\Models\T4JamProfile;
 use App\Services\MetaAdsSyncService;
-use Illuminate\Foundation\Bus\Dispatchable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
-class SyncMetaAdsProfile
+class SyncMetaAdsProfile implements ShouldBeUnique, ShouldQueue
 {
-    use Dispatchable;
+    use Queueable;
 
-    public function __construct(private readonly int $profileId) {}
+    public int $tries = 2;
+
+    public int $timeout = 650;
+
+    public int $uniqueFor = 900;
+
+    public function __construct(private readonly int $profileId)
+    {
+        $this->onQueue('meta');
+    }
+
+    public function uniqueId(): string
+    {
+        return (string) $this->profileId;
+    }
+
+    public function backoff(): array
+    {
+        return [60, 300];
+    }
 
     public function handle(MetaAdsSyncService $metaSync): void
     {
@@ -28,7 +49,7 @@ class SyncMetaAdsProfile
         } catch (MetaAdsException $exception) {
             $profile->update(['last_meta_error' => $exception->getMessage()]);
         } catch (Throwable $exception) {
-            Log::warning('Meta ads sync failed after response', [
+            Log::warning('Meta ads sync job failed', [
                 'profile_id' => $this->profileId,
                 'exception' => $exception::class,
                 'message' => $exception->getMessage(),

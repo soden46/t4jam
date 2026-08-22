@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Exceptions\MetaAdsException;
 use App\Models\AdAccount;
+use App\Models\AdSet;
 use App\Models\Campaign;
 use App\Models\T4JamProfile;
 use Illuminate\Support\Facades\DB;
@@ -14,10 +15,10 @@ class MetaAdsSyncService
     {
         $client = $this->client($profile);
         $metaUser = $client->validateToken();
-        $accounts = $client->adAccounts();
-        $counts = ['accounts' => 0, 'campaigns' => 0, 'insights' => 0];
+        $accounts = $this->prefetchAccounts($client);
+        $counts = ['accounts' => 0, 'campaigns' => 0, 'adsets' => 0, 'insights' => 0];
 
-        DB::transaction(function () use ($profile, $metaUser, $accounts, $client, &$counts): void {
+        DB::transaction(function () use ($profile, $metaUser, $accounts, &$counts): void {
             $profile->update([
                 'meta_user_id' => $metaUser['id'] ?? null,
                 'meta_user_name' => $metaUser['name'] ?? null,
@@ -30,14 +31,25 @@ class MetaAdsSyncService
                 $account = $this->upsertAccount($accountData);
                 $counts['accounts']++;
 
-                foreach ($client->campaigns($account->external_id) as $campaignData) {
+                foreach ($accountData['_campaigns'] ?? [] as $campaignData) {
                     $campaign = $this->upsertCampaign($account, $campaignData);
                     $counts['campaigns']++;
 
-                    $insights = $client->campaignInsights($campaign->external_id);
+                    $insights = $campaignData['_insights'] ?? [];
                     if ($insights) {
                         $campaign->update($this->insightPayload($insights));
                         $counts['insights']++;
+                    }
+
+                    foreach ($campaignData['_adsets'] ?? [] as $adSetData) {
+                        $adSet = $this->upsertAdSet($account, $campaign, $adSetData);
+                        $counts['adsets']++;
+
+                        $adSetInsights = $adSetData['_insights'] ?? [];
+                        if ($adSetInsights) {
+                            $adSet->update($this->insightPayload($adSetInsights));
+                            $counts['insights']++;
+                        }
                     }
                 }
             }
@@ -53,6 +65,42 @@ class MetaAdsSyncService
         }
 
         return new MetaAdsClient($profile->access_token);
+    }
+
+    private function prefetchAccounts(MetaAdsClient $client): array
+    {
+        return collect($client->adAccounts())
+            ->map(function (array $accountData) use ($client): array {
+                $accountId = $accountData['id'] ?? null;
+                $campaigns = $accountId
+                    ? collect($client->campaigns($accountId))
+                        ->map(function (array $campaignData) use ($client): array {
+                            $campaignId = $campaignData['id'] ?? null;
+
+                            return $campaignData + [
+                                '_insights' => $campaignId ? $client->campaignInsights($campaignId) : [],
+                                '_adsets' => $campaignId ? $this->prefetchAdSets($client, $campaignId) : [],
+                            ];
+                        })
+                        ->all()
+                    : [];
+
+                return $accountData + ['_campaigns' => $campaigns];
+            })
+            ->all();
+    }
+
+    private function prefetchAdSets(MetaAdsClient $client, string $campaignId): array
+    {
+        return collect($client->adSets($campaignId))
+            ->map(function (array $adSetData) use ($client): array {
+                $adSetId = $adSetData['id'] ?? null;
+
+                return $adSetData + [
+                    '_insights' => $adSetId ? $client->adSetInsights($adSetId) : [],
+                ];
+            })
+            ->all();
     }
 
     private function upsertAccount(array $accountData): AdAccount
@@ -81,6 +129,21 @@ class MetaAdsSyncService
                 'level' => 'campaign',
                 'objective' => $campaignData['objective'] ?? null,
                 'daily_budget' => (int) ($campaignData['daily_budget'] ?? 0),
+            ],
+        );
+    }
+
+    private function upsertAdSet(AdAccount $account, Campaign $campaign, array $adSetData): AdSet
+    {
+        return AdSet::updateOrCreate(
+            ['external_id' => $adSetData['id']],
+            [
+                'ad_account_id' => $account->id,
+                'campaign_id' => $campaign->id,
+                'name' => $adSetData['name'] ?? $adSetData['id'],
+                'status' => $adSetData['status'] ?? $adSetData['effective_status'] ?? 'UNKNOWN',
+                'effective_status' => $adSetData['effective_status'] ?? null,
+                'daily_budget' => (int) ($adSetData['daily_budget'] ?? 0),
             ],
         );
     }
