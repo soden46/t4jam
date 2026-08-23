@@ -288,7 +288,7 @@ async function initDashboard() {
     await loadInsights();
     bindSearch('#search_domain', '#campaign_table');
     bindCheckAll('#campaign_table');
-    bindAutomationForm('create');
+    bindAutomationForm('create', loadInsights);
     qs('#get_metrik_btn')?.addEventListener('click', () => {
         const checked = qs('#campaign_table tbody input[type="checkbox"]:checked');
         if (!checked) {
@@ -335,7 +335,7 @@ function renderCampaignTable(rows) {
 }
 
 async function initAutomation() {
-    bindAutomationForm('update');
+    bindAutomationForm('update', loadAutomationTasks);
     bindSearch('#search_domain', '#automation_table');
     qsa('#add_account_filter, #level_filter, #event_tracking_filter').forEach((el) => el.addEventListener('change', loadAutomationTasks));
     qs('#new_automation')?.addEventListener('click', () => {
@@ -385,7 +385,7 @@ function renderAutomationTable(rows) {
     qsa('[data-toggle-task]').forEach((button) => button.addEventListener('click', async () => {
         const originalText = button.textContent;
         button.disabled = true;
-        button.textContent = 'queue...';
+        button.textContent = 'Saving...';
 
         try {
             const response = await request('/update-status-automation-tasks/', { method: 'POST', body: formBody({ automation_id: button.dataset.toggleTask, status: button.dataset.status }) });
@@ -403,7 +403,7 @@ function renderAutomationTable(rows) {
     qsa('[data-budget-down]').forEach((button) => button.addEventListener('click', async () => {
         const originalText = button.textContent;
         button.disabled = true;
-        button.textContent = 'Queue...';
+        button.textContent = 'Saving...';
 
         try {
             const response = await request('/turun-budget-manual/', { method: 'POST', body: formBody({ automation_id: button.dataset.budgetDown }) });
@@ -533,7 +533,7 @@ function bindAutomationTargetFields() {
     });
 }
 
-function bindAutomationForm(defaultMode) {
+function bindAutomationForm(defaultMode, refreshAfterSuccess = null) {
     const form = qs('#automation-form');
     if (!form || form.dataset.bound) return;
     form.dataset.bound = '1';
@@ -546,14 +546,14 @@ function bindAutomationForm(defaultMode) {
         const originalText = submitLabel?.textContent || '';
         if (submit) {
             submit.disabled = true;
-            submitLabel.textContent = 'Queue...';
+            submitLabel.textContent = 'Saving...';
         }
 
         try {
             const response = await request(isUpdate ? '/update-automation-tasks/' : '/create-automation-tasks/', { method: 'POST', body: formBody(form) });
             closeModals();
             toast(response.text || (isUpdate ? 'Automation strategy berhasil diupdate' : 'Automation budget berhasil dibuat'));
-            if (page() === 'automation') await loadAutomationTasks();
+            if (refreshAfterSuccess) await refreshAfterSuccess();
         } catch (error) {
             closeModals();
             toast(error.message, 'danger');

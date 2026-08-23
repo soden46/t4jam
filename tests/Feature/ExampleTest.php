@@ -3,7 +3,6 @@
 namespace Tests\Feature;
 
 use App\Jobs\PublishMetaAdSetup;
-use App\Jobs\PushMetaAutomationTaskUpdate;
 use App\Jobs\SyncMetaAdsProfile;
 use App\Models\AdAccount;
 use App\Models\AdSet;
@@ -190,7 +189,6 @@ class ExampleTest extends TestCase
 
     public function test_update_automation_task_pushes_budget_to_meta_campaign(): void
     {
-        Queue::fake();
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
@@ -198,6 +196,7 @@ class ExampleTest extends TestCase
         T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
 
         $task = AutomationTask::with('campaign')->firstOrFail();
+        Http::fake(['graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true])]);
 
         $this->postJson('/update-automation-tasks/', [
             'automation_id' => $task->id,
@@ -210,18 +209,47 @@ class ExampleTest extends TestCase
             'cpr_cap' => 7000,
             'period' => 10,
         ])->assertOk()
-            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Update Meta masuk antrean queue.');
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.');
 
         $task->refresh();
 
         $this->assertSame(1500000, $task->current_budget);
         $this->assertDatabaseHas('campaigns', ['id' => $task->campaign_id, 'daily_budget' => 1500000]);
-        Queue::assertPushed(PushMetaAutomationTaskUpdate::class, fn (PushMetaAutomationTaskUpdate $job) => $job->queue === 'meta');
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign->external_id)
+            && $request['daily_budget'] === 1500000);
+    }
+
+    public function test_dashboard_insights_reflect_budget_after_automation_update(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $task = AutomationTask::with(['adAccount', 'campaign'])->firstOrFail();
+        Http::fake(['graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true])]);
+
+        $this->postJson('/update-automation-tasks/', [
+            'automation_id' => $task->id,
+            'starting_budget' => 250000,
+        ])->assertOk();
+
+        $rows = $this
+            ->withSession([
+                'selected_ad_account' => $task->adAccount->external_id,
+                'selected_campaigns' => [$task->campaign->external_id],
+            ])
+            ->getJson('/api/get-ad-insight/?ad_account='.$task->adAccount->external_id)
+            ->assertOk()
+            ->json('summery');
+
+        $this->assertSame(250000, collect($rows)->firstWhere('campaign_id', $task->campaign->external_id)['budget']);
     }
 
     public function test_update_automation_task_pushes_budget_to_meta_adset(): void
     {
-        Queue::fake();
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
@@ -254,10 +282,12 @@ class ExampleTest extends TestCase
             'cpr_cap' => 7000,
             'period' => 10,
         ])->assertOk()
-            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Update Meta masuk antrean queue.');
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.');
 
         $this->assertDatabaseHas('ad_sets', ['id' => $adSet->id, 'daily_budget' => 20000]);
-        Queue::assertPushed(PushMetaAutomationTaskUpdate::class, fn (PushMetaAutomationTaskUpdate $job) => $job->queue === 'meta');
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $adSet->external_id)
+            && $request['daily_budget'] === 20000);
     }
 
     public function test_budget_update_fails_clearly_when_meta_write_mode_is_disabled(): void
@@ -313,7 +343,6 @@ class ExampleTest extends TestCase
 
     public function test_rule_update_refreshes_meta_budget_when_writes_are_enabled(): void
     {
-        Queue::fake();
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
@@ -326,6 +355,8 @@ class ExampleTest extends TestCase
             'current_budget' => 999988,
         ]);
         $task->campaign->update(['daily_budget' => 999988]);
+        Http::fake(['graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true])]);
+
         $this->postJson('/update-automation-tasks/', [
             'automation_id' => $task->id,
             'budget_funnel_lp' => 'lp_to_form',
@@ -338,30 +369,34 @@ class ExampleTest extends TestCase
             'period' => 15,
             'automation_activation' => 'active',
         ])->assertOk()
-            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Update Meta masuk antrean queue.');
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.');
 
-        Queue::assertPushed(PushMetaAutomationTaskUpdate::class, fn (PushMetaAutomationTaskUpdate $job) => $job->queue === 'meta');
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign->external_id)
+            && $request['daily_budget'] === 999988);
     }
 
-    public function test_update_automation_task_dispatches_meta_update_queue_job(): void
+    public function test_update_automation_task_updates_meta_immediately(): void
     {
-        Queue::fake();
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
         $this->actingAs($user);
         T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
 
-        $task = AutomationTask::firstOrFail();
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        Http::fake(['graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true])]);
 
         $this->postJson('/update-automation-tasks/', [
             'automation_id' => $task->id,
             'starting_budget' => 200000,
         ])->assertOk()
-            ->assertJsonPath('text', 'Automation strategy berhasil diupdate. Update Meta masuk antrean queue.');
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.');
 
         $this->assertSame(200000, $task->fresh()->current_budget);
-        Queue::assertPushed(PushMetaAutomationTaskUpdate::class, fn (PushMetaAutomationTaskUpdate $job) => $job->queue === 'meta');
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign->external_id)
+            && $request['daily_budget'] === 200000);
     }
 
     public function test_google_sign_in_button_logs_in_with_local_fallback(): void

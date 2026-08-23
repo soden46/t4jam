@@ -59,7 +59,7 @@ META_GRAPH_RETRY_SLEEP_MS=500
 META_ADS_ENABLE_WRITES=false
 ```
 
-`META_ADS_ENABLE_WRITES=false` artinya publish setup iklan dan update budget tidak dikirim ke Meta. Data tetap disimpan di aplikasi dan UI harus memberi warning yang jelas. Aktifkan hanya saat token, permission, dan ad account sudah siap.
+`META_ADS_ENABLE_WRITES=false` artinya publish setup iklan dan update budget/status automation tidak dikirim ke Meta. UI harus memberi warning atau error yang jelas. Aktifkan hanya saat token, permission, dan ad account sudah siap.
 
 ## Meta Ads Sync
 
@@ -79,12 +79,12 @@ Flow saat ini:
 
 ## Meta Write Actions
 
-Action yang mengirim perubahan ke Meta juga memakai queue `meta`:
+Action Meta dipisah berdasarkan risikonya:
 
 - `Reload` di dashboard dan `Sync Meta Ads` di Profile menjalankan sync baca data akun iklan melalui job `SyncMetaAdsProfile`.
-- `Create` dan `Update` automation budget menyimpan data lokal, lalu memasukkan update budget Meta ke queue.
-- Toggle status automation menyimpan status lokal, lalu memasukkan update status Meta ke queue.
-- `Turun` budget menyimpan budget lokal, lalu memasukkan update budget Meta ke queue.
+- `Create` dan `Update` automation budget mengirim budget ke Meta langsung; setelah Meta sukses, data lokal disimpan.
+- Toggle status automation mengirim status ke Meta langsung; setelah Meta sukses, data lokal disimpan.
+- `Turun` budget mengirim budget ke Meta langsung; setelah Meta sukses, data lokal disimpan.
 - `Publish / Prepare Meta` dan tombol `Publish` setup iklan memasukkan publish campaign/ad set/creative/ad ke queue saat write mode aktif.
 
 Tombol yang hanya memfilter, memilih campaign, mencari interest/produk, reset data pilihan, update profile, atau update password tetap berjalan langsung karena tidak melakukan request Meta yang panjang.
