@@ -63,39 +63,38 @@ META_ADS_ENABLE_WRITES=false
 
 ## Meta Ads Sync
 
-User menyimpan token di halaman `Profile`, lalu klik `Sync Meta Ads`.
+User menyimpan token di halaman `Profile`.
 
-Flow saat ini:
+Flow sync dibagi menjadi dua jenis:
 
-1. Controller memvalidasi profile punya access token.
-2. Tombol `Sync Meta Ads` di Profile menjalankan sync Meta langsung dan redirect setelah database selesai diperbarui.
-3. Tombol `Reload` di dashboard juga menjalankan sync Meta langsung, lalu mengembalikan data dashboard terbaru dari database.
-4. Account dibaca dari `/me/adaccounts`, lalu dilengkapi dari Business Manager `/me/businesses` melalui edge `owned_ad_accounts` dan `client_ad_accounts` jika token punya akses.
-5. Campaign dan ad set dibaca dari masing-masing ad account/campaign.
-6. Campaign/ad set insight ikut dibaca jika Meta tidak menolak request.
-7. Error terakhir disimpan di `t4jam_profiles.last_meta_error` dan ditampilkan di Profile.
+1. `Sync Meta Ads` di Profile menjalankan full sync Meta Ads.
+2. `Reload` di Dashboard hanya menyinkronkan ad account yang sedang dipilih dan daftar campaign milik account tersebut.
+3. Quick reload Dashboard membaca `/{ad_account_id}` dan `/{ad_account_id}/campaigns`.
+4. Quick reload tidak mengambil ad set maupun insights supaya request tetap ringan dan campaign baru bisa segera muncul.
+5. Full sync membaca ad account, campaign, ad set, dan insights.
+6. Error Meta terakhir disimpan di `t4jam_profiles.last_meta_error` dan ditampilkan di Profile.
 
-`MetaAdsSyncService` mengambil struktur account/campaign/ad set dari Meta, menyimpannya ke database, lalu mengambil insight sebagai best-effort. Jika insight kena rate limit, nama campaign/ad set yang sudah terbaca tetap tersimpan dan error terakhir dicatat di `t4jam_profiles.last_meta_error`.
+Quick reload sengaja dipisahkan dari full sync untuk mengurangi jumlah request ke Meta Graph API dan menghindari rate limit ketika user hanya membutuhkan daftar campaign terbaru.
 
 ### Auto Sync
 
-Base URL `/` menjalankan auto sync Meta sendiri sebelum redirect ke dashboard. Jika user sudah login, sudah masuk slot 5 jam, dan slot itu belum pernah diproses, aplikasi akan sync Meta lalu redirect ke `/dashboard/`. Tidak perlu cron agar fitur ini aktif saat base URL dibuka.
+Base URL `/` tidak menjalankan Meta sync. Membuka aplikasi hanya mengarahkan user ke `/dashboard/`.
 
-Command manual tetap tersedia:
+Full sync terjadwal tersedia melalui command:
 
 ```bash
 php artisan t4jam:sync-meta-ads
 ```
 
-Interval 5 jam dipakai supaya data dashboard tetap terbarui tanpa terlalu sering menabrak rate limit Meta seperti `Application request limit reached`. Jadwal slot berjalan pada 00:00, 05:00, 10:00, 15:00, dan 20:00 WIB.
+Scheduler menjalankan command setiap 5 jam pada timezone Asia/Jakarta.
 
-Scheduler Laravel juga disiapkan sebagai opsi tambahan jika server perlu sync tetap berjalan walau dashboard tidak sedang dibuka. Aktifkan dengan cron:
+Agar scheduler berjalan otomatis di server, aktifkan Laravel scheduler melalui cron:
 
 ```cron
 * * * * * cd /path/to/t4jam-app && php artisan schedule:run >> /dev/null 2>&1
 ```
 
-Scheduler command memakai `withoutOverlapping(295)`, jadi run berikutnya tidak masuk jika run sebelumnya masih berjalan.
+Scheduler memakai `withoutOverlapping(295)` agar full sync berikutnya tidak dimulai ketika proses sebelumnya masih berjalan.
 
 Untuk tes satu profile tertentu:
 
@@ -107,7 +106,8 @@ php artisan t4jam:sync-meta-ads --profile_id=1
 
 Action Meta dipisah berdasarkan risikonya:
 
-- `Reload` di dashboard dan `Sync Meta Ads` di Profile menjalankan sync baca data akun iklan langsung dari request browser.
+- `Reload` di Dashboard hanya mengambil ulang selected ad account dan campaign-nya.
+- `Sync Meta Ads` di Profile menjalankan full sync account, campaign, ad set, dan insights.
 - `Create` dan `Update` automation budget mengirim budget ke Meta langsung; setelah Meta sukses, data lokal disimpan.
 - Toggle status automation mengirim status ke Meta langsung; setelah Meta sukses, data lokal disimpan.
 - `Turun` budget mengirim budget ke Meta langsung; setelah Meta sukses, data lokal disimpan.

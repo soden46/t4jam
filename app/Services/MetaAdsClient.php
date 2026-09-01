@@ -311,6 +311,4 @@ class MetaAdsClient
             'fields' => 'account_id,id,name,currency,account_status',
         ]);
     }
-
-    
 }

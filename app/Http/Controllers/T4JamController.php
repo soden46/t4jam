@@ -18,9 +18,7 @@ use App\Services\MetaAdsSyncService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
@@ -581,35 +579,6 @@ class T4JamController extends Controller
         }
 
         return $message;
-    }
-
-    private function syncMetaProfilesIfAutoDue(MetaAdsSyncService $metaSync): void
-    {
-        $slot = $this->currentAutoMetaSyncSlot();
-        $lockKey = 't4jam:auto-meta-sync:'.$slot->format('YmdH');
-
-        if (! Cache::add($lockKey, true, $slot->copy()->addHours(6))) {
-            return;
-        }
-
-        $slotUtc = $slot->copy()->timezone('UTC');
-
-        T4JamProfile::query()
-            ->whereNotNull('access_token')
-            ->where('access_token', '<>', '')
-            ->where(fn ($query) => $query
-                ->whereNull('last_meta_sync_at')
-                ->orWhere('last_meta_sync_at', '<', $slotUtc))
-            ->get()
-            ->each(fn (T4JamProfile $profile) => $this->syncMetaProfileNow($profile, $metaSync));
-    }
-
-    private function currentAutoMetaSyncSlot(): Carbon
-    {
-        $now = Carbon::now('Asia/Jakarta');
-        $hour = intdiv($now->hour, 5) * 5;
-
-        return $now->copy()->setTime($hour, 0);
     }
 
     private function automationPayload(Request $request): array

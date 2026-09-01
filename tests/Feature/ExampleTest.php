@@ -13,7 +13,6 @@ use App\Models\T4JamProfile;
 use App\Models\User;
 use App\Services\MetaAdsSyncService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
@@ -143,32 +142,62 @@ class ExampleTest extends TestCase
         $this->assertSame('adset', collect($insights)->firstWhere('campaign_id', $adSet->external_id)['level']);
     }
 
-    public function test_dashboard_reload_syncs_meta_ads_immediately(): void
+    public function test_dashboard_reload_syncs_only_selected_account_campaigns(): void
     {
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
 
-        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        T4JamProfile::updateOrCreate(
+            ['user_id' => $user->id],
+            ['access_token' => 'token']
+        );
 
         Http::fake([
-            'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
-            'graph.facebook.com/*/me/adaccounts?*' => Http::response([
+            'graph.facebook.com/*/act_901/campaigns?*' => Http::response([
                 'data' => [
-                    ['account_id' => '901', 'id' => 'act_901', 'name' => 'Reloaded Account', 'currency' => 'IDR', 'account_status' => 1],
+                    [
+                        'id' => 'cmp_901',
+                        'name' => 'Testing Tools Campaign',
+                        'status' => 'ACTIVE',
+                        'effective_status' => 'ACTIVE',
+                        'daily_budget' => '250000',
+                        'objective' => 'OUTCOME_TRAFFIC',
+                    ],
                 ],
             ]),
-            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
-            'graph.facebook.com/*/act_901/campaigns?*' => Http::response(['data' => []]),
+
+            'graph.facebook.com/*/act_901?*' => Http::response([
+                'account_id' => '901',
+                'id' => 'act_901',
+                'name' => 'Reloaded Account',
+                'currency' => 'IDR',
+                'account_status' => 1,
+            ]),
         ]);
 
-        $this->postJson('/api/reload-ad-account/')
+        $this->postJson('/api/reload-ad-account/', [
+            'ad_account' => 'act_901',
+        ])
             ->assertOk()
             ->assertJsonPath('status', 200)
-            ->assertJsonPath('text', 'Sync Meta Ads selesai. 1 ad account, 0 campaign, dan 0 ad set diperbarui.')
-            ->assertJsonPath('ad_account_count', 3);
+            ->assertJsonPath(
+                'text',
+                'Reload selesai. 1 campaign diperbarui.'
+            );
 
-        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_901']);
+        $this->assertDatabaseHas('ad_accounts', [
+            'external_id' => 'act_901',
+            'name' => 'Reloaded Account',
+        ]);
+
+        $this->assertDatabaseHas('campaigns', [
+            'external_id' => 'cmp_901',
+            'name' => 'Testing Tools Campaign',
+        ]);
+
+        // Membuktikan Reload tidak melakukan full sync, adset lookup, atau insights.
+        Http::assertSentCount(2);
     }
 
     public function test_create_automation_requires_campaign_from_selected_ad_account(): void
@@ -500,47 +529,14 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_456', 'name' => 'Manual Campaign']);
     }
 
-    public function test_base_url_auto_syncs_once_per_five_hour_slot(): void
+    public function test_base_url_does_not_trigger_meta_sync(): void
     {
-        $this->seed(TestDataSeeder::class);
-        $user = User::firstOrFail();
-        $this->actingAs($user);
-        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        Http::fake();
 
-        Http::fake([
-            'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
-            'graph.facebook.com/*/me/adaccounts?*' => Http::response([
-                'data' => [
-                    ['account_id' => '654', 'id' => 'act_654', 'name' => 'Auto Account', 'currency' => 'IDR', 'account_status' => 1],
-                ],
-            ]),
-            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
-            'graph.facebook.com/*/act_654/campaigns?*' => Http::response([
-                'data' => [
-                    ['id' => 'cmp_auto', 'name' => 'Auto Tools Campaign', 'status' => 'ACTIVE', 'daily_budget' => '250000'],
-                ],
-            ]),
-            'graph.facebook.com/*/cmp_auto/adsets?*' => Http::response(['data' => []]),
-            'graph.facebook.com/*/cmp_auto/insights?*' => Http::response(['data' => []]),
-        ]);
+        $this->get('/')
+            ->assertRedirect('/dashboard/');
 
-        try {
-            Carbon::setTestNow(Carbon::parse('2026-09-01 00:10:00', 'Asia/Jakarta'));
-
-            $this->get('/')
-                ->assertRedirect('/dashboard/');
-
-            $this->getJson('/api/get-ad-account/')
-                ->assertOk()
-                ->assertJsonFragment(['id' => 'act_654', 'name' => 'Auto Account']);
-
-            $this->get('/')->assertRedirect('/dashboard/');
-        } finally {
-            Carbon::setTestNow();
-        }
-
-        Http::assertSentCount(6);
-        $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_auto', 'name' => 'Auto Tools Campaign']);
+        Http::assertNothingSent();
     }
 
     public function test_meta_ads_sync_command_persists_data_for_token_profiles(): void
