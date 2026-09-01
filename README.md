@@ -68,8 +68,8 @@ User menyimpan token di halaman `Profile`, lalu klik `Sync Meta Ads`.
 Flow saat ini:
 
 1. Controller memvalidasi profile punya access token.
-2. Tombol `Sync Meta Ads` di Profile memasukkan `App\Jobs\SyncMetaAdsProfile` ke queue `meta`, lalu halaman langsung redirect dengan status antrean.
-3. Tombol `Reload` di dashboard juga memasukkan job sync ke queue `meta` dan mengembalikan data terakhir yang sudah ada di database.
+2. Tombol `Sync Meta Ads` di Profile menjalankan sync Meta langsung dan redirect setelah database selesai diperbarui.
+3. Tombol `Reload` di dashboard juga menjalankan sync Meta langsung, lalu mengembalikan data dashboard terbaru dari database.
 4. Account dibaca dari `/me/adaccounts`, lalu dilengkapi dari Business Manager `/me/businesses` melalui edge `owned_ad_accounts` dan `client_ad_accounts` jika token punya akses.
 5. Campaign dan ad set dibaca dari masing-masing ad account/campaign.
 6. Campaign/ad set insight ikut dibaca jika Meta tidak menolak request.
@@ -81,7 +81,7 @@ Flow saat ini:
 
 Action Meta dipisah berdasarkan risikonya:
 
-- `Reload` di dashboard dan `Sync Meta Ads` di Profile menjalankan sync baca data akun iklan melalui job `SyncMetaAdsProfile`.
+- `Reload` di dashboard dan `Sync Meta Ads` di Profile menjalankan sync baca data akun iklan langsung dari request browser.
 - `Create` dan `Update` automation budget mengirim budget ke Meta langsung; setelah Meta sukses, data lokal disimpan.
 - Toggle status automation mengirim status ke Meta langsung; setelah Meta sukses, data lokal disimpan.
 - `Turun` budget mengirim budget ke Meta langsung; setelah Meta sukses, data lokal disimpan.
@@ -112,7 +112,7 @@ php artisan optimize:clear
 php artisan queue:restart
 ```
 
-Worker harus tetap hidup di server. Untuk production/dev server yang long-running, gunakan Supervisor atau process manager lain.
+Worker harus tetap hidup di server untuk action yang masih berjalan di background, seperti publish setup iklan atau sync yang dipicu saat token disimpan. Untuk production/dev server yang long-running, gunakan Supervisor atau process manager lain.
 
 Contoh Supervisor:
 

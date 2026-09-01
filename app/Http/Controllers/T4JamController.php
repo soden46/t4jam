@@ -23,6 +23,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\View\View;
+use Throwable;
 
 class T4JamController extends Controller
 {
@@ -127,14 +128,19 @@ class T4JamController extends Controller
         return response()->json(['status' => 200, 'text' => 'Settings dashboard tersimpan']);
     }
 
-    public function reloadAdAccount(): JsonResponse
+    public function reloadAdAccount(MetaAdsSyncService $metaSync): JsonResponse
     {
         $profile = $this->currentProfile();
         $message = 'Dashboard direfresh dari data terakhir di database.';
 
         if ($profile->access_token) {
-            SyncMetaAdsProfile::dispatch($profile->id)->afterCommit();
-            $message = 'Reload Meta Ads masuk antrean queue. Data dashboard ditampilkan dari database terakhir.';
+            $result = $this->syncMetaProfileNow($profile, $metaSync);
+
+            if (! $result['ok']) {
+                return response()->json(['status' => 422, 'text' => $result['text']], 422);
+            }
+
+            $message = $this->metaSyncSuccessMessage($result['counts']);
         }
 
         $accounts = AdAccount::with('campaigns.adSets')->get();
@@ -482,7 +488,7 @@ class T4JamController extends Controller
         return back()->with('status', 'Access token valid. Sync Meta Ads masuk antrean queue.');
     }
 
-    public function syncMetaAds(): RedirectResponse
+    public function syncMetaAds(MetaAdsSyncService $metaSync): RedirectResponse
     {
         $profile = $this->currentProfile();
 
@@ -490,9 +496,45 @@ class T4JamController extends Controller
             return back()->withErrors(['meta' => 'Access token Meta belum diisi.']);
         }
 
-        SyncMetaAdsProfile::dispatch($profile->id)->afterCommit();
+        $result = $this->syncMetaProfileNow($profile, $metaSync);
 
-        return back()->with('status', 'Sync Meta Ads masuk antrean queue. Data akan masuk setelah worker selesai.');
+        if (! $result['ok']) {
+            return back()->withErrors(['meta' => $result['text']]);
+        }
+
+        return back()->with('status', $this->metaSyncSuccessMessage($result['counts']));
+    }
+
+    private function syncMetaProfileNow(T4JamProfile $profile, MetaAdsSyncService $metaSync): array
+    {
+        try {
+            return ['ok' => true, 'counts' => $metaSync->sync($profile)];
+        } catch (MetaAdsException $exception) {
+            $profile->update(['last_meta_error' => $exception->getMessage()]);
+
+            return ['ok' => false, 'text' => $exception->getMessage()];
+        } catch (Throwable $exception) {
+            Log::warning('Meta ads direct sync failed', [
+                'profile_id' => $profile->id,
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ]);
+
+            $message = 'Sync Meta Ads gagal. Coba lagi beberapa saat.';
+            $profile->update(['last_meta_error' => $message]);
+
+            return ['ok' => false, 'text' => $message];
+        }
+    }
+
+    private function metaSyncSuccessMessage(array $counts): string
+    {
+        return sprintf(
+            'Sync Meta Ads selesai. %d ad account, %d campaign, dan %d ad set diperbarui.',
+            $counts['accounts'] ?? 0,
+            $counts['campaigns'] ?? 0,
+            $counts['adsets'] ?? 0,
+        );
     }
 
     private function automationPayload(Request $request): array
