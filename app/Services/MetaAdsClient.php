@@ -304,4 +304,13 @@ class MetaAdsClient
 
         return null;
     }
+
+    public function adAccount(string $adAccountId): array
+    {
+        return $this->get("/{$adAccountId}", [
+            'fields' => 'account_id,id,name,currency,account_status',
+        ]);
+    }
+
+    
 }

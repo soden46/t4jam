@@ -231,7 +231,7 @@ async function initDashboard() {
 
         try {
             const selectedBeforeReload = accountSelect.value;
-            const response = await request('/api/reload-ad-account/', { method: 'POST', body: formBody({}) });
+            const response = await request('/api/reload-ad-account/', {method: 'POST',body: formBody({ad_account: accountSelect.value,}),});
             accounts = { ...accounts, adaccount: response.adaccount || accounts.adaccount };
             renderAccountSelect(selectedBeforeReload);
             renderCampaignPicker();

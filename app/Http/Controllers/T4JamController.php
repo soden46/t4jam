@@ -29,12 +29,8 @@ use Throwable;
 
 class T4JamController extends Controller
 {
-    public function root(MetaAdsSyncService $metaSync): RedirectResponse
+    public function root(): RedirectResponse
     {
-        if (Auth::check()) {
-            $this->syncMetaProfilesIfAutoDue($metaSync);
-        }
-
         return redirect('/dashboard/');
     }
 
@@ -139,27 +135,60 @@ class T4JamController extends Controller
         return response()->json(['status' => 200, 'text' => 'Settings dashboard tersimpan']);
     }
 
-    public function reloadAdAccount(MetaAdsSyncService $metaSync): JsonResponse
-    {
+    public function reloadAdAccount(
+        Request $request,
+        MetaAdsSyncService $metaSync
+    ): JsonResponse {
         $profile = $this->currentProfile();
-        $message = 'Dashboard direfresh dari data terakhir di database.';
 
-        if ($profile->access_token) {
-            $result = $this->syncMetaProfileNow($profile, $metaSync);
+        if (! $profile->access_token) {
+            return response()->json([
+                'status' => 422,
+                'text' => 'Access token Meta belum diisi.',
+            ], 422);
+        }
 
-            if (! $result['ok']) {
-                return response()->json(['status' => 422, 'text' => $result['text']], 422);
-            }
+        $adAccountExternalId = $request->input(
+            'ad_account',
+            session('selected_ad_account')
+        );
 
-            $message = $this->metaSyncSuccessMessage($result['counts']);
+        if (! $adAccountExternalId) {
+            return response()->json([
+                'status' => 422,
+                'text' => 'Pilih ad account terlebih dahulu.',
+            ], 422);
+        }
+
+        try {
+            $counts = $metaSync->syncCampaignsForAccount(
+                $profile,
+                $adAccountExternalId
+            );
+        } catch (MetaAdsException $exception) {
+            $profile->update([
+                'last_meta_error' => $exception->getMessage(),
+            ]);
+
+            return response()->json([
+                'status' => 422,
+                'text' => $exception->getMessage(),
+            ], 422);
         }
 
         $accounts = AdAccount::with('campaigns.adSets')->get();
 
         return response()->json([
             'status' => 200,
-            'text' => $message,
-            'adaccount' => $accounts->map(fn (AdAccount $account) => $this->accountPayload($account))->values(),
+            'text' => sprintf(
+                'Reload selesai. %d campaign diperbarui.',
+                $counts['campaigns']
+            ),
+            'adaccount' => $accounts
+                ->map(fn (AdAccount $account) =>
+                    $this->accountPayload($account)
+                )
+                ->values(),
             'ad_account_count' => $accounts->count(),
         ]);
     }

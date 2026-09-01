@@ -228,4 +228,43 @@ class MetaAdsSyncService
             ->whereIn('action_type', $types)
             ->sum(fn (array $action) => (int) ($action['value'] ?? 0));
     }
+
+    public function syncCampaignsForAccount(
+        T4JamProfile $profile,
+        string $adAccountExternalId
+    ): array {
+        $this->warnings = [];
+
+        $client = $this->client($profile);
+
+        $accountData = $client->adAccount($adAccountExternalId);
+        $campaigns = $client->campaigns($adAccountExternalId);
+
+        $counts = [
+            'accounts' => 0,
+            'campaigns' => 0,
+        ];
+
+        DB::transaction(function () use (
+            $accountData,
+            $campaigns,
+            &$counts
+        ): void {
+            $account = $this->upsertAccount($accountData);
+
+            $counts['accounts'] = 1;
+
+            foreach ($campaigns as $campaignData) {
+                $this->upsertCampaign($account, $campaignData);
+                $counts['campaigns']++;
+            }
+        });
+
+        $profile->update([
+            'last_meta_sync_at' => now(),
+            'last_meta_error' => null,
+        ]);
+
+        return $counts;
+    }
 }
