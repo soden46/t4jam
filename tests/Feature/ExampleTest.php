@@ -13,6 +13,7 @@ use App\Models\T4JamProfile;
 use App\Models\User;
 use App\Services\MetaAdsSyncService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
@@ -499,6 +500,80 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_456', 'name' => 'Manual Campaign']);
     }
 
+    public function test_base_url_auto_syncs_once_per_five_hour_slot(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        Http::fake([
+            'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
+            'graph.facebook.com/*/me/adaccounts?*' => Http::response([
+                'data' => [
+                    ['account_id' => '654', 'id' => 'act_654', 'name' => 'Auto Account', 'currency' => 'IDR', 'account_status' => 1],
+                ],
+            ]),
+            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/act_654/campaigns?*' => Http::response([
+                'data' => [
+                    ['id' => 'cmp_auto', 'name' => 'Auto Tools Campaign', 'status' => 'ACTIVE', 'daily_budget' => '250000'],
+                ],
+            ]),
+            'graph.facebook.com/*/cmp_auto/adsets?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/cmp_auto/insights?*' => Http::response(['data' => []]),
+        ]);
+
+        try {
+            Carbon::setTestNow(Carbon::parse('2026-09-01 00:10:00', 'Asia/Jakarta'));
+
+            $this->get('/')
+                ->assertRedirect('/dashboard/');
+
+            $this->getJson('/api/get-ad-account/')
+                ->assertOk()
+                ->assertJsonFragment(['id' => 'act_654', 'name' => 'Auto Account']);
+
+            $this->get('/')->assertRedirect('/dashboard/');
+        } finally {
+            Carbon::setTestNow();
+        }
+
+        Http::assertSentCount(6);
+        $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_auto', 'name' => 'Auto Tools Campaign']);
+    }
+
+    public function test_meta_ads_sync_command_persists_data_for_token_profiles(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        Http::fake([
+            'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
+            'graph.facebook.com/*/me/adaccounts?*' => Http::response([
+                'data' => [
+                    ['account_id' => '321', 'id' => 'act_321', 'name' => 'Scheduled Account', 'currency' => 'IDR', 'account_status' => 1],
+                ],
+            ]),
+            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/act_321/campaigns?*' => Http::response([
+                'data' => [
+                    ['id' => 'cmp_321', 'name' => 'Scheduled Campaign', 'status' => 'ACTIVE', 'daily_budget' => '250000'],
+                ],
+            ]),
+            'graph.facebook.com/*/cmp_321/adsets?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/cmp_321/insights?*' => Http::response(['data' => []]),
+        ]);
+
+        $this->artisan('t4jam:sync-meta-ads')
+            ->expectsOutput("Profile {$profile->id} synced: 1 ad account, 1 campaign, 0 ad set, 0 insight.")
+            ->assertExitCode(0);
+
+        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_321']);
+        $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_321', 'name' => 'Scheduled Campaign']);
+    }
+
     public function test_meta_ads_sync_job_includes_business_manager_accounts(): void
     {
         $this->seed(TestDataSeeder::class);
@@ -575,10 +650,10 @@ class ExampleTest extends TestCase
         $this->from('/profile/')
             ->post('/profile/sync-meta-ads/')
             ->assertRedirect('/profile/')
-            ->assertSessionHasErrors(['meta' => 'User request limit reached']);
+            ->assertSessionHas('status', 'Sync Meta Ads selesai. 1 ad account, 1 campaign, dan 0 ad set diperbarui. Sebagian metrik belum lengkap: User request limit reached');
 
-        $this->assertDatabaseMissing('ad_accounts', ['external_id' => 'act_789']);
-        $this->assertDatabaseMissing('campaigns', ['external_id' => 'cmp_789']);
+        $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_789']);
+        $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_789', 'name' => 'Rate Limited Campaign']);
         $this->assertDatabaseHas('t4jam_profiles', [
             'user_id' => $user->id,
             'last_meta_error' => 'User request limit reached',

@@ -75,7 +75,33 @@ Flow saat ini:
 6. Campaign/ad set insight ikut dibaca jika Meta tidak menolak request.
 7. Error terakhir disimpan di `t4jam_profiles.last_meta_error` dan ditampilkan di Profile.
 
-`MetaAdsSyncService` mengambil data Meta terlebih dulu, lalu membuka transaksi database hanya saat menulis account/campaign/ad set/insight. Ini mencegah request network menahan lock MySQL di `t4jam_profiles` terlalu lama.
+`MetaAdsSyncService` mengambil struktur account/campaign/ad set dari Meta, menyimpannya ke database, lalu mengambil insight sebagai best-effort. Jika insight kena rate limit, nama campaign/ad set yang sudah terbaca tetap tersimpan dan error terakhir dicatat di `t4jam_profiles.last_meta_error`.
+
+### Auto Sync
+
+Base URL `/` menjalankan auto sync Meta sendiri sebelum redirect ke dashboard. Jika user sudah login, sudah masuk slot 5 jam, dan slot itu belum pernah diproses, aplikasi akan sync Meta lalu redirect ke `/dashboard/`. Tidak perlu cron agar fitur ini aktif saat base URL dibuka.
+
+Command manual tetap tersedia:
+
+```bash
+php artisan t4jam:sync-meta-ads
+```
+
+Interval 5 jam dipakai supaya data dashboard tetap terbarui tanpa terlalu sering menabrak rate limit Meta seperti `Application request limit reached`. Jadwal slot berjalan pada 00:00, 05:00, 10:00, 15:00, dan 20:00 WIB.
+
+Scheduler Laravel juga disiapkan sebagai opsi tambahan jika server perlu sync tetap berjalan walau dashboard tidak sedang dibuka. Aktifkan dengan cron:
+
+```cron
+* * * * * cd /path/to/t4jam-app && php artisan schedule:run >> /dev/null 2>&1
+```
+
+Scheduler command memakai `withoutOverlapping(295)`, jadi run berikutnya tidak masuk jika run sebelumnya masih berjalan.
+
+Untuk tes satu profile tertentu:
+
+```bash
+php artisan t4jam:sync-meta-ads --profile_id=1
+```
 
 ## Meta Write Actions
 
@@ -119,7 +145,7 @@ Contoh Supervisor:
 ```ini
 [program:t4jam-meta-worker]
 process_name=%(program_name)s_%(process_num)02d
-command=php /var/www/demo-digmartools.prosesin.id/artisan queue:work database --queue=meta,default --sleep=3 --tries=3 --timeout=650
+command=php /path/to/t4jam-app/artisan queue:work database --queue=meta,default --sleep=3 --tries=3 --timeout=650
 autostart=true
 autorestart=true
 stopasgroup=true
@@ -127,7 +153,7 @@ killasgroup=true
 user=www-data
 numprocs=1
 redirect_stderr=true
-stdout_logfile=/var/www/demo-digmartools.prosesin.id/storage/logs/queue-worker.log
+stdout_logfile=/path/to/t4jam-app/storage/logs/queue-worker.log
 stopwaitsecs=700
 ```
 

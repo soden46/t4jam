@@ -1,11 +1,11 @@
 <?php
 
-use App\Http\Controllers\AuthController;
 use App\Http\Controllers\AdSetupController;
+use App\Http\Controllers\AuthController;
 use App\Http\Controllers\T4JamController;
 use Illuminate\Support\Facades\Route;
 
-Route::redirect('/', '/dashboard/');
+Route::get('/', [T4JamController::class, 'root']);
 
 Route::get('/login/', [AuthController::class, 'showLogin'])->name('login');
 Route::post('/login/', [AuthController::class, 'login'])->name('login.store');

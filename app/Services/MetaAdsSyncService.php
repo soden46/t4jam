@@ -8,17 +8,23 @@ use App\Models\AdSet;
 use App\Models\Campaign;
 use App\Models\T4JamProfile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class MetaAdsSyncService
 {
+    private array $warnings = [];
+
     public function sync(T4JamProfile $profile): array
     {
+        $this->warnings = [];
         $client = $this->client($profile);
         $metaUser = $client->validateToken();
         $accounts = $this->prefetchAccounts($client);
         $counts = ['accounts' => 0, 'campaigns' => 0, 'adsets' => 0, 'insights' => 0];
+        $campaignIds = [];
+        $adSetIds = [];
 
-        DB::transaction(function () use ($profile, $metaUser, $accounts, &$counts): void {
+        DB::transaction(function () use ($profile, $metaUser, $accounts, &$counts, &$campaignIds, &$adSetIds): void {
             $profile->update([
                 'meta_user_id' => $metaUser['id'] ?? null,
                 'meta_user_name' => $metaUser['name'] ?? null,
@@ -34,26 +40,23 @@ class MetaAdsSyncService
                 foreach ($accountData['_campaigns'] ?? [] as $campaignData) {
                     $campaign = $this->upsertCampaign($account, $campaignData);
                     $counts['campaigns']++;
-
-                    $insights = $campaignData['_insights'] ?? [];
-                    if ($insights) {
-                        $campaign->update($this->insightPayload($insights));
-                        $counts['insights']++;
-                    }
+                    $campaignIds[] = $campaign->id;
 
                     foreach ($campaignData['_adsets'] ?? [] as $adSetData) {
                         $adSet = $this->upsertAdSet($account, $campaign, $adSetData);
                         $counts['adsets']++;
-
-                        $adSetInsights = $adSetData['_insights'] ?? [];
-                        if ($adSetInsights) {
-                            $adSet->update($this->insightPayload($adSetInsights));
-                            $counts['insights']++;
-                        }
+                        $adSetIds[] = $adSet->id;
                     }
                 }
             }
         });
+
+        $counts['insights'] = $this->syncInsights($client, $campaignIds, $adSetIds);
+
+        if ($this->warnings !== []) {
+            $counts['warning'] = end($this->warnings);
+            $profile->update(['last_meta_error' => $counts['warning']]);
+        }
 
         return $counts;
     }
@@ -73,12 +76,15 @@ class MetaAdsSyncService
             ->map(function (array $accountData) use ($client): array {
                 $accountId = $accountData['id'] ?? null;
                 $campaigns = $accountId
-                    ? collect($client->campaigns($accountId))
+                    ? collect($this->optionalMetaRequest(
+                        fn () => $client->campaigns($accountId),
+                        'Meta campaign lookup skipped',
+                        ['ad_account_id' => $accountId],
+                    ))
                         ->map(function (array $campaignData) use ($client): array {
                             $campaignId = $campaignData['id'] ?? null;
 
                             return $campaignData + [
-                                '_insights' => $campaignId ? $client->campaignInsights($campaignId) : [],
                                 '_adsets' => $campaignId ? $this->prefetchAdSets($client, $campaignId) : [],
                             ];
                         })
@@ -92,15 +98,68 @@ class MetaAdsSyncService
 
     private function prefetchAdSets(MetaAdsClient $client, string $campaignId): array
     {
-        return collect($client->adSets($campaignId))
-            ->map(function (array $adSetData) use ($client): array {
-                $adSetId = $adSetData['id'] ?? null;
-
-                return $adSetData + [
-                    '_insights' => $adSetId ? $client->adSetInsights($adSetId) : [],
-                ];
-            })
+        return collect($this->optionalMetaRequest(
+            fn () => $client->adSets($campaignId),
+            'Meta ad set lookup skipped',
+            ['campaign_id' => $campaignId],
+        ))
             ->all();
+    }
+
+    private function syncInsights(MetaAdsClient $client, array $campaignIds, array $adSetIds): int
+    {
+        $count = 0;
+
+        Campaign::query()
+            ->whereIn('id', $campaignIds)
+            ->get()
+            ->each(function (Campaign $campaign) use ($client, &$count): void {
+                $insights = $this->optionalMetaRequest(
+                    fn () => $client->campaignInsights($campaign->external_id),
+                    'Meta campaign insights skipped',
+                    ['campaign_id' => $campaign->external_id],
+                );
+
+                if ($insights !== []) {
+                    $campaign->update($this->insightPayload($insights));
+                    $count++;
+                }
+            });
+
+        AdSet::query()
+            ->whereIn('id', $adSetIds)
+            ->get()
+            ->each(function (AdSet $adSet) use ($client, &$count): void {
+                $insights = $this->optionalMetaRequest(
+                    fn () => $client->adSetInsights($adSet->external_id),
+                    'Meta ad set insights skipped',
+                    ['ad_set_id' => $adSet->external_id],
+                );
+
+                if ($insights !== []) {
+                    $adSet->update($this->insightPayload($insights));
+                    $count++;
+                }
+            });
+
+        return $count;
+    }
+
+    private function optionalMetaRequest(callable $callback, string $message, array $context = []): array
+    {
+        try {
+            return $callback();
+        } catch (MetaAdsException $exception) {
+            $this->warnings[] = $exception->getMessage();
+
+            Log::warning($message, $context + [
+                'http_status' => $exception->httpStatus,
+                'meta_code' => $exception->metaCode,
+                'meta_type' => $exception->metaType,
+            ]);
+
+            return [];
+        }
     }
 
     private function upsertAccount(array $accountData): AdAccount
