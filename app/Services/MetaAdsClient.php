@@ -3,9 +3,9 @@
 namespace App\Services;
 
 use App\Exceptions\MetaAdsException;
+use App\Support\MetaFlowLog;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
 
 class MetaAdsClient
 {
@@ -38,7 +38,7 @@ class MetaAdsClient
                 );
             }
         } catch (MetaAdsException $exception) {
-            Log::warning('Meta business account lookup skipped', [
+            MetaFlowLog::warning('business account lookup skipped', [
                 'http_status' => $exception->httpStatus,
                 'meta_code' => $exception->metaCode,
                 'meta_type' => $exception->metaType,
@@ -170,7 +170,7 @@ class MetaAdsClient
                 'limit' => 100,
             ]);
         } catch (MetaAdsException $exception) {
-            Log::warning('Meta business ad account edge skipped', [
+            MetaFlowLog::warning('business ad account edge skipped', [
                 'business_id' => $businessId,
                 'edge' => $edge,
                 'http_status' => $exception->httpStatus,
@@ -259,7 +259,7 @@ class MetaAdsClient
 
         if ($this->isRateLimitError($metaCode)) {
             $retryAfter = $this->parseRetryAfter($response);
-            Log::warning('Meta rate limit hit', [
+            MetaFlowLog::warning('rate limit hit', [
                 'meta_code' => $metaCode,
                 'meta_type' => $metaType,
                 'retry_after_seconds' => $retryAfter,

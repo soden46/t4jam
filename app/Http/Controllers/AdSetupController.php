@@ -8,10 +8,10 @@ use App\Models\AdAccount;
 use App\Models\AdSetup;
 use App\Models\T4JamProfile;
 use App\Services\MetaAdSetupPublisher;
+use App\Support\MetaFlowLog;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\Log;
 use Illuminate\View\View;
 
 class AdSetupController extends Controller
@@ -66,6 +66,12 @@ class AdSetupController extends Controller
         ]);
 
         if (! $request->boolean('publish')) {
+            MetaFlowLog::info('ad setup draft saved', [
+                'user_id' => Auth::id(),
+                'ad_setup_id' => $setup->id,
+                'ad_account_id' => $setup->adAccount?->external_id,
+            ]);
+
             return redirect()->route('ad-setups.index')->with('status', 'Draft setup iklan berhasil disimpan.');
         }
 
@@ -84,22 +90,38 @@ class AdSetupController extends Controller
     private function publishOrQueue(AdSetup $setup, MetaAdSetupPublisher $publisher): RedirectResponse
     {
         try {
-            $profile = T4JamProfile::firstOrCreate(['user_id' => Auth::id()]);
+            $profile = T4JamProfile::usableForUser(Auth::id());
 
             if (! config('services.meta.enable_writes')) {
                 $publisher->publish($setup, $profile);
+                MetaFlowLog::info('ad setup publish skipped because write mode disabled', [
+                    'user_id' => Auth::id(),
+                    'profile_id' => $profile->id,
+                    'ad_setup_id' => $setup->id,
+                ]);
 
                 return redirect()->route('ad-setups.index')->with('warning', 'Setup iklan sudah siap. Publish ke Meta belum dijalankan karena write mode belum aktif.');
             }
 
-            if (! $profile->access_token) {
+            if (! $profile->hasAccessToken()) {
                 $message = 'Access token Meta belum diisi. Silakan simpan access token di Profile.';
                 $setup->update(['status' => 'failed', 'last_error' => $message]);
+                MetaFlowLog::warning('ad setup publish rejected without access token', [
+                    'user_id' => Auth::id(),
+                    'profile_id' => $profile->id,
+                    'ad_setup_id' => $setup->id,
+                ]);
 
                 return redirect()->route('ad-setups.index')->withErrors(['meta' => $message]);
             }
 
             PublishMetaAdSetup::dispatch($setup->id, $profile->id)->afterCommit();
+            MetaFlowLog::info('ad setup publish queued', [
+                'user_id' => Auth::id(),
+                'profile_id' => $profile->id,
+                'ad_setup_id' => $setup->id,
+                'queue' => 'meta',
+            ]);
         } catch (MetaAdsException $exception) {
             $message = $this->metaErrorMessage($exception);
             $setup->update(['status' => 'failed', 'last_error' => $message]);
@@ -165,7 +187,7 @@ class AdSetupController extends Controller
 
     private function reportMetaPublishFailure(MetaAdsException $exception, AdSetup $setup): void
     {
-        Log::warning('Meta ad setup publish failed', [
+        MetaFlowLog::warning('ad setup publish failed', [
             'ad_setup_id' => $setup->id,
             'user_id' => $setup->user_id,
             'http_status' => $exception->httpStatus,

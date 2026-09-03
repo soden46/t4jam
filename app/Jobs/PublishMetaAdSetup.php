@@ -6,13 +6,13 @@ use App\Exceptions\MetaAdsException;
 use App\Models\AdSetup;
 use App\Models\T4JamProfile;
 use App\Services\MetaAdSetupPublisher;
+use App\Support\MetaFlowLog;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
-use Illuminate\Support\Facades\Log;
 use Throwable;
 
-class PublishMetaAdSetup implements ShouldQueue, ShouldBeUnique
+class PublishMetaAdSetup implements ShouldBeUnique, ShouldQueue
 {
     use Queueable;
 
@@ -40,11 +40,28 @@ class PublishMetaAdSetup implements ShouldQueue, ShouldBeUnique
         $profile = T4JamProfile::query()->find($this->profileId);
 
         if (! $setup || ! $profile) {
+            MetaFlowLog::warning('ad setup publish job skipped because record missing', [
+                'ad_setup_id' => $this->adSetupId,
+                'profile_id' => $this->profileId,
+            ]);
+
             return;
         }
 
         try {
+            MetaFlowLog::info('ad setup publish job started', [
+                'ad_setup_id' => $setup->id,
+                'profile_id' => $profile->id,
+                'user_id' => $setup->user_id,
+                'queue' => 'meta',
+            ]);
+
             $publisher->publish($setup, $profile);
+            MetaFlowLog::info('ad setup publish job finished', [
+                'ad_setup_id' => $setup->id,
+                'profile_id' => $profile->id,
+                'user_id' => $setup->user_id,
+            ]);
         } catch (MetaAdsException $exception) {
             $message = $this->metaErrorMessage($exception);
             $setup->update(['status' => 'failed', 'last_error' => $message]);
@@ -55,9 +72,10 @@ class PublishMetaAdSetup implements ShouldQueue, ShouldBeUnique
                 'last_error' => 'Publish ke Meta belum berhasil. Coba lagi beberapa saat atau cek koneksi Meta di Profile.',
             ]);
 
-            Log::warning('Meta ad setup publish job failed', [
+            MetaFlowLog::warning('ad setup publish job failed', [
                 'ad_setup_id' => $setup->id,
                 'user_id' => $setup->user_id,
+                'profile_id' => $profile->id,
                 'exception' => $exception::class,
                 'message' => $exception->getMessage(),
             ]);
@@ -91,7 +109,7 @@ class PublishMetaAdSetup implements ShouldQueue, ShouldBeUnique
 
     private function reportFailure(MetaAdsException $exception, AdSetup $setup): void
     {
-        Log::warning('Meta ad setup publish failed', [
+        MetaFlowLog::warning('ad setup publish failed with meta error', [
             'ad_setup_id' => $setup->id,
             'user_id' => $setup->user_id,
             'http_status' => $exception->httpStatus,

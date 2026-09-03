@@ -15,13 +15,13 @@ use App\Models\ProductCategory;
 use App\Models\T4JamProfile;
 use App\Services\MetaAdsClient;
 use App\Services\MetaAdsSyncService;
+use App\Support\MetaFlowLog;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Log;
 use Illuminate\View\View;
 use Throwable;
 
@@ -137,9 +137,14 @@ class T4JamController extends Controller
         Request $request,
         MetaAdsSyncService $metaSync
     ): JsonResponse {
-        $profile = $this->currentProfile();
+        $profile = $this->metaCredentialProfile();
 
-        if (! $profile->access_token) {
+        if (! $profile->hasAccessToken()) {
+            MetaFlowLog::warning('reload rejected without access token', [
+                'user_id' => Auth::id(),
+                'profile_id' => $profile->id,
+            ]);
+
             return response()->json([
                 'status' => 422,
                 'text' => 'Access token Meta belum diisi.',
@@ -158,6 +163,12 @@ class T4JamController extends Controller
             ], 422);
         }
 
+        MetaFlowLog::info('reload requested', [
+            'user_id' => Auth::id(),
+            'profile_id' => $profile->id,
+            'ad_account_id' => $adAccountExternalId,
+        ]);
+
         try {
             $counts = $metaSync->syncCampaignsForAccount(
                 $profile,
@@ -168,6 +179,15 @@ class T4JamController extends Controller
                 'last_meta_error' => $exception->getMessage(),
             ]);
 
+            MetaFlowLog::warning('reload failed', [
+                'user_id' => Auth::id(),
+                'profile_id' => $profile->id,
+                'ad_account_id' => $adAccountExternalId,
+                'http_status' => $exception->httpStatus,
+                'meta_code' => $exception->metaCode,
+                'meta_type' => $exception->metaType,
+            ]);
+
             return response()->json([
                 'status' => 422,
                 'text' => $exception->getMessage(),
@@ -175,6 +195,12 @@ class T4JamController extends Controller
         }
 
         $accounts = AdAccount::with('campaigns.adSets')->get();
+        MetaFlowLog::info('reload finished', [
+            'user_id' => Auth::id(),
+            'profile_id' => $profile->id,
+            'ad_account_id' => $adAccountExternalId,
+            'campaigns' => $counts['campaigns'],
+        ]);
 
         return response()->json([
             'status' => 200,
@@ -183,8 +209,7 @@ class T4JamController extends Controller
                 $counts['campaigns']
             ),
             'adaccount' => $accounts
-                ->map(fn (AdAccount $account) =>
-                    $this->accountPayload($account)
+                ->map(fn (AdAccount $account) => $this->accountPayload($account)
                 )
                 ->values(),
             'ad_account_count' => $accounts->count(),
@@ -193,17 +218,36 @@ class T4JamController extends Controller
 
     public function checkConnection(MetaAdsSyncService $metaSync): JsonResponse
     {
-        $profile = $this->currentProfile();
+        $profile = $this->metaCredentialProfile();
 
-        if (! $profile->access_token) {
+        if (! $profile->hasAccessToken()) {
+            MetaFlowLog::warning('connection check rejected without access token', [
+                'user_id' => Auth::id(),
+                'profile_id' => $profile->id,
+            ]);
+
             return response()->json(['status' => 422, 'text' => 'Access token Meta belum diisi.'], 422);
         }
 
         try {
             $metaUser = $metaSync->client($profile)->validateToken();
         } catch (MetaAdsException $exception) {
+            MetaFlowLog::warning('connection check failed', [
+                'user_id' => Auth::id(),
+                'profile_id' => $profile->id,
+                'http_status' => $exception->httpStatus,
+                'meta_code' => $exception->metaCode,
+                'meta_type' => $exception->metaType,
+            ]);
+
             return response()->json(['status' => 422, 'text' => $exception->getMessage()], 422);
         }
+
+        MetaFlowLog::info('connection check finished', [
+            'user_id' => Auth::id(),
+            'profile_id' => $profile->id,
+            'meta_user_id' => $metaUser['id'] ?? null,
+        ]);
 
         return response()->json(['status' => 200, 'text' => 'Terhubung sebagai '.($metaUser['name'] ?? Auth::user()->name)]);
     }
@@ -518,29 +562,55 @@ class T4JamController extends Controller
         );
 
         if (! $profile->access_token) {
+            MetaFlowLog::info('access token profile saved without sync queue', [
+                'user_id' => Auth::id(),
+                'profile_id' => $profile->id,
+            ]);
+
             return back()->with('status', 'Access token berhasil disimpan.');
         }
 
         SyncMetaAdsProfile::dispatch($profile->id)->afterCommit();
+        MetaFlowLog::info('access token saved and full sync queued', [
+            'user_id' => Auth::id(),
+            'profile_id' => $profile->id,
+            'queue' => 'meta',
+        ]);
 
         return back()->with('status', 'Access token valid. Sync Meta Ads masuk antrean queue.');
     }
 
-    public function syncMetaAds(MetaAdsSyncService $metaSync): RedirectResponse
+    public function syncMetaAds(Request $request): JsonResponse|RedirectResponse
     {
-        $profile = $this->currentProfile();
+        $profile = $this->metaCredentialProfile();
 
-        if (! $profile->access_token) {
+        if (! $profile->hasAccessToken()) {
+            MetaFlowLog::warning('manual full sync rejected without access token', [
+                'user_id' => Auth::id(),
+                'profile_id' => $profile->id,
+            ]);
+
+            if ($request->expectsJson()) {
+                return response()->json(['status' => 422, 'text' => 'Access token Meta belum diisi.'], 422);
+            }
+
             return back()->withErrors(['meta' => 'Access token Meta belum diisi.']);
         }
 
-        $result = $this->syncMetaProfileNow($profile, $metaSync);
+        SyncMetaAdsProfile::dispatch($profile->id)->afterCommit();
+        MetaFlowLog::info('manual full sync queued', [
+            'user_id' => Auth::id(),
+            'profile_id' => $profile->id,
+            'queue' => 'meta',
+        ]);
 
-        if (! $result['ok']) {
-            return back()->withErrors(['meta' => $result['text']]);
+        $message = 'Sync Meta Ads masuk antrean queue.';
+
+        if ($request->expectsJson()) {
+            return response()->json(['status' => 200, 'text' => $message]);
         }
 
-        return back()->with('status', $this->metaSyncSuccessMessage($result['counts']));
+        return back()->with('status', $message);
     }
 
     private function syncMetaProfileNow(T4JamProfile $profile, MetaAdsSyncService $metaSync): array
@@ -552,7 +622,7 @@ class T4JamController extends Controller
 
             return ['ok' => false, 'text' => $exception->getMessage()];
         } catch (Throwable $exception) {
-            Log::warning('Meta ads direct sync failed', [
+            MetaFlowLog::warning('direct full sync failed', [
                 'profile_id' => $profile->id,
                 'exception' => $exception::class,
                 'message' => $exception->getMessage(),
@@ -686,12 +756,21 @@ class T4JamController extends Controller
     private function metaWriteReadiness(string $disabledMessage): array
     {
         if (! config('services.meta.enable_writes')) {
+            MetaFlowLog::warning('meta write rejected because write mode disabled', [
+                'user_id' => Auth::id(),
+            ]);
+
             return ['ok' => false, 'text' => $disabledMessage];
         }
 
-        $profile = $this->currentProfile();
+        $profile = $this->metaCredentialProfile();
 
-        if (! $profile->access_token) {
+        if (! $profile->hasAccessToken()) {
+            MetaFlowLog::warning('meta write rejected without access token', [
+                'user_id' => Auth::id(),
+                'profile_id' => $profile->id,
+            ]);
+
             return ['ok' => false, 'text' => 'Access token Meta belum diisi.'];
         }
 
@@ -700,7 +779,7 @@ class T4JamController extends Controller
 
     private function shouldRefreshMetaBudget(): bool
     {
-        return (bool) config('services.meta.enable_writes') && (bool) $this->currentProfile()->access_token;
+        return (bool) config('services.meta.enable_writes') && $this->metaCredentialProfile()->hasAccessToken();
     }
 
     private function pushMetaBudget(Campaign|AdSet|string|null $target, int $budget, string $level, MetaAdsSyncService $metaSync): array
@@ -712,6 +791,11 @@ class T4JamController extends Controller
         };
 
         if (! $targetId) {
+            MetaFlowLog::warning('budget push rejected without target', [
+                'user_id' => Auth::id(),
+                'level' => $level,
+            ]);
+
             return ['ok' => false, 'text' => 'Target campaign/ad set tidak ditemukan.'];
         }
 
@@ -721,13 +805,22 @@ class T4JamController extends Controller
         }
 
         try {
-            $client = $metaSync->client($this->currentProfile());
+            $profile = $this->metaCredentialProfile();
+            $client = $metaSync->client($profile);
 
             if ($level === 'adset') {
                 $client->updateAdSetBudget($targetId, $budget);
             } else {
                 $client->updateCampaignBudget($targetId, $budget);
             }
+
+            MetaFlowLog::info('budget pushed to meta', [
+                'user_id' => Auth::id(),
+                'profile_id' => $profile->id,
+                'target_id' => $targetId,
+                'level' => $level,
+                'budget' => $budget,
+            ]);
         } catch (MetaAdsException $exception) {
             $this->reportMetaAutomationFailure($exception, $targetId, 'budget');
 
@@ -742,6 +835,12 @@ class T4JamController extends Controller
         $targetId = $task->level === 'adset' ? $task->ad_set_external_id : $task->campaign_external_id;
 
         if (! $targetId) {
+            MetaFlowLog::warning('status push rejected without target', [
+                'user_id' => Auth::id(),
+                'automation_task_id' => $task->id,
+                'level' => $task->level,
+            ]);
+
             return ['ok' => false, 'text' => 'Target campaign/ad set tidak ditemukan.'];
         }
 
@@ -751,13 +850,23 @@ class T4JamController extends Controller
         }
 
         try {
-            $client = $metaSync->client($this->currentProfile());
+            $profile = $this->metaCredentialProfile();
+            $client = $metaSync->client($profile);
 
             if ($task->level === 'adset') {
                 $client->updateAdSetStatus($targetId, $active);
             } else {
                 $client->updateCampaignStatus($targetId, $active);
             }
+
+            MetaFlowLog::info('status pushed to meta', [
+                'user_id' => Auth::id(),
+                'profile_id' => $profile->id,
+                'automation_task_id' => $task->id,
+                'target_id' => $targetId,
+                'level' => $task->level,
+                'active' => $active,
+            ]);
         } catch (MetaAdsException $exception) {
             $this->reportMetaAutomationFailure($exception, $targetId, 'status');
 
@@ -807,7 +916,7 @@ class T4JamController extends Controller
 
     private function reportMetaAutomationFailure(MetaAdsException $exception, string $targetId, string $action): void
     {
-        Log::warning('Meta automation update failed', [
+        MetaFlowLog::warning('automation meta update failed', [
             'target_id' => $targetId,
             'action' => $action,
             'http_status' => $exception->httpStatus,
@@ -937,5 +1046,10 @@ class T4JamController extends Controller
     private function currentProfile(): T4JamProfile
     {
         return T4JamProfile::firstOrCreate(['user_id' => Auth::id()]);
+    }
+
+    private function metaCredentialProfile(): T4JamProfile
+    {
+        return T4JamProfile::usableForUser(Auth::id());
     }
 }

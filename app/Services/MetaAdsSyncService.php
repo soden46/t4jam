@@ -7,8 +7,8 @@ use App\Models\AdAccount;
 use App\Models\AdSet;
 use App\Models\Campaign;
 use App\Models\T4JamProfile;
+use App\Support\MetaFlowLog;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
 
 class MetaAdsSyncService
 {
@@ -17,6 +17,7 @@ class MetaAdsSyncService
     public function sync(T4JamProfile $profile): array
     {
         $this->warnings = [];
+        MetaFlowLog::info('full sync started', ['profile_id' => $profile->id]);
         $client = $this->client($profile);
         $metaUser = $client->validateToken();
         $accounts = $this->prefetchAccounts($client);
@@ -57,6 +58,15 @@ class MetaAdsSyncService
             $counts['warning'] = end($this->warnings);
             $profile->update(['last_meta_error' => $counts['warning']]);
         }
+
+        MetaFlowLog::info('full sync finished', [
+            'profile_id' => $profile->id,
+            'accounts' => $counts['accounts'] ?? 0,
+            'campaigns' => $counts['campaigns'] ?? 0,
+            'adsets' => $counts['adsets'] ?? 0,
+            'insights' => $counts['insights'] ?? 0,
+            'has_warning' => isset($counts['warning']),
+        ]);
 
         return $counts;
     }
@@ -152,7 +162,7 @@ class MetaAdsSyncService
         } catch (MetaAdsException $exception) {
             $this->warnings[] = $exception->getMessage();
 
-            Log::warning($message, $context + [
+            MetaFlowLog::warning($message, $context + [
                 'http_status' => $exception->httpStatus,
                 'meta_code' => $exception->metaCode,
                 'meta_type' => $exception->metaType,
@@ -235,6 +245,11 @@ class MetaAdsSyncService
     ): array {
         $this->warnings = [];
 
+        MetaFlowLog::info('selected account campaign sync started', [
+            'profile_id' => $profile->id,
+            'ad_account_id' => $adAccountExternalId,
+        ]);
+
         $client = $this->client($profile);
 
         $accountData = $client->adAccount($adAccountExternalId);
@@ -263,6 +278,13 @@ class MetaAdsSyncService
         $profile->update([
             'last_meta_sync_at' => now(),
             'last_meta_error' => null,
+        ]);
+
+        MetaFlowLog::info('selected account campaign sync finished', [
+            'profile_id' => $profile->id,
+            'ad_account_id' => $adAccountExternalId,
+            'accounts' => $counts['accounts'],
+            'campaigns' => $counts['campaigns'],
         ]);
 
         return $counts;

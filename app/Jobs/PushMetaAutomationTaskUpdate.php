@@ -7,9 +7,9 @@ use App\Models\AutomationLog;
 use App\Models\AutomationTask;
 use App\Models\T4JamProfile;
 use App\Services\MetaAdsSyncService;
+use App\Support\MetaFlowLog;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
-use Illuminate\Support\Facades\Log;
 use Throwable;
 
 class PushMetaAutomationTaskUpdate implements ShouldQueue
@@ -44,10 +44,26 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
         $task = AutomationTask::query()->find($this->taskId);
 
         if (! $profile || ! $task || ! config('services.meta.enable_writes')) {
+            MetaFlowLog::warning('queued automation meta update skipped', [
+                'profile_id' => $this->profileId,
+                'automation_task_id' => $this->taskId,
+                'action' => $this->action,
+                'has_profile' => (bool) $profile,
+                'has_task' => (bool) $task,
+                'writes_enabled' => (bool) config('services.meta.enable_writes'),
+            ]);
+
             return;
         }
 
         try {
+            MetaFlowLog::info('queued automation meta update started', [
+                'profile_id' => $profile->id,
+                'automation_task_id' => $task->id,
+                'action' => $this->action,
+                'queue' => 'meta',
+            ]);
+
             $client = $metaSync->client($profile);
 
             if ($this->action === 'status') {
@@ -116,6 +132,12 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
     {
         $message = $this->baseMessage.'; Meta berhasil diupdate.';
 
+        MetaFlowLog::info('queued automation meta update finished', [
+            'automation_task_id' => $task->id,
+            'action' => $this->action,
+            'target_id' => $this->targetId($task),
+        ]);
+
         $task->update([
             'last_log' => $message,
             'last_checked_at' => now(),
@@ -130,6 +152,13 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
     private function markPendingRetry(AutomationTask $task, int $seconds): void
     {
         $message = $this->baseMessage.'; Meta rate limit, akan dicoba ulang '.$seconds.' detik lagi.';
+
+        MetaFlowLog::warning('queued automation meta update delayed by rate limit', [
+            'automation_task_id' => $task->id,
+            'action' => $this->action,
+            'target_id' => $this->targetId($task),
+            'retry_after_seconds' => $seconds,
+        ]);
 
         $task->update([
             'last_log' => $message,
@@ -146,7 +175,7 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
     {
         $log = $this->baseMessage.'; '.$message;
 
-        Log::warning('Meta automation update failed', [
+        MetaFlowLog::warning('queued automation meta update failed', [
             'automation_task_id' => $task->id,
             'action' => $this->action,
             'exception' => $exception::class,

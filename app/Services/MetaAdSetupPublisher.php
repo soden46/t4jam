@@ -2,15 +2,16 @@
 
 namespace App\Services;
 
+use App\Models\AdSet;
 use App\Models\AdSetup;
+use App\Models\Campaign;
 use App\Models\T4JamProfile;
+use App\Support\MetaFlowLog;
 use Illuminate\Support\Facades\DB;
 
 class MetaAdSetupPublisher
 {
-    public function __construct(private readonly MetaAdsSyncService $metaSync)
-    {
-    }
+    public function __construct(private readonly MetaAdsSyncService $metaSync) {}
 
     public function publish(AdSetup $setup, T4JamProfile $profile): AdSetup
     {
@@ -19,12 +20,21 @@ class MetaAdSetupPublisher
                 'status' => 'ready',
                 'last_error' => null,
             ]);
+            MetaFlowLog::info('ad setup marked ready without meta publish', [
+                'ad_setup_id' => $setup->id,
+                'profile_id' => $profile->id,
+            ]);
 
             return $setup->fresh(['adAccount']);
         }
 
         $client = $this->metaSync->client($profile);
         $accountId = $setup->adAccount->external_id;
+        MetaFlowLog::info('ad setup publish started', [
+            'ad_setup_id' => $setup->id,
+            'profile_id' => $profile->id,
+            'ad_account_id' => $accountId,
+        ]);
 
         return DB::transaction(function () use ($setup, $client, $accountId): AdSetup {
             $campaign = $client->createCampaign($accountId, [
@@ -34,7 +44,17 @@ class MetaAdSetupPublisher
                 'buying_type' => 'AUCTION',
                 'special_ad_categories' => json_encode($setup->special_ad_categories ?? []),
             ]);
-            $setup->update(['meta_campaign_id' => $campaign['id'] ?? null]);
+            $localCampaign = $this->syncLocalCampaign($setup, $campaign['id'] ?? null);
+            $setup->update([
+                'campaign_id' => $localCampaign?->id,
+                'meta_campaign_id' => $campaign['id'] ?? null,
+            ]);
+            MetaFlowLog::info('ad setup meta campaign created', [
+                'ad_setup_id' => $setup->id,
+                'ad_account_id' => $accountId,
+                'campaign_id' => $campaign['id'] ?? null,
+                'local_campaign_id' => $localCampaign?->id,
+            ]);
 
             $adset = $client->createAdSet($accountId, array_filter([
                 'name' => $setup->adset_name,
@@ -48,7 +68,15 @@ class MetaAdSetupPublisher
                 'end_time' => $setup->end_time?->toIso8601String(),
                 'status' => 'PAUSED',
             ]));
+            $localAdSet = $this->syncLocalAdSet($setup, $localCampaign, $adset['id'] ?? null);
             $setup->update(['meta_adset_id' => $adset['id'] ?? null]);
+            MetaFlowLog::info('ad setup meta ad set created', [
+                'ad_setup_id' => $setup->id,
+                'ad_account_id' => $accountId,
+                'campaign_id' => $setup->meta_campaign_id,
+                'ad_set_id' => $adset['id'] ?? null,
+                'local_ad_set_id' => $localAdSet?->id,
+            ]);
 
             $creative = $client->createAdCreative($accountId, [
                 'name' => $setup->creative_name,
@@ -68,6 +96,11 @@ class MetaAdSetupPublisher
                 ])),
             ]);
             $setup->update(['meta_creative_id' => $creative['id'] ?? null]);
+            MetaFlowLog::info('ad setup meta creative created', [
+                'ad_setup_id' => $setup->id,
+                'ad_account_id' => $accountId,
+                'creative_id' => $creative['id'] ?? null,
+            ]);
 
             $ad = $client->createAd($accountId, [
                 'name' => $setup->ad_name,
@@ -82,8 +115,56 @@ class MetaAdSetupPublisher
                 'last_error' => null,
                 'published_at' => now(),
             ]);
+            MetaFlowLog::info('ad setup meta ad created and publish finished', [
+                'ad_setup_id' => $setup->id,
+                'ad_account_id' => $accountId,
+                'campaign_id' => $setup->meta_campaign_id,
+                'ad_set_id' => $setup->meta_adset_id,
+                'creative_id' => $setup->meta_creative_id,
+                'ad_id' => $setup->meta_ad_id,
+            ]);
 
             return $setup->fresh(['adAccount']);
         });
+    }
+
+    private function syncLocalCampaign(AdSetup $setup, ?string $externalId): ?Campaign
+    {
+        if (! $externalId) {
+            return null;
+        }
+
+        return Campaign::updateOrCreate(
+            ['external_id' => $externalId],
+            [
+                'ad_account_id' => $setup->ad_account_id,
+                'name' => $setup->campaign_name,
+                'status' => $setup->campaign_status,
+                'effective_status' => $setup->campaign_status,
+                'budget_type' => 'campaign',
+                'level' => 'campaign',
+                'objective' => $setup->campaign_objective,
+                'daily_budget' => $setup->daily_budget,
+            ],
+        );
+    }
+
+    private function syncLocalAdSet(AdSetup $setup, ?Campaign $campaign, ?string $externalId): ?AdSet
+    {
+        if (! $campaign || ! $externalId) {
+            return null;
+        }
+
+        return AdSet::updateOrCreate(
+            ['external_id' => $externalId],
+            [
+                'ad_account_id' => $setup->ad_account_id,
+                'campaign_id' => $campaign->id,
+                'name' => $setup->adset_name,
+                'status' => 'PAUSED',
+                'effective_status' => 'PAUSED',
+                'daily_budget' => $setup->daily_budget,
+            ],
+        );
     }
 }

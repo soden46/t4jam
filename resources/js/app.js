@@ -654,28 +654,17 @@ function renderProducts(rows) {
 }
 
 function initProfile() {
-    const syncForm = qs('#sync-meta-form');
-    const syncBtn = qs('#sync-meta-btn');
+    qs('#sync-meta-form')?.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const form = event.target;
 
-    syncForm?.addEventListener('submit', async () => {
-        syncBtn.disabled = true;
-        syncBtn.textContent = 'Syncing...';
-        sessionStorage.setItem('meta-sync-pending', '1');
-    });
-
-    if (page() === 'profile' && sessionStorage.getItem('meta-sync-pending') === '1') {
-        const stop = () => sessionStorage.removeItem('meta-sync-pending');
-        const hasStatus = !!qs('.alert') || !!qs('.text-success') || !!qs('.text-danger');
-        const hasSyncTime = !!qs('.muted')?.textContent?.includes('Terakhir sync');
-
-        if (!hasStatus && !hasSyncTime) {
-            setTimeout(() => {
-                location.reload();
-            }, 3000);
-        } else {
-            stop();
+        try {
+            const response = await request(form.action, { method: 'POST', body: formBody(form) });
+            toast(response.text || 'Sync Meta Ads masuk antrean queue.');
+        } catch (error) {
+            toast(error.message, 'danger');
         }
-    }
+    });
 
     qs('#profile-form')?.addEventListener('submit', async (event) => {
         event.preventDefault();

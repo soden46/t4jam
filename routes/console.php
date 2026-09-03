@@ -3,9 +3,9 @@
 use App\Exceptions\MetaAdsException;
 use App\Models\T4JamProfile;
 use App\Services\MetaAdsSyncService;
+use App\Support\MetaFlowLog;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schedule;
 
 Artisan::command('inspire', function () {
@@ -20,6 +20,7 @@ Artisan::command('t4jam:sync-meta-ads {--profile_id=}', function (MetaAdsSyncSer
         ->get();
 
     if ($profiles->isEmpty()) {
+        MetaFlowLog::info('sync command skipped because no token profiles');
         $this->info('Tidak ada profile dengan access token Meta.');
 
         return 0;
@@ -29,6 +30,10 @@ Artisan::command('t4jam:sync-meta-ads {--profile_id=}', function (MetaAdsSyncSer
 
     foreach ($profiles as $profile) {
         try {
+            MetaFlowLog::info('sync command profile started', [
+                'profile_id' => $profile->id,
+            ]);
+
             $counts = $metaSync->sync($profile);
 
             $message = sprintf(
@@ -44,17 +49,31 @@ Artisan::command('t4jam:sync-meta-ads {--profile_id=}', function (MetaAdsSyncSer
                 $message .= ' Warning: '.$counts['warning'];
             }
 
+            MetaFlowLog::info('sync command profile finished', [
+                'profile_id' => $profile->id,
+                'accounts' => $counts['accounts'] ?? 0,
+                'campaigns' => $counts['campaigns'] ?? 0,
+                'adsets' => $counts['adsets'] ?? 0,
+                'insights' => $counts['insights'] ?? 0,
+                'has_warning' => isset($counts['warning']),
+            ]);
             $this->info($message);
         } catch (MetaAdsException $exception) {
             $failed++;
             $profile->update(['last_meta_error' => $exception->getMessage()]);
+            MetaFlowLog::warning('sync command profile failed with meta error', [
+                'profile_id' => $profile->id,
+                'http_status' => $exception->httpStatus,
+                'meta_code' => $exception->metaCode,
+                'meta_type' => $exception->metaType,
+            ]);
             $this->warn("Profile {$profile->id} sync failed: {$exception->getMessage()}");
         } catch (Throwable $exception) {
             $failed++;
             $message = 'Sync Meta Ads gagal. Coba lagi beberapa saat.';
             $profile->update(['last_meta_error' => $message]);
 
-            Log::warning('Scheduled Meta ads sync failed', [
+            MetaFlowLog::warning('sync command profile failed', [
                 'profile_id' => $profile->id,
                 'exception' => $exception::class,
                 'message' => $exception->getMessage(),
