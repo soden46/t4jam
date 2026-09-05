@@ -52,7 +52,7 @@ class T4JamController extends Controller
         return view('automation', [
             'title' => 'Automation Budget Strategy',
             'accounts' => AdAccount::query()->orderBy('name')->get(),
-            'tasks' => AutomationTask::with(['adAccount', 'campaign'])->latest()->get(),
+            'tasks' => AutomationTask::with(['adAccount', 'campaign', 'adSet'])->latest()->get(),
         ]);
     }
 
@@ -259,7 +259,7 @@ class T4JamController extends Controller
 
     public function automationTasks(Request $request): JsonResponse
     {
-        $tasks = AutomationTask::with(['adAccount', 'campaign'])
+        $tasks = AutomationTask::with(['adAccount', 'campaign', 'adSet'])
             ->when($request->query('acc') && $request->query('acc') !== 'all', fn ($query) => $query->whereHas('adAccount', fn ($account) => $account->where('external_id', $request->query('acc'))))
             ->when($request->query('level') && $request->query('level') !== 'all', fn ($query) => $query->where('level', $request->query('level')))
             ->when($request->query('funnel') && $request->query('funnel') !== 'all', fn ($query) => $query->where('event_flow', $request->query('funnel')))
@@ -341,7 +341,7 @@ class T4JamController extends Controller
             return $task;
         });
 
-        return response()->json(['status' => 200, 'text' => 'Automation budget berhasil dibuat dan budget Meta berhasil diupdate.', 'data' => $this->taskPayload($task->load(['adAccount', 'campaign']))]);
+        return response()->json(['status' => 200, 'text' => 'Automation budget berhasil dibuat dan budget Meta berhasil diupdate.', 'data' => $this->taskPayload($task->load(['adAccount', 'campaign', 'adSet']))]);
     }
 
     public function updateAutomationTask(Request $request, MetaAdsSyncService $metaSync): JsonResponse
@@ -423,7 +423,7 @@ class T4JamController extends Controller
 
     public function specificTask(Request $request): JsonResponse
     {
-        $task = AutomationTask::with(['adAccount', 'campaign'])->find($request->query('automation_id'));
+        $task = AutomationTask::with(['adAccount', 'campaign', 'adSet'])->find($request->query('automation_id'));
 
         return response()->json(['status' => 200, 'data' => $task ? $this->taskPayload($task) : null]);
     }
@@ -714,17 +714,20 @@ class T4JamController extends Controller
 
     private function taskPayload(AutomationTask $task): array
     {
-        $result = max(0, (int) $task->current_result);
+        $target = $this->taskMetricTarget($task);
+        $budget = (int) ($target?->daily_budget ?? $task->current_budget);
+        $spend = (int) ($target?->spend ?? $task->current_spend);
+        $result = max(0, (int) ($target?->result ?? $task->current_result));
 
         return [
             'id' => $task->id,
             'campaign_id' => $task->level === 'adset' ? $task->ad_set_external_id : $task->campaign_external_id,
             'parent_campaign_id' => $task->campaign_external_id,
             'adset_id' => $task->ad_set_external_id,
-            'current_budget' => $task->current_budget,
-            'current_spend' => $task->current_spend,
-            'current_cpr' => $result > 0 ? round($task->current_spend / $result) : $task->current_spend,
-            'current_hasil' => $task->current_result,
+            'current_budget' => $budget,
+            'current_spend' => $spend,
+            'current_cpr' => $result > 0 ? round($spend / $result) : $spend,
+            'current_hasil' => $result,
             'event_flow' => $task->event_flow,
             'system_flow' => $task->system_flow,
             'conversion' => $task->conversion,
@@ -751,6 +754,11 @@ class T4JamController extends Controller
             'counter_cpr' => $task->counter_cpr,
             'use_on_off' => $task->use_on_off,
         ];
+    }
+
+    private function taskMetricTarget(AutomationTask $task): Campaign|AdSet|null
+    {
+        return $task->level === 'adset' ? $task->adSet : $task->campaign;
     }
 
     private function metaWriteReadiness(string $disabledMessage): array
