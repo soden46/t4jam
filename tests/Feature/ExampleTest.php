@@ -380,6 +380,37 @@ class ExampleTest extends TestCase
         $this->assertSame(35372, $row['current_cpr']);
     }
 
+    public function test_automation_budget_metrics_resolve_legacy_task_by_external_campaign_id(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        $task->campaign->update([
+            'daily_budget' => 55000,
+            'spend' => 35372,
+            'result' => 1,
+        ]);
+        $task->update([
+            'campaign_id' => null,
+            'current_budget' => 55000,
+            'current_spend' => 0,
+            'current_result' => 0,
+        ]);
+
+        $row = collect($this
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all')
+            ->assertOk()
+            ->json('data'))
+            ->firstWhere('id', $task->id);
+
+        $this->assertSame(55000, $row['current_budget']);
+        $this->assertSame(35372, $row['current_spend']);
+        $this->assertSame(1, $row['current_hasil']);
+        $this->assertSame(35372, $row['current_cpr']);
+    }
+
     public function test_update_automation_task_pushes_budget_to_meta_adset(): void
     {
         $this->seed(TestDataSeeder::class);

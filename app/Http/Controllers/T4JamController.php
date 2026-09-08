@@ -758,7 +758,17 @@ class T4JamController extends Controller
 
     private function taskMetricTarget(AutomationTask $task): Campaign|AdSet|null
     {
-        return $task->level === 'adset' ? $task->adSet : $task->campaign;
+        if ($task->level === 'adset') {
+            return $task->adSet
+                ?? ($task->ad_set_external_id
+                    ? AdSet::query()->where('external_id', $task->ad_set_external_id)->first()
+                    : null);
+        }
+
+        return $task->campaign
+            ?? ($task->campaign_external_id
+                ? Campaign::query()->where('external_id', $task->campaign_external_id)->first()
+                : null);
     }
 
     private function metaWriteReadiness(string $disabledMessage): array
