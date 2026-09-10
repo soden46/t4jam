@@ -37,6 +37,9 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'off_time',
     'last_log',
     'last_checked_at',
+    'last_budget_changed_at',
+    'last_budget_before',
+    'last_budget_action',
 ])]
 class AutomationTask extends Model
 {
@@ -52,6 +55,7 @@ class AutomationTask extends Model
             'counter_cpr' => 'boolean',
             'use_on_off' => 'boolean',
             'last_checked_at' => 'datetime',
+            'last_budget_changed_at' => 'datetime',
         ];
     }
 

@@ -88,13 +88,31 @@ php artisan t4jam:sync-meta-ads
 
 Scheduler menjalankan command setiap 5 jam pada timezone Asia/Jakarta.
 
+Pemeriksaan CPR cap berjalan setiap 5 menit melalui command berikut. Command ini mengambil insight target langsung dari Meta Ads, memperbarui metrik lokal, lalu mengevaluasi CPR:
+
+```bash
+php artisan t4jam:enforce-automation
+```
+
+CPR dihitung dari action conversion yang dipilih pada automation (misalnya `purchase`, `lead`, atau `add_to_cart`) dan action tersebut dibaca langsung dari insight Meta. Jika toggle `Pause Campaign saat CPR Boncos` aktif dan CPR sudah mencapai atau melewati `CPR Cap`, target akan dipause di Meta setelah write mode aktif. Kegagalan membaca insight tidak dianggap sebagai pemeriksaan berhasil, sehingga percobaan berikutnya tetap berjalan.
+
+Formula automation budget yang dipakai:
+
+- Pause: `CPR Meta >= CPR Cap` dan toggle pause aktif.
+- Recovery: jika `counter_cpr` aktif dan pause sebelumnya dilakukan automation, aktifkan kembali saat `CPR Meta <= Resume CPR` dan ada minimal satu conversion.
+- Scale: jika `CPR Meta <= 80% x CPR Cap`, minimal ada 3 conversion, dan sudah 72 jam sejak perubahan budget terakhir, naikkan budget `15%`.
+- Batas: budget baru tidak boleh melewati `Maximum Increasing Budget`; nilai `0` berarti tidak dibatasi.
+- Jam kerja: bila `use_on_off` aktif, bot hanya mengevaluasi task di antara jam ON dan OFF. Perubahan budget dicatat sebagai baseline, manual, increase, pause, atau resume.
+
+Angka 15%, 72 jam, 3 conversion, dan ambang 80% adalah kebijakan konservatif aplikasi yang disintesis dari praktik scaling; Meta menyediakan metrik serta endpoint perubahan budget, tetapi tidak menetapkan satu formula universal untuk semua akun.
+
 Agar scheduler berjalan otomatis di server, aktifkan Laravel scheduler melalui cron:
 
 ```cron
 * * * * * cd /path/to/t4jam-app && php artisan schedule:run >> /dev/null 2>&1
 ```
 
-Scheduler memakai `withoutOverlapping(295)` agar full sync berikutnya tidak dimulai ketika proses sebelumnya masih berjalan.
+Full sync memakai `withoutOverlapping(295)` dan enforcement CPR memakai lock terpisah agar proses yang sama tidak berjalan bersamaan.
 
 Untuk tes satu profile tertentu:
 
@@ -110,6 +128,7 @@ Action Meta dipisah berdasarkan risikonya:
 - `Sync Meta Ads` di Profile menjalankan full sync account, campaign, ad set, dan insights.
 - `Create` dan `Update` automation budget mengirim budget ke Meta langsung; setelah Meta sukses, data lokal disimpan.
 - Toggle status automation mengirim status ke Meta langsung; setelah Meta sukses, data lokal disimpan.
+- Automation enforcement mem-pause campaign/ad set saat CPR mencapai atau melewati cap yang dikonfigurasi.
 - `Turun` budget mengirim budget ke Meta langsung; setelah Meta sukses, data lokal disimpan.
 - `Publish / Prepare Meta` dan tombol `Publish` setup iklan memasukkan publish campaign/ad set/creative/ad ke queue saat write mode aktif.
 

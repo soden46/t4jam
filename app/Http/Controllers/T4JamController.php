@@ -327,10 +327,12 @@ class T4JamController extends Controller
                 'current_budget' => $budget,
                 'current_spend' => 0,
                 'current_result' => 0,
-                'is_active' => true,
+                'is_active' => $request->boolean('automation_activation'),
                 'level' => $level,
                 'last_log' => $successMessage,
-                'last_checked_at' => now(),
+                'last_checked_at' => null,
+                'last_budget_changed_at' => now(),
+                'last_budget_action' => 'baseline',
             ]);
 
             AutomationLog::create([
@@ -379,11 +381,18 @@ class T4JamController extends Controller
                 $this->persistLocalBudget($target, $budget, $task->level);
             }
 
-            $task->update($this->automationPayload($request) + [
+            $taskData = $this->automationPayload($request) + [
                 'last_log' => $logMessage,
-                'last_checked_at' => now(),
-                'is_active' => $request->input('automation_activation', 'active') === 'active',
-            ] + ($budgetChanged ? ['current_budget' => $budget] : []));
+                'last_checked_at' => null,
+                'is_active' => $request->boolean('automation_activation'),
+            ] + ($budgetChanged ? [
+                'current_budget' => $budget,
+                'last_budget_changed_at' => now(),
+                'last_budget_before' => $task->current_budget,
+                'last_budget_action' => 'manual',
+            ] : []);
+
+            $task->update($taskData);
 
             AutomationLog::create([
                 'automation_task_id' => $task->id,
@@ -410,7 +419,7 @@ class T4JamController extends Controller
             $task->update([
                 'is_active' => $isActive,
                 'last_log' => $successMessage,
-                'last_checked_at' => now(),
+                'last_checked_at' => $isActive ? null : now(),
             ]);
             AutomationLog::create([
                 'automation_task_id' => $task->id,
@@ -468,6 +477,9 @@ class T4JamController extends Controller
                 'current_budget' => $task->starting_budget,
                 'last_log' => $successMessage,
                 'last_checked_at' => now(),
+                'last_budget_changed_at' => now(),
+                'last_budget_before' => $task->current_budget,
+                'last_budget_action' => 'manual',
             ]);
             AutomationLog::create([
                 'automation_task_id' => $task->id,

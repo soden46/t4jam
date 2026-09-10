@@ -14,9 +14,12 @@ class MetaAdsSyncService
 {
     private array $warnings = [];
 
+    private array $freshInsightTargets = [];
+
     public function sync(T4JamProfile $profile): array
     {
         $this->warnings = [];
+        $this->freshInsightTargets = [];
         MetaFlowLog::info('full sync started', ['profile_id' => $profile->id]);
         $client = $this->client($profile);
         $metaUser = $client->validateToken();
@@ -53,6 +56,11 @@ class MetaAdsSyncService
         });
 
         $counts['insights'] = $this->syncInsights($client, $campaignIds, $adSetIds);
+        $counts['automation_paused'] = app(AutomationBudgetService::class)->pauseTasksOverCprCap(
+            $profile,
+            $client,
+            syncedTargets: $this->freshInsightTargets,
+        );
 
         if ($this->warnings !== []) {
             $counts['warning'] = end($this->warnings);
@@ -132,6 +140,7 @@ class MetaAdsSyncService
 
                 if ($insights !== []) {
                     $campaign->update($this->insightPayload($insights));
+                    $this->freshInsightTargets['campaign:'.$campaign->external_id] = app(AutomationBudgetService::class)->metricSnapshot($insights);
                     $count++;
                 }
             });
@@ -148,6 +157,7 @@ class MetaAdsSyncService
 
                 if ($insights !== []) {
                     $adSet->update($this->insightPayload($insights));
+                    $this->freshInsightTargets['adset:'.$adSet->external_id] = app(AutomationBudgetService::class)->metricSnapshot($insights);
                     $count++;
                 }
             });
@@ -219,24 +229,9 @@ class MetaAdsSyncService
 
     private function insightPayload(array $insights): array
     {
-        $actions = collect($insights['actions'] ?? []);
-        $result = $this->actionValue($actions, ['purchase', 'lead', 'add_to_cart', 'initiate_checkout', 'contact_website', 'onsite_conversion.messaging_conversation_started_7d']);
-
-        return [
-            'spend' => (int) round((float) ($insights['spend'] ?? 0)),
-            'reach' => (int) ($insights['reach'] ?? 0),
-            'result' => $result,
-            'link_click' => (int) ($insights['inline_link_clicks'] ?? $this->actionValue($actions, ['link_click'])),
-            'landing_page_view' => $this->actionValue($actions, ['landing_page_view']),
-            'insights_synced_at' => now(),
-        ];
-    }
-
-    private function actionValue($actions, array $types): int
-    {
-        return (int) $actions
-            ->whereIn('action_type', $types)
-            ->sum(fn (array $action) => (int) ($action['value'] ?? 0));
+        return app(AutomationBudgetService::class)->insightPayload(
+            app(AutomationBudgetService::class)->metricSnapshot($insights),
+        );
     }
 
     public function syncCampaignsForAccount(

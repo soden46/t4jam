@@ -87,8 +87,9 @@
                 <label class="switch-row"><input type="checkbox" name="use_on_off" id="use_on_off"> <span>Terapkan On/Off BOT T4Jam?</span></label>
             </div>
             <div class="grid-3">
-                <label>Pause CPR
+                <label>Resume CPR
                     <input type="number" name="pause_cpr_cap" id="pause_cpr_cap" value="70000">
+                    <small>Jika counter aktif, iklan dipulihkan saat CPR kembali di bawah batas ini.</small>
                 </label>
                 <label>Jam "ON" BOT T4Jam
                     <input type="time" name="on_time" id="on_time" value="01:00">

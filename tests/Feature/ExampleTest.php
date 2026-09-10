@@ -737,6 +737,326 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_321', 'name' => 'Scheduled Campaign']);
     }
 
+    public function test_meta_sync_pauses_campaign_when_active_cpr_cap_is_reached(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        $task->update([
+            'cpr_cap' => 20000,
+            'pause_when_cpr_loss' => true,
+            'is_active' => true,
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/me?*' => Http::response(['id' => 'meta-user-1', 'name' => 'Meta Tester']),
+            'graph.facebook.com/*/me/adaccounts?*' => Http::response([
+                'data' => [
+                    ['account_id' => '321', 'id' => $task->campaign->adAccount->external_id, 'name' => 'Automation Account', 'currency' => 'IDR', 'account_status' => 1],
+                ],
+            ]),
+            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/campaigns?*' => Http::response([
+                'data' => [
+                    ['id' => $task->campaign->external_id, 'name' => $task->campaign->name, 'status' => 'ACTIVE', 'daily_budget' => '75000'],
+                ],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign->external_id.'/adsets?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'spend' => '40000',
+                    'reach' => '1000',
+                    'inline_link_clicks' => '10',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true]),
+        ]);
+
+        $this->runMetaSyncJob($profile);
+
+        $task->refresh();
+        $campaign = $task->campaign->fresh();
+
+        $this->assertTrue(config('services.meta.enable_writes'));
+        $this->assertTrue($task->pause_when_cpr_loss);
+        $this->assertSame(40000, $campaign->spend);
+        $this->assertSame(1, $campaign->result);
+        $this->assertFalse($task->is_active);
+        $this->assertSame('PAUSED', $campaign->status);
+        $this->assertSame('PAUSED', $campaign->effective_status);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $campaign->external_id)
+            && $request['status'] === 'PAUSED');
+    }
+
+    public function test_automation_enforcement_command_pauses_using_synced_metrics(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        $task->campaign->update(['spend' => 0, 'result' => 0]);
+        $task->update([
+            'cpr_cap' => 20000,
+            'pause_when_cpr_loss' => true,
+            'is_active' => true,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'spend' => '40000',
+                    'reach' => '1000',
+                    'inline_link_clicks' => '10',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')
+            ->expectsOutput("Profile {$profile->id}: 1 automation campaign dipause.")
+            ->assertExitCode(0);
+
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame(40000, $task->campaign->fresh()->spend);
+        $this->assertSame(1, $task->campaign->fresh()->result);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign->external_id)
+            && $request['status'] === 'PAUSED');
+    }
+
+    public function test_cpr_uses_the_task_conversion_instead_of_summing_other_meta_actions(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        $task->update([
+            'conversion' => 'initiate_checkout',
+            'cpr_cap' => 25000,
+            'pause_when_cpr_loss' => true,
+            'is_active' => true,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'spend' => '40000',
+                    'actions' => [
+                        ['action_type' => 'purchase', 'value' => '1'],
+                        ['action_type' => 'add_to_cart', 'value' => '4'],
+                        ['action_type' => 'initiate_checkout', 'value' => '2'],
+                    ],
+                    'cost_per_action_type' => [
+                        ['action_type' => 'initiate_checkout', 'value' => '30000'],
+                    ],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertExitCode(0);
+
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame(2, $task->fresh()->current_result);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign->external_id)
+            && $request['status'] === 'PAUSED');
+    }
+
+    public function test_failed_meta_insight_does_not_advance_automation_check_time(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        $checkedAt = now()->subMinutes(11)->startOfSecond();
+        $task->update([
+            'is_active' => true,
+            'pause_when_cpr_loss' => true,
+            'last_checked_at' => $checkedAt,
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+                'error' => ['message' => 'Token tidak memiliki akses campaign', 'code' => 100],
+            ], 400),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertExitCode(0);
+
+        $this->assertTrue($task->fresh()->last_checked_at->equalTo($checkedAt));
+        $this->assertTrue($task->fresh()->is_active);
+    }
+
+    public function test_automation_scales_budget_by_fifteen_percent_after_a_stable_window(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        AutomationTask::query()->where('id', '!=', $task->id)->update(['is_active' => false]);
+        $task->campaign->update(['daily_budget' => 100000]);
+        $task->update([
+            'conversion' => 'purchase',
+            'cpr_cap' => 20000,
+            'maximum_budget' => 150000,
+            'pause_when_cpr_loss' => true,
+            'is_active' => true,
+            'last_checked_at' => now()->subMinutes(11),
+            'last_budget_changed_at' => now()->subHours(73),
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'spend' => '20000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '4']],
+                    'cost_per_action_type' => [['action_type' => 'purchase', 'value' => '5000']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')
+            ->expectsOutput("Profile {$profile->id}: 0 automation campaign dipause.")
+            ->assertExitCode(0);
+
+        $this->assertSame(115000, $task->campaign->fresh()->daily_budget);
+        $this->assertSame(115000, $task->fresh()->current_budget);
+        $this->assertSame('increase', $task->fresh()->last_budget_action);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign->external_id)
+            && $request['daily_budget'] === 115000);
+    }
+
+    public function test_counter_cpr_resumes_only_an_automation_paused_campaign(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        AutomationTask::query()->where('id', '!=', $task->id)->update(['is_active' => false]);
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+        $task->update([
+            'conversion' => 'purchase',
+            'pause_cpr_cap' => 20000,
+            'counter_cpr' => true,
+            'is_active' => false,
+            'last_budget_action' => 'pause',
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'spend' => '10000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'cost_per_action_type' => [['action_type' => 'purchase', 'value' => '10000']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertExitCode(0);
+
+        $this->assertTrue($task->fresh()->is_active);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign->external_id)
+            && $request['status'] === 'ACTIVE');
+    }
+
+    public function test_on_off_window_skips_meta_evaluation_outside_bot_hours(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        AutomationTask::query()->where('id', '!=', $task->id)->update(['is_active' => false]);
+        $outsideStart = now('Asia/Jakarta')->addHour()->format('H:i');
+        $outsideEnd = now('Asia/Jakarta')->addHours(2)->format('H:i');
+        $task->update([
+            'use_on_off' => true,
+            'on_time' => $outsideStart,
+            'off_time' => $outsideEnd,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+
+        Http::fake();
+
+        $this->artisan('t4jam:enforce-automation')->assertExitCode(0);
+
+        Http::assertNothingSent();
+        $this->assertTrue($task->fresh()->is_active);
+    }
+
+    public function test_meta_conversion_metric_is_synced_even_when_pause_action_is_off(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        $task->update([
+            'conversion' => 'add_to_cart',
+            'pause_when_cpr_loss' => false,
+            'is_active' => true,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'spend' => '40000',
+                    'actions' => [
+                        ['action_type' => 'purchase', 'value' => '1'],
+                        ['action_type' => 'add_to_cart', 'value' => '4'],
+                    ],
+                ]],
+            ]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertExitCode(0);
+
+        $freshTask = $task->fresh();
+        $this->assertTrue($freshTask->is_active);
+        $this->assertSame(4, $freshTask->current_result);
+        Http::assertSentCount(1);
+    }
+
+    public function test_unchecked_automation_activation_disables_task_on_update(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => false]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        $task = AutomationTask::firstOrFail();
+        $task->update(['is_active' => true]);
+
+        $this->postJson('/update-automation-tasks/', [
+            'automation_id' => $task->id,
+            'starting_budget' => $task->starting_budget,
+            'cpr_cap' => $task->cpr_cap,
+            'period' => $task->period,
+        ])->assertOk();
+
+        $this->assertFalse($task->fresh()->is_active);
+    }
+
     public function test_meta_ads_sync_job_includes_business_manager_accounts(): void
     {
         $this->seed(TestDataSeeder::class);

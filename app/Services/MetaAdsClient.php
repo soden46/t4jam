@@ -59,9 +59,10 @@ class MetaAdsClient
     public function campaignInsights(string $campaignId, string $datePreset = 'today'): array
     {
         $response = $this->get("/{$campaignId}/insights", [
-            'fields' => 'spend,reach,actions,inline_link_clicks',
+            'fields' => 'spend,reach,actions,cost_per_action_type,inline_link_clicks',
             'date_preset' => $datePreset,
             'level' => 'campaign',
+            'use_unified_attribution_setting' => true,
             'limit' => 1,
         ]);
 
@@ -79,9 +80,10 @@ class MetaAdsClient
     public function adSetInsights(string $adSetId, string $datePreset = 'today'): array
     {
         $response = $this->get("/{$adSetId}/insights", [
-            'fields' => 'spend,reach,actions,inline_link_clicks',
+            'fields' => 'spend,reach,actions,cost_per_action_type,inline_link_clicks',
             'date_preset' => $datePreset,
             'level' => 'adset',
+            'use_unified_attribution_setting' => true,
             'limit' => 1,
         ]);
 
@@ -239,7 +241,13 @@ class MetaAdsClient
             $this->throwMetaException($response);
         }
 
-        return $response->json() ?? [];
+        $data = $response->json() ?? [];
+
+        if (($data['success'] ?? true) === false) {
+            throw new MetaAdsException('Meta Graph API menolak perubahan.', $response->status());
+        }
+
+        return $data;
     }
 
     private function url(string $path): string
