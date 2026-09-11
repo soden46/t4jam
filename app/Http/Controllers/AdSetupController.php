@@ -82,6 +82,9 @@ class AdSetupController extends Controller
     {
         abort_unless($adSetup->user_id === Auth::id(), 403);
 
+        if ($adSetup->status === 'published') {
+            return redirect()->route('ad-setups.index')->with('status', 'Setup iklan sudah dipublish.');
+        }
         $adSetup->update(['status' => 'publishing', 'last_error' => null]);
 
         return $this->publishOrQueue($adSetup, $publisher);

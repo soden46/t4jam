@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Exceptions\MetaAdsException;
+use App\Jobs\Concerns\RetriesMetaRequests;
 use App\Models\AdSetup;
 use App\Models\T4JamProfile;
 use App\Services\MetaAdSetupPublisher;
@@ -15,8 +16,9 @@ use Throwable;
 class PublishMetaAdSetup implements ShouldBeUnique, ShouldQueue
 {
     use Queueable;
+    use RetriesMetaRequests;
 
-    public int $tries = 1;
+    public int $tries = 3;
 
     public int $timeout = 300;
 
@@ -39,7 +41,7 @@ class PublishMetaAdSetup implements ShouldBeUnique, ShouldQueue
         $setup = AdSetup::query()->find($this->adSetupId);
         $profile = T4JamProfile::query()->find($this->profileId);
 
-        if (! $setup || ! $profile) {
+        if (! $setup || ! $profile || $setup->user_id !== $profile->user_id) {
             MetaFlowLog::warning('ad setup publish job skipped because record missing', [
                 'ad_setup_id' => $this->adSetupId,
                 'profile_id' => $this->profileId,
@@ -63,9 +65,12 @@ class PublishMetaAdSetup implements ShouldBeUnique, ShouldQueue
                 'user_id' => $setup->user_id,
             ]);
         } catch (MetaAdsException $exception) {
-            $message = $this->metaErrorMessage($exception);
+            $message = $setup->fresh()->pending_meta_step
+                ? 'Hasil create Meta belum dapat dipastikan. Rekonsiliasi ID Meta sebelum publish ulang.'
+                : $this->metaErrorMessage($exception);
             $setup->update(['status' => 'failed', 'last_error' => $message]);
             $this->reportFailure($exception, $setup);
+            $this->retryOrFail($exception);
         } catch (Throwable $exception) {
             $setup->update([
                 'status' => 'failed',
@@ -77,7 +82,6 @@ class PublishMetaAdSetup implements ShouldBeUnique, ShouldQueue
                 'user_id' => $setup->user_id,
                 'profile_id' => $profile->id,
                 'exception' => $exception::class,
-                'message' => $exception->getMessage(),
             ]);
 
             throw $exception;

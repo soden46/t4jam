@@ -7,7 +7,7 @@
     <div class="panel-head">
         <div>
             <h2>Interest Explore Tools</h2>
-            <p>Masukan list keyword disini</p>
+            <p>Cari interest yang tersimpan di database lokal. Data belum diambil langsung dari Meta.</p>
         </div>
         <button id="cari_interest" type="button" class="btn primary">Cari Interest</button>
     </div>

@@ -7,7 +7,7 @@
     <div class="panel-head">
         <div>
             <h2>Riset Produk Toped</h2>
-            <p>Cari produk berdasarkan keyword atau category.</p>
+            <p>Cari produk di database lokal berdasarkan keyword atau category. Data belum diambil langsung dari Tokopedia.</p>
         </div>
         <button type="button" class="btn primary" id="btn_cari_backlink">Cari Produk</button>
     </div>

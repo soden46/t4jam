@@ -1,6 +1,7 @@
 <?php
 
 use App\Exceptions\MetaAdsException;
+use App\Models\AutomationTask;
 use App\Models\T4JamProfile;
 use App\Services\AutomationBudgetService;
 use App\Services\MetaAdsSyncService;
@@ -77,7 +78,6 @@ Artisan::command('t4jam:sync-meta-ads {--profile_id=}', function (MetaAdsSyncSer
             MetaFlowLog::warning('sync command profile failed', [
                 'profile_id' => $profile->id,
                 'exception' => $exception::class,
-                'message' => $exception->getMessage(),
             ]);
 
             $this->warn("Profile {$profile->id} sync failed: {$message}");
@@ -93,6 +93,10 @@ Artisan::command('t4jam:enforce-automation', function (AutomationBudgetService $
         ->where('access_token', '<>', '')
         ->get();
 
+    $unowned = AutomationTask::whereNull('user_id')->count();
+    if ($unowned > 0) {
+        $this->warn("{$unowned} task tanpa owner dilewati; tetapkan user_id setelah verifikasi kepemilikan.");
+    }
     foreach ($profiles as $profile) {
         try {
             $paused = $automation->pauseTasksOverCprCap($profile, $metaSync->client($profile), true);
@@ -112,7 +116,6 @@ Artisan::command('t4jam:enforce-automation', function (AutomationBudgetService $
             MetaFlowLog::warning('automation enforcement failed', [
                 'profile_id' => $profile->id,
                 'exception' => $exception::class,
-                'message' => $exception->getMessage(),
             ]);
 
             continue;

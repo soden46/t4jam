@@ -9,6 +9,7 @@ use App\Models\Campaign;
 use App\Models\Interest;
 use App\Models\Product;
 use App\Models\ProductCategory;
+use App\Models\User;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Str;
 
@@ -16,6 +17,12 @@ class TestDataSeeder extends Seeder
 {
     public function run(): void
     {
+        if (! app()->environment(['local', 'testing'])) {
+            return;
+        }
+
+        $this->call(DatabaseSeeder::class);
+        $user = User::where('email', 'admin@t4jam.local')->firstOrFail();
         $accountModels = collect([
             ['account_id' => '331752019953768', 'external_id' => 'act_331752019953768', 'name' => 'BA MKI 9', 'currency' => 'IDR'],
             ['account_id' => '417825920588492', 'external_id' => 'act_417825920588492', 'name' => 'MJO - Ardita HKM - 14', 'currency' => 'IDR'],
@@ -63,6 +70,7 @@ class TestDataSeeder extends Seeder
                 ['campaign_external_id' => $campaign->external_id],
                 [
                     'id' => (string) Str::uuid(),
+                    'user_id' => $user->id,
                     'ad_account_id' => $campaign->ad_account_id,
                     'campaign_id' => $campaign->id,
                     'campaign_name' => $campaign->name,

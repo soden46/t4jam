@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Exceptions\MetaAdsException;
 use App\Support\MetaFlowLog;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 
@@ -38,6 +39,9 @@ class MetaAdsClient
                 );
             }
         } catch (MetaAdsException $exception) {
+            if ($exception->retryable() || $exception->metaCode === 190 || $exception->httpStatus === 401) {
+                throw $exception;
+            }
             MetaFlowLog::warning('business account lookup skipped', [
                 'http_status' => $exception->httpStatus,
                 'meta_code' => $exception->metaCode,
@@ -132,25 +136,17 @@ class MetaAdsClient
 
     public static function exchangeLongLivedToken(string $appId, string $appSecret, string $shortLivedToken): string
     {
-        $response = Http::acceptJson()
-            ->timeout(config('services.meta.timeout'))
-            ->retry(config('services.meta.retry_times'), config('services.meta.retry_sleep_ms'), throw: false)
-            ->get(rtrim(config('services.meta.base_url'), '/').'/'.trim(config('services.meta.graph_version'), '/').'/oauth/access_token', [
-                'grant_type' => 'fb_exchange_token',
-                'client_id' => $appId,
-                'client_secret' => $appSecret,
-                'fb_exchange_token' => $shortLivedToken,
-            ]);
-
+        try {
+            $response = Http::acceptJson()->timeout(config('services.meta.timeout'))
+                ->get(rtrim(config('services.meta.base_url'), '/').'/'.trim(config('services.meta.graph_version'), '/').'/oauth/access_token', [
+                    'grant_type' => 'fb_exchange_token', 'client_id' => $appId,
+                    'client_secret' => $appSecret, 'fb_exchange_token' => $shortLivedToken,
+                ]);
+        } catch (ConnectionException) {
+            throw new MetaAdsException('Koneksi Meta gagal. Coba lagi beberapa saat.', transient: true);
+        }
         if ($response->failed()) {
-            $error = $response->json('error') ?? [];
-
-            throw new MetaAdsException(
-                $error['message'] ?? 'Gagal menukar access token Meta.',
-                $response->status(),
-                $error['code'] ?? null,
-                $error['type'] ?? null,
-            );
+            (new self($shortLivedToken))->throwMetaException($response);
         }
 
         return $response->json('access_token') ?? $shortLivedToken;
@@ -172,6 +168,9 @@ class MetaAdsClient
                 'limit' => 100,
             ]);
         } catch (MetaAdsException $exception) {
+            if ($exception->retryable() || $exception->metaCode === 190 || $exception->httpStatus === 401) {
+                throw $exception;
+            }
             MetaFlowLog::warning('business ad account edge skipped', [
                 'business_id' => $businessId,
                 'edge' => $edge,
@@ -230,12 +229,15 @@ class MetaAdsClient
     {
         $payload = $data + ['access_token' => $this->accessToken];
         $request = Http::acceptJson()
-            ->timeout(config('services.meta.timeout'))
-            ->retry(config('services.meta.retry_times'), config('services.meta.retry_sleep_ms'), throw: false);
+            ->timeout(config('services.meta.timeout'));
 
-        $response = $method === 'POST'
-            ? $request->asForm()->post($url, $payload)
-            : $request->get($url, $payload);
+        try {
+            $response = $method === 'POST'
+                ? $request->asForm()->post($url, $payload)
+                : $request->get($url, $payload);
+        } catch (ConnectionException) {
+            throw new MetaAdsException('Koneksi Meta gagal. Coba lagi beberapa saat.', transient: true, outcomeUnknown: $method === 'POST');
+        }
 
         if ($response->failed()) {
             $this->throwMetaException($response);
@@ -275,10 +277,19 @@ class MetaAdsClient
         }
 
         throw new MetaAdsException(
-            $error['message'] ?? 'Meta Graph API request failed.',
+            match (true) {
+                $metaCode === 190 => 'Access token Meta tidak valid atau sudah expired.',
+                $this->isRateLimitError($metaCode), $response->status() === 429 => 'Meta rate limit tercapai. Coba lagi setelah jeda.',
+                $response->status() >= 500 => 'Layanan Meta sementara bermasalah.',
+                in_array($metaCode, [10, 200], true), $response->status() === 403 => 'Permission Meta tidak mencukupi.',
+                default => 'Meta menolak request. Periksa data akun.',
+            },
             $response->status(),
             $metaCode,
             $metaType,
+            $this->parseRetryAfter($response),
+            (bool) ($error['is_transient'] ?? false),
+            $response->status() >= 500,
         );
     }
 
@@ -294,8 +305,8 @@ class MetaAdsClient
     private function parseRetryAfter(Response $response): ?int
     {
         $retryAfter = $response->header('Retry-After');
-        if ($retryAfter !== null) {
-            return (int) $retryAfter;
+        if (filled($retryAfter)) {
+            return min(3600, max(0, is_numeric($retryAfter) ? (int) $retryAfter : (int) strtotime($retryAfter) - time()));
         }
 
         $businessUsage = $response->header('X-Business-Use-Case-Usage');
@@ -304,7 +315,7 @@ class MetaAdsClient
             if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
                 foreach ($decoded as $usages) {
                     if (isset($usages[0]['estimated_time_to_regain_access'])) {
-                        return (int) $usages[0]['estimated_time_to_regain_access'];
+                        return min(3600, max(0, (int) $usages[0]['estimated_time_to_regain_access'] * 60));
                     }
                 }
             }

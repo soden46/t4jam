@@ -51,10 +51,10 @@
                 <input type="text" id="id_aplikasi" name="id_aplikasi" placeholder="ID Aplikasi" value="{{ old('id_aplikasi', $profile->app_id) }}">
             </label>
             <label>Kunci Rahasia Aplikasi
-                <input type="text" id="kunci_rahasia" name="kunci_rahasia" placeholder="Kunci Rahasia Aplikasi" value="{{ old('kunci_rahasia', $profile->app_secret) }}">
+                <input type="password" autocomplete="new-password" id="kunci_rahasia" name="kunci_rahasia" placeholder="Kunci Rahasia Aplikasi" value=""><small>{{ filled($profile->app_secret) ? "App secret sudah tersimpan. Kosongkan untuk mempertahankan." : "App secret belum diisi." }}</small>
             </label>
             <label>Akses Token
-                <textarea id="access_token_app" name="access_token_app" placeholder="Akses Token">{{ old('access_token_app', $profile->access_token) }}</textarea>
+                <textarea id="access_token_app" name="access_token_app" placeholder="Akses Token"></textarea><small>{{ $profile->hasAccessToken() ? "Access token sudah tersimpan. Kosongkan untuk mempertahankan." : "Access token belum diisi." }}</small>
             </label>
             <button class="btn light-primary" type="submit">Save Token</button>
         </form>

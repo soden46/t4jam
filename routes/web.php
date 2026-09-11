@@ -14,7 +14,9 @@ Route::get('/social-auth/complete/google-oauth2/', [AuthController::class, 'call
 Route::get('/register/', [AuthController::class, 'showRegister'])->name('register');
 Route::post('/register/', [AuthController::class, 'register'])->name('register.store');
 Route::get('/account/riset-password/', [AuthController::class, 'showReset'])->name('password.request');
-Route::post('/account/riset-password/', [AuthController::class, 'reset'])->name('password.email');
+Route::post('/account/riset-password/', [AuthController::class, 'reset'])->middleware('throttle:5,1')->name('password.email');
+Route::get('/account/reset-password/{token}', [AuthController::class, 'showNewPassword'])->name('password.reset');
+Route::post('/account/reset-password/', [AuthController::class, 'updateResetPassword'])->middleware('throttle:5,1')->name('password.update');
 
 Route::middleware('t4jam.auth')->group(function () {
     Route::get('/dashboard/', [T4JamController::class, 'dashboard'])->name('dashboard');

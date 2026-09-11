@@ -14,6 +14,10 @@ class DatabaseSeeder extends Seeder
 
     public function run(): void
     {
+        if (! app()->environment(['local', 'testing'])) {
+            return;
+        }
+
         $user = User::firstOrCreate(
             ['email' => 'admin@t4jam.local'],
             [

@@ -13,7 +13,14 @@ const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => 
     '"': '&quot;',
     "'": '&#039;',
 }[char]));
+const safeUrl = (value) => {
+    try {
+        const url = new URL(value, location.origin);
+        return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+    } catch { return ''; }
+};
 let automationAccounts = [];
+let automationRequest = null;
 
 async function request(url, options = {}) {
     const response = await fetch(url, {
@@ -139,14 +146,14 @@ async function initDashboard() {
     const renderCampaignPicker = (selectedCampaigns = []) => {
         const selected = new Set(selectedCampaigns);
         qs('#kt_tagify_users').innerHTML = campaignsForSelectedAccount().map((campaign) => (
-            `<option value="${campaign.id}" ${selected.has(campaign.id) ? 'selected' : ''}>${campaign.name}</option>`
+            `<option value="${escapeHtml(campaign.id)}" ${selected.has(campaign.id) ? 'selected' : ''}>${escapeHtml(campaign.name)}</option>`
         )).join('');
     };
 
     const selectedCampaigns = () => qsa('#kt_tagify_users option:checked').map((option) => option.value);
 
     const loadInsights = async () => {
-        const insights = await request(`/api/get-ad-insight/?ad_account=${encodeURIComponent(accountSelect.value)}&level=${encodeURIComponent(levelMode())}`);
+        const insights = await request(`/api/get-ad-insight/?ad_account=${encodeURIComponent(accountSelect.value)}&level=${encodeURIComponent(levelMode())}&conversion=${encodeURIComponent(qs('#conversion')?.value || 'purchase')}`);
         renderMetrics(insights.highlight || []);
         renderCampaignTable(insights.summery || []);
         setStat('#campaign_count', (insights.summery || []).length);
@@ -259,8 +266,8 @@ async function initDashboard() {
         toast('Filter campaign direset');
     });
 
-    qsa('#funnel_lp, #conversion').forEach((el) => el.addEventListener('change', () => {
-        request('/api/changed-settings/', {
+    qsa('#funnel_lp, #conversion').forEach((el) => el.addEventListener('change', async () => {
+        await request('/api/changed-settings/', {
             method: 'POST',
             body: formBody({
                 funnel_lp: qs('#funnel_lp').value,
@@ -268,6 +275,7 @@ async function initDashboard() {
                 level_mode: qs('#level_mode').value,
             }),
         });
+        await loadInsights();
     }));
     qs('#level_mode')?.addEventListener('change', async () => {
         await request('/api/changed-settings/', {
@@ -309,15 +317,15 @@ async function initDashboard() {
 function renderMetrics(metrics) {
     qs('#metric').innerHTML = metrics.map((metric) => {
         const cls = metric.min_value && Number(metric.value) < Number(metric.min_value) ? 'warn' : 'good';
-        return `<div class="metric-card ${cls}"><span>${metric.name}</span><strong>${metric.value_text}</strong></div>`;
+        return `<div class="metric-card ${cls}"><span>${escapeHtml(metric.name)}</span><strong>${escapeHtml(metric.value_text)}</strong></div>`;
     }).join('');
 }
 
 function renderCampaignTable(rows) {
     qs('#campaign_table tbody').innerHTML = rows.map((row) => `
         <tr>
-            <td><input type="checkbox" value="${row.campaign_id}" data-level="${row.level || 'campaign'}" data-ad-account="${row.ad_id || ''}"></td>
-            <td><span class="campaign-name">${row.campaign_name}</span></td>
+            <td><input type="checkbox" value="${escapeHtml(row.campaign_id)}" data-level="${escapeHtml(row.level || 'campaign')}" data-ad-account="${escapeHtml(row.ad_id || '')}"></td>
+            <td><span class="campaign-name">${escapeHtml(row.campaign_name)}</span></td>
             <td class="num">${rupiah(row.budget)}</td>
             <td class="num">${rupiah(row.spend)}</td>
             <td class="num">${number(row.reach)}</td>
@@ -325,10 +333,10 @@ function renderCampaignTable(rows) {
             <td class="num">${rupiah(row.cpr)}</td>
             <td class="num">${number(row.link_click)}</td>
             <td class="num">${number(row.landing_page_view)}</td>
-            <td class="num">${row.klik_landas}%</td>
-            <td class="num">${row.uang_jangkauan}</td>
-            <td class="num">${row.uang_klik}</td>
-            <td class="num">${row.landas_hasil}</td>
+            <td class="num">${escapeHtml(row.klik_landas)}%</td>
+            <td class="num">${escapeHtml(row.uang_jangkauan)}</td>
+            <td class="num">${escapeHtml(row.uang_klik)}</td>
+            <td class="num">${escapeHtml(row.landas_hasil)}</td>
             <td class="num">${rupiah(row.cpr_10)}</td>
         </tr>
     `).join('');
@@ -347,14 +355,39 @@ async function initAutomation() {
     });
     await loadAutomationTargetAccounts();
     await loadAutomationTasks();
+    startAutomationPolling();
 }
 
-async function loadAutomationTasks() {
-    const acc = qs('#add_account_filter')?.value || 'all';
-    const level = qs('#level_filter')?.value || 'all';
-    const funnel = qs('#event_tracking_filter')?.value || 'all';
-    const response = await request(`/get-automation-task/?acc=${encodeURIComponent(acc)}&level=${encodeURIComponent(level)}&funnel=${encodeURIComponent(funnel)}`);
-    renderAutomationTable(response.data || []);
+function startAutomationPolling() {
+    const poll = async () => {
+        try {
+            if (!document.hidden && !qs('.modal:not([hidden])') && !qs('#automation_table button:disabled')) {
+                await loadAutomationTasks(true);
+            }
+        } catch { /* A later poll retries without repeated toasts. */ }
+        finally { setTimeout(poll, 45000); }
+    };
+    setTimeout(poll, 45000);
+}
+
+async function loadAutomationTasks(background = false) {
+    if (automationRequest) {
+        if (background === true) return automationRequest;
+        await automationRequest.catch(() => {});
+        return loadAutomationTasks(background);
+    }
+    automationRequest = (async () => {
+        const acc = qs('#add_account_filter')?.value || 'all';
+        const level = qs('#level_filter')?.value || 'all';
+        const funnel = qs('#event_tracking_filter')?.value || 'all';
+        const response = await request(`/get-automation-task/?acc=${encodeURIComponent(acc)}&level=${encodeURIComponent(level)}&funnel=${encodeURIComponent(funnel)}`);
+        if (background === true && (document.hidden || qs('.modal:not([hidden])'))) return;
+        renderAutomationTable(response.data || []);
+        qs('#search_domain')?.dispatchEvent(new Event('input'));
+    })();
+    try { await automationRequest; }
+    finally { automationRequest = null; }
+
 }
 
 function renderAutomationTable(rows) {
@@ -366,18 +399,18 @@ function renderAutomationTable(rows) {
 
     qs('#automation_table tbody').innerHTML = rows.map((row) => `
         <tr>
-            <td><span class="campaign-name">${row.campaign_name}</span><br><small>${row.event_flow} / ${row.conversion}</small></td>
-            <td>${row.ad_account}</td>
-            <td><button class="badge ${row.status === 'true' ? 'active' : 'pause'}" data-toggle-task="${row.id}" data-status="${row.status === 'true' ? 'false' : 'true'}">${row.status === 'true' ? 'active' : 'pause'}</button></td>
+            <td><span class="campaign-name">${escapeHtml(row.campaign_name)}</span><br><small>${escapeHtml(row.event_flow)} / ${escapeHtml(row.conversion)}</small></td>
+            <td>${escapeHtml(row.ad_account)}</td>
+            <td><button class="badge ${row.status === 'true' ? 'active' : 'pause'}" data-toggle-task="${escapeHtml(row.id)}" data-status="${row.status === 'true' ? 'false' : 'true'}">${row.status === 'true' ? 'active' : 'pause'}</button></td>
             <td class="num">${rupiah(row.current_budget)}</td>
             <td class="num">${rupiah(row.current_spend)}</td>
             <td class="num">${number(row.current_hasil)}</td>
             <td class="num">${rupiah(row.current_cpr)}</td>
-            <td>${row.log || '-'}</td>
+            <td>${escapeHtml(row.log || '-')}</td>
             <td class="action-row">
-                <button class="btn light" data-history="${row.id}" type="button">Log</button>
-                <button class="btn light-primary" data-edit="${row.id}" type="button">Update</button>
-                <button class="btn danger" data-budget-down="${row.id}" type="button">Turun</button>
+                <button class="btn light" data-history="${escapeHtml(row.id)}" type="button">Log</button>
+                <button class="btn light-primary" data-edit="${escapeHtml(row.id)}" type="button">Update</button>
+                <button class="btn danger" data-budget-down="${escapeHtml(row.id)}" type="button">Turun</button>
             </td>
         </tr>
     `).join('');
@@ -449,7 +482,7 @@ async function editTask(id) {
 async function historyTask(id) {
     const response = await request(`/get-history-log/?task_id=${encodeURIComponent(id)}`);
     qs('#item-timeline').innerHTML = (response.data || []).map((item) => `
-        <div class="timeline-item"><strong>${item.time}</strong><ul>${item.text.map((text) => `<li>${text}</li>`).join('')}</ul></div>
+        <div class="timeline-item"><strong>${escapeHtml(item.time)}</strong><ul>${item.text.map((text) => `<li>${escapeHtml(text)}</li>`).join('')}</ul></div>
     `).join('') || '<p class="muted">Belum ada history.</p>';
     openModal('#history-modal');
 }
@@ -555,7 +588,6 @@ function bindAutomationForm(defaultMode, refreshAfterSuccess = null) {
             toast(response.text || (isUpdate ? 'Automation strategy berhasil diupdate' : 'Automation budget berhasil dibuat'));
             if (refreshAfterSuccess) await refreshAfterSuccess();
         } catch (error) {
-            closeModals();
             toast(error.message, 'danger');
             if (page() === 'automation') await loadAutomationTasks();
         } finally {
@@ -592,12 +624,12 @@ async function initInterest() {
 
 function renderInterest(rows) {
     qs('#interest_table tbody').innerHTML = rows.map((row) => `
-        <tr data-topic="${row.topic || ''}">
+        <tr data-topic="${escapeHtml(row.topic || '')}">
             <td><input type="checkbox"></td>
-            <td>${row.name}</td>
+            <td>${escapeHtml(row.name)}</td>
             <td>${number(row.audience_size_lower_bound)} - ${number(row.audience_size_upper_bound)}</td>
-            <td>${row.topic || '-'}</td>
-            <td><button class="btn light" data-copy="${row.name}" type="button">Copy</button></td>
+            <td>${escapeHtml(row.topic || '-')}</td>
+            <td><button class="btn light" data-copy="${escapeHtml(row.name)}" type="button">Copy</button></td>
         </tr>
     `).join('');
     qsa('[data-copy]').forEach((button) => button.addEventListener('click', async () => {
@@ -630,23 +662,23 @@ async function initProducts() {
 
 function renderProducts(rows) {
     qs('#product_table tbody').innerHTML = rows.map((row) => `
-        <tr data-product='${JSON.stringify(row).replaceAll("'", '&#39;')}'>
-            <td><button class="link-button" data-product-detail type="button">${row.name}</button><br><small>${row.category || '-'}</small></td>
+        <tr data-product='${escapeHtml(JSON.stringify(row))}'>
+            <td><button class="link-button" data-product-detail type="button">${escapeHtml(row.name)}</button><br><small>${escapeHtml(row.category || '-')}</small></td>
             <td class="num">${rupiah(row.price)}</td>
             <td class="num">${number(row.sold)}</td>
             <td class="num">${number(row.total_review)}</td>
-            <td class="num">${row.rating}</td>
+            <td class="num">${escapeHtml(row.rating)}</td>
         </tr>
     `).join('');
     qsa('[data-product-detail]').forEach((button) => button.addEventListener('click', () => {
         const product = JSON.parse(button.closest('tr').dataset.product);
         qs('#product-detail').innerHTML = `
             <div class="product-detail">
-                <img src="${product.image || ''}" alt="${product.name}">
-                <h3>${product.name}</h3>
-                <p>${product.category || '-'}</p>
-                <div class="stat-row"><div><span>${rupiah(product.price)}</span><small>Harga</small></div><div><span>${number(product.sold)}</span><small>Terjual</small></div><div><span>${product.rating}</span><small>Rating</small></div></div>
-                <a class="btn primary" href="${product.detail_url}" target="_blank" rel="noreferrer">Buka Detail</a>
+                <img src="${escapeHtml(safeUrl(product.image))}" alt="${escapeHtml(product.name)}">
+                <h3>${escapeHtml(product.name)}</h3>
+                <p>${escapeHtml(product.category || '-')}</p>
+                <div class="stat-row"><div><span>${rupiah(product.price)}</span><small>Harga</small></div><div><span>${number(product.sold)}</span><small>Terjual</small></div><div><span>${escapeHtml(product.rating)}</span><small>Rating</small></div></div>
+                <a class="btn primary" href="${escapeHtml(safeUrl(product.detail_url))}" target="_blank" rel="noreferrer">Buka Detail</a>
             </div>
         `;
         openModal('#product-modal');

@@ -202,43 +202,15 @@ class ExampleTest extends TestCase
         Http::assertSentCount(2);
     }
 
-    public function test_dashboard_reload_uses_existing_meta_token_when_current_user_has_none(): void
+    public function test_dashboard_reload_rejects_another_users_token(): void
     {
         $this->seed(TestDataSeeder::class);
-        $tokenOwner = User::firstOrFail();
-        $operator = User::factory()->create();
-        $this->actingAs($operator);
-        T4JamProfile::updateOrCreate(['user_id' => $tokenOwner->id], ['access_token' => 'shared-token']);
-
-        Http::fake([
-            'graph.facebook.com/*/act_902?*' => Http::response([
-                'account_id' => '902',
-                'id' => 'act_902',
-                'name' => 'Shared Token Account',
-                'currency' => 'IDR',
-                'account_status' => 1,
-            ]),
-            'graph.facebook.com/*/act_902/campaigns?*' => Http::response([
-                'data' => [
-                    [
-                        'id' => 'cmp_902',
-                        'name' => 'Shared Token Campaign',
-                        'status' => 'ACTIVE',
-                        'effective_status' => 'ACTIVE',
-                        'daily_budget' => '250000',
-                    ],
-                ],
-            ]),
-        ]);
-
-        $this->postJson('/api/reload-ad-account/', [
-            'ad_account' => 'act_902',
-        ])->assertOk()
-            ->assertJsonPath('text', 'Reload selesai. 1 campaign diperbarui.');
-
-        $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_902']);
-        Http::assertSent(fn ($request) => $request['access_token'] === 'shared-token');
-        Http::assertSentCount(2);
+        T4JamProfile::where('user_id', User::firstOrFail()->id)->firstOrFail()->update(['access_token' => 'shared-token']);
+        $this->actingAs(User::factory()->create());
+        Http::fake();
+        $this->postJson('/api/reload-ad-account/', ['ad_account' => 'act_902'])
+            ->assertUnprocessable()->assertJsonPath('text', 'Access token Meta belum diisi.');
+        Http::assertNothingSent();
     }
 
     public function test_create_automation_requires_campaign_from_selected_ad_account(): void
@@ -290,36 +262,15 @@ class ExampleTest extends TestCase
             && $request['daily_budget'] === 1500000);
     }
 
-    public function test_update_automation_uses_existing_meta_token_when_current_user_has_none(): void
+    public function test_update_automation_rejects_another_users_task(): void
     {
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
-        $tokenOwner = User::firstOrFail();
-        $operator = User::factory()->create();
-        $this->actingAs($operator);
-        T4JamProfile::updateOrCreate(['user_id' => $tokenOwner->id], ['access_token' => 'shared-token']);
-
-        $task = AutomationTask::with('campaign')->firstOrFail();
-        Http::fake(['graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true])]);
-
-        $this->postJson('/update-automation-tasks/', [
-            'automation_id' => $task->id,
-            'budget_funnel_lp' => 'lp_to_wa',
-            'mode_automation' => 'default',
-            'hold_spend' => 'onhold',
-            'budget_conversion' => 'purchase',
-            'starting_budget' => 1500000,
-            'maximum_budget' => 0,
-            'cpr_cap' => 7000,
-            'period' => 10,
-        ])->assertOk()
-            ->assertJsonPath('text', 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.');
-
-        $this->assertDatabaseHas('campaigns', ['id' => $task->campaign_id, 'daily_budget' => 1500000]);
-        Http::assertSent(fn ($request) => $request->method() === 'POST'
-            && str_contains($request->url(), $task->campaign->external_id)
-            && $request['access_token'] === 'shared-token'
-            && $request['daily_budget'] === 1500000);
+        T4JamProfile::where('user_id', User::firstOrFail()->id)->firstOrFail()->update(['access_token' => 'shared-token']);
+        $this->actingAs(User::factory()->create());
+        Http::fake();
+        $this->postJson('/update-automation-tasks/', ['automation_id' => AutomationTask::firstOrFail()->id, 'starting_budget' => 1500000])->assertNotFound();
+        Http::assertNothingSent();
     }
 
     public function test_dashboard_insights_reflect_budget_after_automation_update(): void
@@ -350,7 +301,7 @@ class ExampleTest extends TestCase
         $this->assertSame(250000, collect($rows)->firstWhere('campaign_id', $task->campaign->external_id)['budget']);
     }
 
-    public function test_automation_budget_metrics_follow_synced_campaign_data(): void
+    public function test_automation_budget_metrics_preserve_task_snapshot(): void
     {
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
@@ -375,9 +326,9 @@ class ExampleTest extends TestCase
             ->firstWhere('id', $task->id);
 
         $this->assertSame(55000, $row['current_budget']);
-        $this->assertSame(35372, $row['current_spend']);
-        $this->assertSame(1, $row['current_hasil']);
-        $this->assertSame(35372, $row['current_cpr']);
+        $this->assertSame(0, $row['current_spend']);
+        $this->assertSame(0, $row['current_hasil']);
+        $this->assertSame(0, $row['current_cpr']);
     }
 
     public function test_automation_budget_metrics_resolve_legacy_task_by_external_campaign_id(): void
@@ -406,9 +357,9 @@ class ExampleTest extends TestCase
             ->firstWhere('id', $task->id);
 
         $this->assertSame(55000, $row['current_budget']);
-        $this->assertSame(35372, $row['current_spend']);
-        $this->assertSame(1, $row['current_hasil']);
-        $this->assertSame(35372, $row['current_cpr']);
+        $this->assertSame(0, $row['current_spend']);
+        $this->assertSame(0, $row['current_hasil']);
+        $this->assertSame(0, $row['current_cpr']);
     }
 
     public function test_update_automation_task_pushes_budget_to_meta_adset(): void
@@ -421,6 +372,7 @@ class ExampleTest extends TestCase
 
         $adSet = AdSet::with(['adAccount', 'campaign'])->firstOrFail();
         $task = AutomationTask::create([
+            'user_id' => $user->id,
             'id' => (string) str()->uuid(),
             'ad_account_id' => $adSet->ad_account_id,
             'campaign_id' => $adSet->campaign_id,
@@ -613,7 +565,7 @@ class ExampleTest extends TestCase
             'kunci_rahasia' => 'secret',
             'access_token_app' => 'token',
         ])->assertRedirect('/profile/')
-            ->assertSessionHas('status', 'Access token valid. Sync Meta Ads masuk antrean queue.');
+            ->assertSessionHas('status', 'Access token tersimpan. Sync Meta Ads masuk antrean queue.');
 
         $profile = T4JamProfile::where('user_id', $user->id)->firstOrFail();
         Queue::assertPushed(SyncMetaAdsProfile::class, fn (SyncMetaAdsProfile $job) => $job->queue === 'meta');
@@ -674,26 +626,12 @@ class ExampleTest extends TestCase
         Log::spy();
         Queue::fake();
         $this->seed(TestDataSeeder::class);
-        $tokenOwner = User::firstOrFail();
-        $operator = User::factory()->create();
-        $this->actingAs($operator);
-        T4JamProfile::updateOrCreate(['user_id' => $tokenOwner->id], ['access_token' => 'shared-token']);
-
-        $this->postJson('/profile/sync-meta-ads/')
-            ->assertOk()
-            ->assertJsonPath('text', 'Sync Meta Ads masuk antrean queue.');
-
-        Log::shouldHaveReceived('info')
-            ->withArgs(fn (string $message, array $context = []) => str_starts_with($message, MetaFlowLog::TAG)
-                && str_contains($message, 'meta credential fallback selected')
-                && ($context['user_id'] ?? null) === $operator->id)
-            ->once();
-        Log::shouldHaveReceived('info')
-            ->withArgs(fn (string $message, array $context = []) => str_starts_with($message, MetaFlowLog::TAG)
-                && str_contains($message, 'manual full sync queued')
-                && ($context['user_id'] ?? null) === $operator->id
-                && ($context['queue'] ?? null) === 'meta')
-            ->once();
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'own-token']);
+        $this->postJson('/profile/sync-meta-ads/')->assertOk();
+        Log::shouldHaveReceived('info')->withArgs(fn (string $message, array $context = []) => str_starts_with($message, MetaFlowLog::TAG) && str_contains($message, 'manual full sync queued')
+            && ($context['user_id'] ?? null) === $user->id && ($context['queue'] ?? null) === 'meta')->once();
     }
 
     public function test_base_url_does_not_trigger_meta_sync(): void
@@ -866,11 +804,9 @@ class ExampleTest extends TestCase
 
         $this->artisan('t4jam:enforce-automation')->assertExitCode(0);
 
-        $this->assertFalse($task->fresh()->is_active);
+        $this->assertTrue($task->fresh()->is_active);
         $this->assertSame(2, $task->fresh()->current_result);
-        Http::assertSent(fn ($request) => $request->method() === 'POST'
-            && str_contains($request->url(), $task->campaign->external_id)
-            && $request['status'] === 'PAUSED');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
     public function test_failed_meta_insight_does_not_advance_automation_check_time(): void
@@ -1122,6 +1058,7 @@ class ExampleTest extends TestCase
                     ['id' => 'cmp_789', 'name' => 'Rate Limited Campaign', 'status' => 'ACTIVE', 'daily_budget' => '300000'],
                 ],
             ]),
+            'graph.facebook.com/*/cmp_789/adsets?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/cmp_789/insights?*' => Http::response([
                 'error' => [
                     'message' => 'User request limit reached',
@@ -1143,7 +1080,7 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_789', 'name' => 'Rate Limited Campaign']);
         $this->assertDatabaseHas('t4jam_profiles', [
             'user_id' => $user->id,
-            'last_meta_error' => 'User request limit reached',
+            'last_meta_error' => 'Meta rate limit tercapai. Coba lagi setelah jeda.',
         ]);
     }
 
@@ -1298,28 +1235,16 @@ class ExampleTest extends TestCase
         $this->assertSame('publishing', AdSetup::where('name', 'Setup Test')->firstOrFail()->status);
     }
 
-    public function test_ad_setup_publish_uses_existing_meta_token_when_current_user_has_none(): void
+    public function test_ad_setup_publish_rejects_another_users_token(): void
     {
         Queue::fake();
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
-        $tokenOwner = User::firstOrFail();
-        $operator = User::factory()->create();
-        $this->actingAs($operator);
-        T4JamProfile::updateOrCreate(['user_id' => $tokenOwner->id], ['access_token' => 'shared-token']);
-
-        $account = AdAccount::firstOrFail();
-
-        $this->post('/setup-iklan/', $this->adSetupPayload($account->id, ['publish' => 1]))
-            ->assertRedirect('/setup-iklan/')
-            ->assertSessionHas('status', 'Setup iklan masuk antrean queue. Worker akan publish ke Meta di background.');
-
-        $this->assertDatabaseHas('ad_setups', [
-            'user_id' => $operator->id,
-            'name' => 'Setup Test',
-            'status' => 'publishing',
-        ]);
-        Queue::assertPushed(PublishMetaAdSetup::class, fn (PublishMetaAdSetup $job) => $job->queue === 'meta');
+        T4JamProfile::where('user_id', User::firstOrFail()->id)->firstOrFail()->update(['access_token' => 'shared-token']);
+        $this->actingAs(User::factory()->create());
+        $this->post('/setup-iklan/', $this->adSetupPayload(AdAccount::firstOrFail()->id, ['publish' => 1]))
+            ->assertRedirect('/setup-iklan/')->assertSessionHasErrors('meta');
+        Queue::assertNothingPushed();
     }
 
     private function runMetaSyncJob(T4JamProfile $profile): void

@@ -37,6 +37,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
     'meta_adset_id',
     'meta_creative_id',
     'meta_ad_id',
+    'pending_meta_step',
     'last_error',
     'published_at',
 ])]

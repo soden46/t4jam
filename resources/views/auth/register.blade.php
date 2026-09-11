@@ -8,7 +8,6 @@
         <input name="first_name" placeholder="First Name" value="{{ old('first_name') }}" required>
         <input name="last_name" placeholder="Last Name" value="{{ old('last_name') }}" required>
     </div>
-    <input name="username" placeholder="Username" value="{{ old('username') }}" required>
     <input type="email" name="email" placeholder="Email" value="{{ old('email') }}" required>
     <input type="password" name="password" placeholder="Password" required>
     <input type="password" name="password_confirmation" placeholder="Confirm Password" required>

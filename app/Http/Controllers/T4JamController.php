@@ -13,6 +13,7 @@ use App\Models\Interest;
 use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\T4JamProfile;
+use App\Services\AutomationBudgetService;
 use App\Services\MetaAdsClient;
 use App\Services\MetaAdsSyncService;
 use App\Support\MetaFlowLog;
@@ -22,6 +23,8 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 use Throwable;
 
@@ -43,7 +46,7 @@ class T4JamController extends Controller
             'title' => 'Report Dashboard',
             'accounts' => $accounts,
             'selectedAccount' => $selectedAccount,
-            'insights' => $this->insightsPayload($selectedAccount, [], $level),
+            'insights' => $this->insightsPayload($selectedAccount, [], $level, $settings['conversion'] ?? 'purchase'),
         ]);
     }
 
@@ -52,7 +55,7 @@ class T4JamController extends Controller
         return view('automation', [
             'title' => 'Automation Budget Strategy',
             'accounts' => AdAccount::query()->orderBy('name')->get(),
-            'tasks' => AutomationTask::with(['adAccount', 'campaign', 'adSet'])->latest()->get(),
+            'tasks' => AutomationTask::where('user_id', Auth::id())->with(['adAccount', 'campaign', 'adSet'])->latest()->get(),
         ]);
     }
 
@@ -108,7 +111,10 @@ class T4JamController extends Controller
         $adAccount = $request->query('ad_account', session('selected_ad_account'));
         $level = $request->query('level', $settings['level_mode'] ?? 'campaign');
 
-        return response()->json($this->insightsPayload($adAccount, $this->normalizeCampaignIds(session('selected_campaigns', [])), $level));
+        $request->validate(['conversion' => ['sometimes', Rule::in(AutomationBudgetService::conversions())]]);
+        $conversion = $request->query('conversion', $settings['conversion'] ?? 'purchase');
+
+        return response()->json($this->insightsPayload($adAccount, $this->normalizeCampaignIds(session('selected_campaigns', [])), $level, $conversion));
     }
 
     public function changeAdAccount(Request $request): JsonResponse
@@ -128,6 +134,7 @@ class T4JamController extends Controller
 
     public function changeSettings(Request $request): JsonResponse
     {
+        $request->validate(['conversion' => ['sometimes', Rule::in(AutomationBudgetService::conversions())]]);
         session(['dashboard_settings' => $request->only(['funnel_lp', 'conversion', 'level_mode'])]);
 
         return response()->json(['status' => 200, 'text' => 'Settings dashboard tersimpan']);
@@ -259,7 +266,7 @@ class T4JamController extends Controller
 
     public function automationTasks(Request $request): JsonResponse
     {
-        $tasks = AutomationTask::with(['adAccount', 'campaign', 'adSet'])
+        $tasks = AutomationTask::where('user_id', Auth::id())->with(['adAccount', 'campaign', 'adSet'])
             ->when($request->query('acc') && $request->query('acc') !== 'all', fn ($query) => $query->whereHas('adAccount', fn ($account) => $account->where('external_id', $request->query('acc'))))
             ->when($request->query('level') && $request->query('level') !== 'all', fn ($query) => $query->where('level', $request->query('level')))
             ->when($request->query('funnel') && $request->query('funnel') !== 'all', fn ($query) => $query->where('event_flow', $request->query('funnel')))
@@ -273,6 +280,7 @@ class T4JamController extends Controller
 
     public function createAutomationTask(Request $request, MetaAdsSyncService $metaSync): JsonResponse
     {
+        $this->validateAutomation($request);
         $account = AdAccount::where('external_id', $request->input('ad_account'))->first();
 
         if (! $account) {
@@ -317,6 +325,7 @@ class T4JamController extends Controller
 
             $task = AutomationTask::create($this->automationPayload($request) + [
                 'id' => (string) str()->uuid(),
+                'user_id' => Auth::id(),
                 'ad_account_id' => $account->id,
                 'campaign_id' => $campaign->id,
                 'ad_set_id' => $adSet?->id,
@@ -327,7 +336,7 @@ class T4JamController extends Controller
                 'current_budget' => $budget,
                 'current_spend' => 0,
                 'current_result' => 0,
-                'is_active' => $request->boolean('automation_activation'),
+                'is_active' => $this->automationActive($request),
                 'level' => $level,
                 'last_log' => $successMessage,
                 'last_checked_at' => null,
@@ -348,7 +357,8 @@ class T4JamController extends Controller
 
     public function updateAutomationTask(Request $request, MetaAdsSyncService $metaSync): JsonResponse
     {
-        $task = AutomationTask::with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
+        $this->validateAutomation($request);
+        $task = AutomationTask::where('user_id', Auth::id())->with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
         $budget = max(1000, (int) $request->input('starting_budget', $task->starting_budget));
 
         if ($budget < 1000) {
@@ -384,7 +394,8 @@ class T4JamController extends Controller
             $taskData = $this->automationPayload($request) + [
                 'last_log' => $logMessage,
                 'last_checked_at' => null,
-                'is_active' => $request->boolean('automation_activation'),
+                'last_budget_action' => 'manual',
+                'is_active' => $this->automationActive($request),
             ] + ($budgetChanged ? [
                 'current_budget' => $budget,
                 'last_budget_changed_at' => now(),
@@ -392,6 +403,10 @@ class T4JamController extends Controller
                 'last_budget_action' => 'manual',
             ] : []);
 
+            if (($taskData['conversion'] ?? $task->conversion) !== $task->conversion) {
+                $taskData['current_result'] = 0;
+                $taskData['current_spend'] = 0;
+            }
             $task->update($taskData);
 
             AutomationLog::create([
@@ -405,7 +420,7 @@ class T4JamController extends Controller
 
     public function updateStatusAutomation(Request $request, MetaAdsSyncService $metaSync): JsonResponse
     {
-        $task = AutomationTask::with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
+        $task = AutomationTask::where('user_id', Auth::id())->with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
         $isActive = $request->input('status', 'true') === 'true';
         $metaResult = $this->pushMetaStatus($task, $isActive, $metaSync);
         if (! $metaResult['ok']) {
@@ -416,10 +431,13 @@ class T4JamController extends Controller
         $successMessage = $baseMessage.'; Meta berhasil diupdate.';
 
         DB::transaction(function () use ($task, $isActive, $successMessage): void {
+            $target = $this->taskMetricTarget($task);
+            $target?->update(['status' => $isActive ? 'ACTIVE' : 'PAUSED', 'effective_status' => $isActive ? 'ACTIVE' : 'PAUSED']);
             $task->update([
                 'is_active' => $isActive,
                 'last_log' => $successMessage,
                 'last_checked_at' => $isActive ? null : now(),
+                'last_budget_action' => 'manual',
             ]);
             AutomationLog::create([
                 'automation_task_id' => $task->id,
@@ -432,13 +450,14 @@ class T4JamController extends Controller
 
     public function specificTask(Request $request): JsonResponse
     {
-        $task = AutomationTask::with(['adAccount', 'campaign', 'adSet'])->find($request->query('automation_id'));
+        $task = AutomationTask::where('user_id', Auth::id())->with(['adAccount', 'campaign', 'adSet'])->find($request->query('automation_id'));
 
         return response()->json(['status' => 200, 'data' => $task ? $this->taskPayload($task) : null]);
     }
 
     public function historyLog(Request $request): JsonResponse
     {
+        AutomationTask::where('user_id', Auth::id())->findOrFail($request->query('task_id'));
         $logs = AutomationLog::where('automation_task_id', $request->query('task_id'))->latest()->limit(10)->get();
 
         return response()->json([
@@ -452,7 +471,7 @@ class T4JamController extends Controller
 
     public function turunBudget(Request $request, MetaAdsSyncService $metaSync): JsonResponse
     {
-        $task = AutomationTask::with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
+        $task = AutomationTask::where('user_id', Auth::id())->with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
         $target = $task->level === 'adset'
             ? ($task->adSet ?? $task->ad_set_external_id)
             : ($task->campaign ?? $task->campaign_external_id);
@@ -551,27 +570,29 @@ class T4JamController extends Controller
 
     public function saveAccessToken(Request $request): RedirectResponse
     {
-        $accessToken = $request->input('access_token_app');
-        $appId = $request->input('id_aplikasi');
-        $appSecret = $request->input('kunci_rahasia');
+        $request->validate([
+            'access_token_app' => ['nullable', 'string', 'max:20000'],
+            'id_aplikasi' => ['nullable', 'string', 'max:255'],
+            'kunci_rahasia' => ['nullable', 'string', 'max:2000'],
+        ]);
+        $profile = $this->currentProfile();
+        $accessToken = $request->filled('access_token_app') ? $request->string('access_token_app')->toString() : $profile->access_token;
+        $appId = $request->filled('id_aplikasi') ? $request->string('id_aplikasi')->toString() : $profile->app_id;
+        $appSecret = $request->filled('kunci_rahasia') ? $request->string('kunci_rahasia')->toString() : $profile->app_secret;
 
-        if ($accessToken && $appId && $appSecret) {
+        if ($request->filled('access_token_app') && $appId && $appSecret) {
             try {
                 $accessToken = MetaAdsClient::exchangeLongLivedToken($appId, $appSecret, $accessToken);
             } catch (MetaAdsException $exception) {
                 return back()->withErrors(['meta' => $exception->getMessage()]);
             }
         }
-
-        $profile = T4JamProfile::updateOrCreate(
-            ['user_id' => Auth::id()],
-            [
-                'app_id' => $appId,
-                'app_secret' => $appSecret,
-                'access_token' => $accessToken,
-                'last_meta_error' => null,
-            ]
-        );
+        $profile->update([
+            'app_id' => $appId,
+            'app_secret' => $appSecret,
+            'access_token' => $accessToken,
+            'last_meta_error' => null,
+        ]);
 
         if (! $profile->access_token) {
             MetaFlowLog::info('access token profile saved without sync queue', [
@@ -589,7 +610,7 @@ class T4JamController extends Controller
             'queue' => 'meta',
         ]);
 
-        return back()->with('status', 'Access token valid. Sync Meta Ads masuk antrean queue.');
+        return back()->with('status', 'Access token tersimpan. Sync Meta Ads masuk antrean queue.');
     }
 
     public function syncMetaAds(Request $request): JsonResponse|RedirectResponse
@@ -637,7 +658,6 @@ class T4JamController extends Controller
             MetaFlowLog::warning('direct full sync failed', [
                 'profile_id' => $profile->id,
                 'exception' => $exception::class,
-                'message' => $exception->getMessage(),
             ]);
 
             $message = 'Sync Meta Ads gagal. Coba lagi beberapa saat.';
@@ -663,6 +683,28 @@ class T4JamController extends Controller
         return $message;
     }
 
+    private function automationActive(Request $request): bool
+    {
+        return $request->input('automation_activation') === 'active' || $request->boolean('automation_activation');
+    }
+
+    private function validateAutomation(Request $request): void
+    {
+        $request->validate([
+            'budget_conversion' => ['sometimes', Rule::in(AutomationBudgetService::conversions())],
+            'cpr_cap' => ['sometimes', 'integer', 'min:1'],
+            'pause_cpr_cap' => ['sometimes', 'integer', 'min:1'],
+            'starting_budget' => ['sometimes', 'integer', 'min:1000'],
+            'maximum_budget' => ['sometimes', 'integer', 'min:0'],
+            'period' => ['sometimes', 'integer', 'min:5', 'max:1440'],
+            'on_time' => ['sometimes', 'date_format:H:i'],
+            'off_time' => ['sometimes', 'date_format:H:i'],
+        ]);
+        if ($request->boolean('counter_cpr') && (int) $request->input('pause_cpr_cap', 5000) >= (int) $request->input('cpr_cap', 7000)) {
+            throw ValidationException::withMessages(['pause_cpr_cap' => 'Resume CPR harus lebih rendah dari CPR Cap.']);
+        }
+    }
+
     private function automationPayload(Request $request): array
     {
         return [
@@ -674,7 +716,7 @@ class T4JamController extends Controller
             'maximum_budget' => (int) $request->input('maximum_budget', 0),
             'cpr_cap' => (int) $request->input('cpr_cap', 7000),
             'period' => (int) $request->input('period', 10),
-            'pause_cpr_cap' => (int) $request->input('pause_cpr_cap', 70000),
+            'pause_cpr_cap' => (int) $request->input('pause_cpr_cap', 5000),
             'pause_when_cpr_loss' => $request->boolean('cpr_pause'),
             'counter_cpr' => $request->boolean('counter_cpr'),
             'use_on_off' => $request->boolean('use_on_off'),
@@ -728,8 +770,8 @@ class T4JamController extends Controller
     {
         $target = $this->taskMetricTarget($task);
         $budget = (int) ($target?->daily_budget ?? $task->current_budget);
-        $spend = (int) ($target?->spend ?? $task->current_spend);
-        $result = max(0, (int) ($target?->result ?? $task->current_result));
+        $spend = (int) $task->current_spend;
+        $result = max(0, (int) $task->current_result);
 
         return [
             'id' => $task->id,
@@ -955,14 +997,14 @@ class T4JamController extends Controller
         ]);
     }
 
-    private function insightsPayload(?string $adAccountExternalId = null, array $selectedCampaigns = [], string $level = 'campaign'): array
+    private function insightsPayload(?string $adAccountExternalId = null, array $selectedCampaigns = [], string $level = 'campaign', string $conversion = 'purchase'): array
     {
         $query = $level === 'adset' ? AdSet::query() : Campaign::query();
         $rows = $query
             ->when($adAccountExternalId, fn ($query) => $query->whereHas('adAccount', fn ($account) => $account->where('external_id', $adAccountExternalId)))
             ->when($selectedCampaigns !== [], fn ($query) => $query->whereIn('external_id', $selectedCampaigns))
             ->get()
-            ->map(fn (Campaign|AdSet $item) => $this->insightRow($item, $level));
+            ->map(fn (Campaign|AdSet $item) => $this->insightRow($item, $level, $conversion));
 
         $sum = fn (string $key) => $rows->sum($key);
         $results = max(1, $sum('hasil'));
@@ -974,7 +1016,7 @@ class T4JamController extends Controller
                 $this->metric('Spend', 'currency', 'spend', $sum('spend')),
                 $this->metric('Landing Page View', 'number', 'landing_page_view', $sum('landing_page_view')),
                 $this->metric('Link Clicks', 'number', 'link_click', $sum('link_click')),
-                $this->metric('Hasil (Purchase)', 'number', 'purchase', $sum('hasil')),
+                $this->metric('Hasil ('.AutomationBudgetService::conversionLabel($conversion).')', 'number', $conversion, $sum('hasil')),
                 $this->metric('CPR', 'currency', 'cpr', round($sum('spend') / $results)),
                 $this->metric('Klik Landas', 'percen', 'klik_landas', round(($sum('landing_page_view') / max(1, $sum('link_click'))) * 100, 1), 70),
                 $this->metric('Uang Klik', 'currency', 'uang_klik', round($sum('spend') / max(1, $sum('link_click'))), 190),
@@ -984,9 +1026,9 @@ class T4JamController extends Controller
         ];
     }
 
-    private function insightRow(Campaign|AdSet $item, string $level): array
+    private function insightRow(Campaign|AdSet $item, string $level, string $conversion): array
     {
-        $result = max(0, $item->result);
+        $result = max(0, (int) ($item->conversion_results[$conversion] ?? ($conversion === 'purchase' ? $item->result : 0)));
         $cpr = $result > 0 ? round($item->spend / $result) : $item->spend;
 
         return [
@@ -997,7 +1039,7 @@ class T4JamController extends Controller
             'budget' => $item->daily_budget,
             'spend' => $item->spend,
             'reach' => $item->reach,
-            'hasil' => $item->result,
+            'hasil' => $result,
             'cpr' => $cpr,
             'link_click' => $item->link_click,
             'landing_page_view' => $item->landing_page_view,

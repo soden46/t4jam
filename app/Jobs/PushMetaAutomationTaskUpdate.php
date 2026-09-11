@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Exceptions\MetaAdsException;
+use App\Jobs\Concerns\RetriesMetaRequests;
 use App\Models\AutomationLog;
 use App\Models\AutomationTask;
 use App\Models\T4JamProfile;
@@ -15,8 +16,7 @@ use Throwable;
 class PushMetaAutomationTaskUpdate implements ShouldQueue
 {
     use Queueable;
-
-    private const RATE_LIMIT_ERROR_CODES = [4, 17, 613, 80000, 80001, 80002, 80003, 80004];
+    use RetriesMetaRequests;
 
     public int $tries = 3;
 
@@ -43,7 +43,7 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
         $profile = T4JamProfile::query()->find($this->profileId);
         $task = AutomationTask::query()->find($this->taskId);
 
-        if (! $profile || ! $task || ! config('services.meta.enable_writes')) {
+        if (! $profile || ! $task || $task->user_id !== $profile->user_id || ! config('services.meta.enable_writes')) {
             MetaFlowLog::warning('queued automation meta update skipped', [
                 'profile_id' => $this->profileId,
                 'automation_task_id' => $this->taskId,
@@ -72,14 +72,12 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
                 $this->pushBudget($client, $task);
             }
         } catch (MetaAdsException $exception) {
-            if ($this->isRateLimitError($exception)) {
-                $this->markPendingRetry($task, 60);
-                $this->release(60);
-
-                return;
+            if ($exception->retryable() && $this->attempts() < $this->tries) {
+                $this->markPendingRetry($task, $exception->retryDelay($this->attempts()));
+            } else {
+                $this->markFailed($task, $this->metaErrorMessage($exception), $exception);
             }
-
-            $this->markFailed($task, $this->metaErrorMessage($exception), $exception);
+            $this->retryOrFail($exception);
 
             return;
         } catch (Throwable $exception) {
@@ -140,7 +138,6 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
 
         $task->update([
             'last_log' => $message,
-            'last_checked_at' => now(),
         ]);
 
         AutomationLog::create([
@@ -151,7 +148,7 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
 
     private function markPendingRetry(AutomationTask $task, int $seconds): void
     {
-        $message = $this->baseMessage.'; Meta rate limit, akan dicoba ulang '.$seconds.' detik lagi.';
+        $message = $this->baseMessage.'; Meta sementara gagal, akan dicoba ulang '.$seconds.' detik lagi.';
 
         MetaFlowLog::warning('queued automation meta update delayed by rate limit', [
             'automation_task_id' => $task->id,
@@ -162,7 +159,6 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
 
         $task->update([
             'last_log' => $message,
-            'last_checked_at' => now(),
         ]);
 
         AutomationLog::create([
@@ -179,12 +175,10 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
             'automation_task_id' => $task->id,
             'action' => $this->action,
             'exception' => $exception::class,
-            'message' => $exception->getMessage(),
         ]);
 
         $task->update([
             'last_log' => $log,
-            'last_checked_at' => now(),
         ]);
 
         AutomationLog::create([
@@ -210,10 +204,5 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
         }
 
         return 'Update Meta belum berhasil. Coba lagi beberapa saat.';
-    }
-
-    private function isRateLimitError(MetaAdsException $exception): bool
-    {
-        return in_array($exception->metaCode, self::RATE_LIMIT_ERROR_CODES, true);
     }
 }

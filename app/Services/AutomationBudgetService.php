@@ -10,6 +10,7 @@ use App\Models\Campaign;
 use App\Models\T4JamProfile;
 use App\Support\MetaFlowLog;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 class AutomationBudgetService
@@ -30,7 +31,29 @@ class AutomationBudgetService
         'onsite_conversion.messaging_conversation_started_7d' => ['onsite_conversion.messaging_conversation_started_7d'],
     ];
 
-    public function pauseTasksOverCprCap(
+    public static function conversions(): array
+    {
+        return array_keys(self::CONVERSION_ACTION_TYPES);
+    }
+
+    public static function conversionLabel(string $conversion): string
+    {
+        return match ($conversion) {
+            'purchase' => 'Purchase', 'lead' => 'Lead', 'add_to_cart' => 'ATC',
+            'initiate_checkout' => 'Checkout', 'contact_website' => 'Website Contact',
+            'onsite_conversion.messaging_conversation_started_7d' => 'WhatsApp',
+            default => 'Add Payment Info',
+        };
+    }
+
+    public function pauseTasksOverCprCap(T4JamProfile $profile, MetaAdsClient $client, bool $refreshMetrics = false, ?array $syncedTargets = null): int
+    {
+        return Cache::lock('automation-profile:'.$profile->id, 900)->get(
+            fn () => $this->evaluateTasks($profile, $client, $refreshMetrics, $syncedTargets)
+        ) ?: 0;
+    }
+
+    private function evaluateTasks(
         T4JamProfile $profile,
         MetaAdsClient $client,
         bool $refreshMetrics = false,
@@ -39,6 +62,7 @@ class AutomationBudgetService
         $paused = 0;
         $tasks = AutomationTask::query()
             ->with(['campaign', 'adSet'])
+            ->where('user_id', $profile->user_id)
             ->where(function ($query): void {
                 $query->where('is_active', true)
                     ->orWhere(function ($pausedQuery): void {
@@ -47,8 +71,7 @@ class AutomationBudgetService
                             ->where('counter_cpr', true)
                             ->where(function ($pauseStateQuery): void {
                                 $pauseStateQuery
-                                    ->where('last_budget_action', 'pause')
-                                    ->orWhere('last_log', 'like', 'Campaign otomatis dipause%');
+                                    ->where('last_budget_action', 'pause');
                             });
                     });
             })
@@ -56,7 +79,15 @@ class AutomationBudgetService
 
         if ($refreshMetrics) {
             $tasks = $tasks
-                ->filter(fn (AutomationTask $task): bool => $this->isDue($task) && $this->isWithinAutomationWindow($task))
+                ->filter(function (AutomationTask $task) use ($profile): bool {
+                    if (! $this->isDue($task) || ! $this->isWithinAutomationWindow($task)) {
+                        $this->logEvaluation($profile, $task, 'none', 'not_due_or_outside_window');
+
+                        return false;
+                    }
+
+                    return true;
+                })
                 ->values();
         }
 
@@ -64,121 +95,148 @@ class AutomationBudgetService
 
         $tasks
             ->each(function (AutomationTask $task) use ($profile, $client, $freshTargets, &$paused): void {
-                $target = $this->target($task);
-
-                if (! $target) {
-                    return;
-                }
-
-                if (! $this->isWithinAutomationWindow($task)) {
-                    return;
-                }
-
-                $targetKey = $this->targetKey($task, $target);
-
-                if ($freshTargets !== null && ! isset($freshTargets[$targetKey])) {
-                    return;
-                }
-
-                $metrics = $freshTargets[$targetKey] ?? null;
-                $spend = (int) ($metrics['spend'] ?? $target->spend);
-                $result = $metrics !== null
-                    ? max(0, (int) ($metrics['results'][$task->conversion] ?? 0))
-                    : max(0, (int) $target->result);
-                $cpr = $metrics !== null && isset($metrics['costs'][$task->conversion])
-                    ? (int) round((float) $metrics['costs'][$task->conversion])
-                    : ($result > 0 ? (int) round($spend / $result) : $spend);
-
-                $task->update([
-                    'current_spend' => $spend,
-                    'current_result' => $result,
-                ]);
-
-                if (! $task->is_active) {
-                    $this->resumeTaskIfEligible($task, $target, $client, $profile, $result, $cpr);
-
-                    return;
-                }
-
-                if ((int) $task->cpr_cap <= 0) {
-                    return;
-                }
-
-                if (! $task->pause_when_cpr_loss || ! config('services.meta.enable_writes')) {
-                    return;
-                }
-
-                if ($cpr < (int) $task->cpr_cap) {
-                    $this->increaseBudgetIfEligible($task, $target, $client, $profile, $result, $cpr);
-
-                    return;
-                }
-
-                $targetId = $target->external_id;
-
+                $beforeAction = $task->last_budget_action;
+                $beforeLog = $task->last_log;
+                $reason = 'rules_not_met';
                 try {
-                    if ($task->level === 'adset') {
-                        $client->updateAdSetStatus($targetId, false);
-                    } else {
-                        $client->updateCampaignStatus($targetId, false);
-                    }
-                } catch (MetaAdsException $exception) {
-                    $message = 'CPR cap terlewati, tetapi campaign gagal dipause di Meta.';
+                    $target = $this->target($task);
 
-                    MetaFlowLog::warning('automation cpr cap status update failed', [
+                    if (! $target) {
+                        $reason = 'target_missing';
+
+                        return;
+                    }
+
+                    if (! $this->isWithinAutomationWindow($task)) {
+                        return;
+                    }
+
+                    $targetKey = $this->targetKey($task, $target);
+
+                    if ($freshTargets !== null && ! isset($freshTargets[$targetKey])) {
+                        $reason = 'insight_unavailable';
+
+                        return;
+                    }
+
+                    $metrics = $freshTargets[$targetKey] ?? null;
+                    $spend = (int) ($metrics['spend'] ?? $task->current_spend);
+                    $result = $metrics !== null
+                        ? max(0, (int) ($metrics['results'][$task->conversion] ?? 0))
+                        : max(0, (int) $task->current_result);
+                    $cpr = $result > 0 ? (int) round($spend / $result) : $spend;
+
+                    $task->update([
+                        'current_spend' => $spend,
+                        'current_result' => $result,
+                        'current_budget' => $target->daily_budget,
+                        'last_checked_at' => now(),
+                    ]);
+
+                    if (! $task->is_active) {
+                        if ((int) $task->pause_cpr_cap >= (int) $task->cpr_cap) {
+                            $reason = 'invalid_recovery_threshold';
+                        }
+                        $this->resumeTaskIfEligible($task, $target, $client, $profile, $result, $cpr);
+
+                        return;
+                    }
+
+                    if ((int) $task->cpr_cap <= 0) {
+                        return;
+                    }
+
+                    if (! config('services.meta.enable_writes')) {
+                        $reason = 'writes_disabled';
+
+                        return;
+                    }
+
+                    if ($cpr < (int) $task->cpr_cap) {
+                        $this->increaseBudgetIfEligible($task, $target, $client, $profile, $result, $cpr);
+
+                        return;
+                    }
+
+                    if (! $task->pause_when_cpr_loss) {
+                        $reason = 'pause_disabled';
+
+                        return;
+                    }
+                    if ($target->status !== 'ACTIVE') {
+                        $reason = 'target_not_active';
+
+                        return;
+                    }
+                    $targetId = $target->external_id;
+
+                    try {
+                        if ($task->level === 'adset') {
+                            $client->updateAdSetStatus($targetId, false);
+                        } else {
+                            $client->updateCampaignStatus($targetId, false);
+                        }
+                    } catch (MetaAdsException $exception) {
+                        $message = 'CPR cap terlewati, tetapi campaign gagal dipause di Meta.';
+
+                        MetaFlowLog::warning('automation cpr cap status update failed', [
+                            'profile_id' => $profile->id,
+                            'automation_task_id' => $task->id,
+                            'target_id' => $targetId,
+                            'cpr' => $cpr,
+                            'cpr_cap' => $task->cpr_cap,
+                            'http_status' => $exception->httpStatus,
+                            'meta_code' => $exception->metaCode,
+                        ]);
+
+                        $task->update([
+                            'last_log' => $message,
+                            'last_checked_at' => now(),
+                        ]);
+                        AutomationLog::create([
+                            'automation_task_id' => $task->id,
+                            'messages' => [$message],
+                        ]);
+
+                        return;
+                    }
+
+                    $message = sprintf(
+                        'Campaign otomatis dipause karena CPR Rp. %s mencapai batas Rp. %s.',
+                        number_format($cpr, 0, ',', '.'),
+                        number_format((int) $task->cpr_cap, 0, ',', '.'),
+                    );
+
+                    DB::transaction(function () use ($task, $target, $message): void {
+                        $target->update([
+                            'status' => 'PAUSED',
+                            'effective_status' => 'PAUSED',
+                        ]);
+                        $task->update([
+                            'is_active' => false,
+                            'last_log' => $message,
+                            'last_checked_at' => now(),
+                            'last_budget_action' => 'pause',
+                        ]);
+                        AutomationLog::create([
+                            'automation_task_id' => $task->id,
+                            'messages' => [$message],
+                        ]);
+                    });
+
+                    MetaFlowLog::info('automation cpr cap status update finished', [
                         'profile_id' => $profile->id,
                         'automation_task_id' => $task->id,
                         'target_id' => $targetId,
                         'cpr' => $cpr,
                         'cpr_cap' => $task->cpr_cap,
-                        'http_status' => $exception->httpStatus,
-                        'meta_code' => $exception->metaCode,
                     ]);
 
-                    $task->update([
-                        'last_log' => $message,
-                        'last_checked_at' => now(),
-                    ]);
-                    AutomationLog::create([
-                        'automation_task_id' => $task->id,
-                        'messages' => [$message],
-                    ]);
-
-                    return;
+                    $paused++;
+                } finally {
+                    $action = ($task->last_budget_action !== $beforeAction || ($task->last_budget_action === 'increase' && $beforeLog !== $task->last_log)) && in_array($task->last_budget_action, ['pause', 'resume', 'increase'], true) ? $task->last_budget_action : 'none';
+                    $this->logEvaluation($profile, $task, $action, $action === 'none' ? $reason : null);
                 }
-
-                $message = sprintf(
-                    'Campaign otomatis dipause karena CPR Rp. %s mencapai batas Rp. %s.',
-                    number_format($cpr, 0, ',', '.'),
-                    number_format((int) $task->cpr_cap, 0, ',', '.'),
-                );
-
-                DB::transaction(function () use ($task, $target, $message): void {
-                    $target->update([
-                        'status' => 'PAUSED',
-                        'effective_status' => 'PAUSED',
-                    ]);
-                    $task->update([
-                        'is_active' => false,
-                        'last_log' => $message,
-                        'last_checked_at' => now(),
-                        'last_budget_action' => 'pause',
-                    ]);
-                    AutomationLog::create([
-                        'automation_task_id' => $task->id,
-                        'messages' => [$message],
-                    ]);
-                });
-
-                MetaFlowLog::info('automation cpr cap status update finished', [
-                    'profile_id' => $profile->id,
-                    'automation_task_id' => $task->id,
-                    'target_id' => $targetId,
-                    'cpr' => $cpr,
-                    'cpr_cap' => $task->cpr_cap,
-                ]);
-
-                $paused++;
             });
 
         return $paused;
@@ -194,7 +252,9 @@ class AutomationBudgetService
     ): void {
         $recoveryCap = (int) $task->pause_cpr_cap;
 
-        if (! config('services.meta.enable_writes') || $result <= 0 || $recoveryCap <= 0 || $cpr > $recoveryCap) {
+        if (! $task->counter_cpr || $task->last_budget_action !== 'pause' || $target->status !== 'PAUSED'
+            || $recoveryCap >= (int) $task->cpr_cap
+            || ! config('services.meta.enable_writes') || $result <= 0 || $recoveryCap <= 0 || $cpr > $recoveryCap) {
             return;
         }
 
@@ -283,18 +343,27 @@ class AutomationBudgetService
 
             $metrics = $this->metricSnapshot($insights);
             $target->update($this->insightPayload($metrics));
-            $this->markTasksChecked($targetData['tasks']);
             $freshTargets[$targetKey] = $metrics;
         }
 
         return $freshTargets;
     }
 
-    private function markTasksChecked(array $tasks): void
+    private function logEvaluation(T4JamProfile $profile, AutomationTask $task, string $action, ?string $reason): void
     {
-        foreach ($tasks as $task) {
-            $task->update(['last_checked_at' => now()]);
-        }
+        $result = (int) $task->current_result;
+        MetaFlowLog::info('automation evaluation', [
+            'profile_id' => $profile->id,
+            'automation_task_id' => $task->id,
+            'target_id' => $task->level === 'adset' ? $task->ad_set_external_id : $task->campaign_external_id,
+            'conversion' => $task->conversion,
+            'spend' => $task->current_spend,
+            'result' => $result,
+            'cpr' => $result > 0 ? (int) round($task->current_spend / $result) : $task->current_spend,
+            'cpr_cap' => $task->cpr_cap,
+            'action' => $action,
+            'reason' => $reason,
+        ]);
     }
 
     private function isDue(AutomationTask $task): bool
@@ -335,7 +404,7 @@ class AutomationBudgetService
         int $result,
         int $cpr,
     ): void {
-        if (! config('services.meta.enable_writes') || $result < self::MINIMUM_CONVERSIONS_TO_SCALE) {
+        if ($target->status !== 'ACTIVE' || ! config('services.meta.enable_writes') || $result < self::MINIMUM_CONVERSIONS_TO_SCALE) {
             return;
         }
 
@@ -457,6 +526,7 @@ class AutomationBudgetService
             'spend' => $metrics['spend'],
             'reach' => $metrics['reach'],
             'result' => $metrics['results']['purchase'] ?? 0,
+            'conversion_results' => $metrics['results'],
             'link_click' => $metrics['link_click'],
             'landing_page_view' => $metrics['landing_page_view'],
             'insights_synced_at' => $metrics['insights_synced_at'],

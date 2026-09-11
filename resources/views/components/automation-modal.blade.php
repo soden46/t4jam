@@ -83,13 +83,13 @@
             <div class="switch-grid">
                 <label class="switch-row"><input type="checkbox" name="cpr_pause" id="cpr_pause"> <span>Pause Campaign saat CPR Boncos ?</span></label>
                 <label class="switch-row"><input type="checkbox" name="counter_cpr" id="counter_cpr"> <span>Aktifkan Lagi Iklan ?</span></label>
-                <label class="switch-row" id="activation-row"><input type="checkbox" name="automation_activation" id="automation_activation" value="active" checked> <span>Automation Active</span></label>
+                <label class="switch-row" id="activation-row"><input type="checkbox" name="automation_activation" id="automation_activation" value="1" checked> <span>Automation Active</span></label>
                 <label class="switch-row"><input type="checkbox" name="use_on_off" id="use_on_off"> <span>Terapkan On/Off BOT T4Jam?</span></label>
             </div>
             <div class="grid-3">
                 <label>Resume CPR
-                    <input type="number" name="pause_cpr_cap" id="pause_cpr_cap" value="70000">
-                    <small>Jika counter aktif, iklan dipulihkan saat CPR kembali di bawah batas ini.</small>
+                    <input type="number" name="pause_cpr_cap" id="pause_cpr_cap" value="5000">
+                    <small>Harus lebih rendah dari CPR Cap. Recovery hanya untuk iklan yang dipause automation.</small>
                 </label>
                 <label>Jam "ON" BOT T4Jam
                     <input type="time" name="on_time" id="on_time" value="01:00">

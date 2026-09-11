@@ -3,9 +3,11 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use Illuminate\Auth\Events\PasswordReset;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Password;
 use Illuminate\View\View;
 use Laravel\Socialite\Facades\Socialite;
 use Throwable;
@@ -45,7 +47,6 @@ class AuthController extends Controller
         $data = $request->validate([
             'first_name' => ['required', 'string', 'max:80'],
             'last_name' => ['required', 'string', 'max:80'],
-            'username' => ['required', 'string', 'max:80'],
             'email' => ['required', 'email', 'max:255', 'unique:users,email'],
             'password' => ['required', 'string', 'min:8', 'confirmed'],
             'toc' => ['accepted'],
@@ -72,7 +73,42 @@ class AuthController extends Controller
     {
         $request->validate(['email' => ['required', 'email']]);
 
-        return back()->with('status', 'Reset password link berhasil disiapkan untuk akun tersebut.');
+        if (in_array(config('mail.default'), ['log', 'array', null], true)) {
+            return back()->withErrors(['email' => 'Pengiriman email belum dikonfigurasi. Hubungi administrator untuk pemulihan akun.'])->onlyInput('email');
+        }
+
+        try {
+            $status = Password::sendResetLink($request->only('email'));
+        } catch (Throwable) {
+            return back()->withErrors(['email' => 'Email pemulihan belum berhasil dikirim. Hubungi administrator.'])->onlyInput('email');
+        }
+
+        if ($status === Password::RESET_THROTTLED) {
+            return back()->withErrors(['email' => 'Tunggu sebelum meminta link pemulihan lagi.']);
+        }
+
+        return back()->with('status', 'Jika email terdaftar, link pemulihan telah dikirim.');
+    }
+
+    public function showNewPassword(Request $request, string $token): View
+    {
+        return view('auth.new-password', ['token' => $token, 'email' => $request->query('email')]);
+    }
+
+    public function updateResetPassword(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'token' => ['required', 'string'], 'email' => ['required', 'email'],
+            'password' => ['required', 'string', 'min:8', 'confirmed'],
+        ]);
+        $status = Password::reset($data, function (User $user, string $password): void {
+            $user->forceFill(['password' => $password, 'remember_token' => str()->random(60)])->save();
+            event(new PasswordReset($user));
+        });
+
+        return $status === Password::PASSWORD_RESET
+            ? redirect()->route('login')->with('status', 'Password berhasil direset. Silakan masuk.')
+            : back()->withErrors(['email' => 'Link pemulihan tidak valid atau sudah kedaluwarsa.'])->onlyInput('email');
     }
 
     public function redirectGoogle(): RedirectResponse
@@ -87,14 +123,18 @@ class AuthController extends Controller
     public function callbackGoogle(): RedirectResponse
     {
         try {
-            $googleUser = Socialite::driver('google')->stateless()->user();
+            $googleUser = Socialite::driver('google')->user();
         } catch (Throwable) {
             return redirect()->route('login')->withErrors([
                 'email' => 'Google sign in gagal. Cek konfigurasi Google OAuth.',
             ]);
         }
 
-        $user = User::updateOrCreate(
+        if (! $googleUser->getEmail() || ! ($googleUser->user['email_verified'] ?? $googleUser->user['verified_email'] ?? false)) {
+            return redirect()->route('login')->withErrors(['email' => 'Google email belum terverifikasi.']);
+        }
+
+        $user = User::firstOrCreate(
             ['email' => $googleUser->getEmail()],
             [
                 'name' => $googleUser->getName() ?: $googleUser->getNickname() ?: 'Google User',
@@ -119,6 +159,10 @@ class AuthController extends Controller
 
     private function loginGoogleFallback(): RedirectResponse
     {
+        if (! app()->environment(['local', 'testing'])) {
+            return redirect()->route('login')->withErrors(['email' => 'Konfigurasi Google OAuth belum diisi.']);
+        }
+
         $user = User::firstOrCreate(
             ['email' => 'google-demo@t4jam.local'],
             ['name' => 'Google Demo User', 'password' => str()->password(32)]

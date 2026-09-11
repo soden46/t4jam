@@ -27,7 +27,7 @@ Aplikasi memakai data Eloquent untuk:
 - `t4jam_profiles`
 - `ad_setups`
 
-Seeder lokal menyiapkan data awal supaya halaman bisa diuji tanpa bergantung ke Meta.
+DatabaseSeeder hanya membuat admin/profile untuk local/testing. Data iklan demo tidak otomatis disediakan oleh `migrate --seed`. Interest dan Product membaca database lokal; belum ada live Meta Interest API atau scraper Tokopedia.
 
 ## Setup Lokal
 
@@ -41,7 +41,13 @@ npm run build
 php artisan serve
 ```
 
-Pastikan `.env` mengarah ke database lokal yang benar.
+Pastikan `.env` mengarah ke database lokal yang benar. Untuk data demo **hanya local/testing**:
+
+```bash
+php artisan db:seed --class=TestDataSeeder
+```
+
+Kedua seeder menolak membuat data di production. Admin lokal: `admin@t4jam.local` / `password`; jangan gunakan akun demo di production.
 
 ## Environment Penting
 
@@ -54,8 +60,6 @@ DB_QUEUE_RETRY_AFTER=900
 META_GRAPH_VERSION=v23.0
 META_GRAPH_BASE_URL=https://graph.facebook.com
 META_GRAPH_TIMEOUT=45
-META_GRAPH_RETRY_TIMES=3
-META_GRAPH_RETRY_SLEEP_MS=500
 META_ADS_ENABLE_WRITES=false
 ```
 
@@ -94,13 +98,13 @@ Pemeriksaan CPR cap berjalan setiap 5 menit melalui command berikut. Command ini
 php artisan t4jam:enforce-automation
 ```
 
-CPR dihitung dari action conversion yang dipilih pada automation (misalnya `purchase`, `lead`, atau `add_to_cart`) dan action tersebut dibaca langsung dari insight Meta. Jika toggle `Pause Campaign saat CPR Boncos` aktif dan CPR sudah mencapai atau melewati `CPR Cap`, target akan dipause di Meta setelah write mode aktif. Kegagalan membaca insight tidak dianggap sebagai pemeriksaan berhasil, sehingga percobaan berikutnya tetap berjalan.
+CPR dihitung sebagai spend / hasil (atau spend jika hasil nol), dari action conversion yang dipilih pada automation (misalnya `purchase`, `lead`, atau `add_to_cart`) dan action tersebut dibaca langsung dari insight Meta. Jika toggle `Pause Campaign saat CPR Boncos` aktif dan CPR sudah mencapai atau melewati `CPR Cap`, target akan dipause di Meta setelah write mode aktif. Kegagalan membaca insight tidak dianggap sebagai pemeriksaan berhasil, sehingga percobaan berikutnya tetap berjalan.
 
 Formula automation budget yang dipakai:
 
-- Pause: `CPR Meta >= CPR Cap` dan toggle pause aktif.
-- Recovery: jika `counter_cpr` aktif dan pause sebelumnya dilakukan automation, aktifkan kembali saat `CPR Meta <= Resume CPR` dan ada minimal satu conversion.
-- Scale: jika `CPR Meta <= 80% x CPR Cap`, minimal ada 3 conversion, dan sudah 72 jam sejak perubahan budget terakhir, naikkan budget `15%`.
+- Pause: `CPR >= CPR Cap` dan toggle pause aktif.
+- Recovery: `0 < Resume CPR < CPR Cap` wajib; konfigurasi invalid ditolak pada form dan tidak diresume oleh service. Jika `counter_cpr` aktif dan pause sebelumnya dilakukan automation, aktifkan kembali saat `CPR <= Resume CPR` dan ada minimal satu conversion.
+- Scale: jika `CPR <= 80% x CPR Cap`, minimal ada 3 conversion, dan sudah 72 jam sejak perubahan budget terakhir, naikkan budget `15%`.
 - Batas: budget baru tidak boleh melewati `Maximum Increasing Budget`; nilai `0` berarti tidak dibatasi.
 - Jam kerja: bila `use_on_off` aktif, bot hanya mengevaluasi task di antara jam ON dan OFF. Perubahan budget dicatat sebagai baseline, manual, increase, pause, atau resume.
 
@@ -194,7 +198,9 @@ Meta dapat mengembalikan rate limit, misalnya:
 Meta rate limit hit {"meta_code":17,"meta_type":"OAuthException"}
 ```
 
-Jika rate limit terjadi, `last_meta_error` akan menyimpan pesan dari Meta agar user bisa sync ulang setelah beberapa menit.
+Queue sync, publish, dan update automation mencoba maksimal 3 kali. Rate limit, network error, dan 5xx dijeda minimal 60/180/300 detik, mengikuti `Retry-After` sampai 3600 detik. Token invalid/permission gagal permanen. HTTP client tidak melakukan retry cepat tersembunyi. `last_meta_error` menyimpan pesan aman, tanpa raw response/token.
+
+Publish menyimpan `meta_campaign_id`, `meta_adset_id`, `meta_creative_id`, dan `meta_ad_id` segera setelah setiap sukses, kemudian melanjutkan step yang belum selesai. Status: draft ? publishing ? published, atau failed. Bila create timeout/5xx atau tidak mengembalikan ID, `pending_meta_step` menahan create ulang: periksa Meta Ads Manager, isi ID yang sudah dibuat pada field terkait, lalu kosongkan `pending_meta_step` setelah hasil diverifikasi. Jangan kosongkan marker atau mengulang create sebelum rekonsiliasi.
 
 Hal yang perlu dicek saat dashboard masih `0`:
 
@@ -219,13 +225,50 @@ php artisan optimize:clear
 php artisan queue:restart
 ```
 
-Pastikan worker `meta,default` aktif setelah deploy.
+Pastikan worker `meta,default` aktif setelah deploy. Sebelum migration credential, backup database dan simpan `APP_KEY` yang sama; **jangan menjalankan key:generate pada deployment existing**. Hentikan worker lama dan scheduler sementara saat migration agar kode lama tidak membaca ciphertext. Gunakan maintenance window dan Supervisor sesuai setup server.
+
+Migration `2026_09_11_000001` memperlebar app_secret menjadi TEXT lalu mengenkripsi credential existing secara bertahap. Pembacaan plaintext lama tetap kompatibel; penulisan baru selalu terenkripsi menggunakan Laravel Crypt. Rollback tidak mendekripsi credential. Field form kosong mempertahankan credential sebelumnya dan credential tidak dimasukkan ke HTML/session old input.
+
+Migration `2026_09_11_000002` menambah owner automation, snapshot conversion campaign/adset, dan marker publish. Hanya database dengan tepat satu user yang mendapat backfill owner otomatis. Pada database multi-user, task lama tanpa `user_id` **tidak dieksekusi dan tidak tampil pada user lain**. Audit lalu tetapkan owner per task yang telah diverifikasi lewat Tinker, misalnya:
+
+```php
+App\Models\AutomationTask::whereNull('user_id')->get(['id', 'campaign_external_id', 'ad_account_name']);
+// Ganti TASK_UUID dan OWNER_USER_ID dengan hasil verifikasi, bukan user sembarang.
+App\Models\AutomationTask::whereKey('TASK_UUID')->whereNull('user_id')->update(['user_id' => OWNER_USER_ID]);
+```
+
+Token setiap user wajib disimpan pada profile sendiri. Schema akun/campaign/adset masih global; isolasi penuh katalog tersebut adalah follow-up. Task baru dan job automation/publish sudah memeriksa owner. Tidak ada fallback credential lintas user.
+
+Dashboard menyimpan hasil per conversion dari full sync; jalankan full sync profile setelah migration untuk mengisi hasil Lead/ATC/Checkout/WhatsApp. Data lama hanya punya Purchase generic. Automation memakai snapshot task dan polling lokal setiap 45 detik, tanpa Meta call; tab hidden/modal terbuka menunda polling.
+
+### Manual server check
+
+```bash
+php artisan migrate:status
+php artisan schedule:list
+crontab -l
+supervisorctl status
+php artisan queue:failed
+php artisan t4jam:sync-meta-ads --profile_id=1
+php artisan t4jam:enforce-automation
+tail -f storage/logs/laravel.log
+```
+
+Command sync/enforce menjalankan Meta request dan dapat mengubah budget/status jika writes aktif; gunakan profile/target yang telah diverifikasi. `schedule:list` harus menampilkan enforcement setiap 5 menit. Log `[T4JAM_META_FLOW] automation evaluation` memuat profile/task/target/conversion/spend/result/CPR/cap/action/reason. `last_checked_at` tidak maju jika insight gagal. Source code tidak mengubah cron OS.
+
+### Authentication
+
+Google demo fallback hanya local/testing. Production memerlukan `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, dan redirect URI yang sesuai konfigurasi `services.google`; callback memakai state verification Socialite. Password akun existing tidak diganti saat login Google.
+
+Password reset memakai broker Laravel dan token sekali pakai. Konfigurasikan mail transport pengirim yang nyata serta `MAIL_FROM_ADDRESS`; mail `log/array` menampilkan error konfigurasi. Username tidak digunakan: input dan validation telah dihapus, login tetap email.
 
 ## Quality Check
 
 ```bash
 php artisan test
 npm run build
+node --test tests/Browser/production-safety.test.mjs
+php vendor/bin/pint --test --dirty
 git diff --check
 ```
 

@@ -170,6 +170,9 @@ class MetaAdsSyncService
         try {
             return $callback();
         } catch (MetaAdsException $exception) {
+            if ($exception->retryable() || $exception->metaCode === 190 || $exception->httpStatus === 401) {
+                throw $exception;
+            }
             $this->warnings[] = $exception->getMessage();
 
             MetaFlowLog::warning($message, $context + [

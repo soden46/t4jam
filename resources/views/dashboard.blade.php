@@ -65,13 +65,13 @@
         <option value="lwa">LWA</option>
     </select>
     <select id="conversion" name="conversion">
-        <option value="purchase">Event Conversion : Purchase</option>
-        <option value="add_to_cart">Event Conversion : ATC</option>
-        <option value="lead">Event Conversion : Lead (Prospek)</option>
-        <option value="add_payment_info">Event Conversion : Add Payment Info</option>
-        <option value="initiate_checkout">Event Conversion : Initiate Checkout</option>
-        <option value="contact_website">Event Conversion : Website Contact</option>
-        <option value="onsite_conversion.messaging_conversation_started_7d">Event Conversion : Chat Whatsapp</option>
+        <option value="purchase" @selected(session('dashboard_settings.conversion', 'purchase') === 'purchase')>Event Conversion : Purchase</option>
+        <option value="add_to_cart" @selected(session('dashboard_settings.conversion', 'purchase') === 'add_to_cart')>Event Conversion : ATC</option>
+        <option value="lead" @selected(session('dashboard_settings.conversion', 'purchase') === 'lead')>Event Conversion : Lead (Prospek)</option>
+        <option value="add_payment_info" @selected(session('dashboard_settings.conversion', 'purchase') === 'add_payment_info')>Event Conversion : Add Payment Info</option>
+        <option value="initiate_checkout" @selected(session('dashboard_settings.conversion', 'purchase') === 'initiate_checkout')>Event Conversion : Initiate Checkout</option>
+        <option value="contact_website" @selected(session('dashboard_settings.conversion', 'purchase') === 'contact_website')>Event Conversion : Website Contact</option>
+        <option value="onsite_conversion.messaging_conversation_started_7d" @selected(session('dashboard_settings.conversion', 'purchase') === 'onsite_conversion.messaging_conversation_started_7d')>Event Conversion : Chat Whatsapp</option>
     </select>
 </section>
 

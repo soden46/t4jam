@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 #[Fillable([
     'id',
+    'user_id',
     'ad_account_id',
     'campaign_id',
     'ad_set_id',

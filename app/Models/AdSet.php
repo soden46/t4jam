@@ -7,12 +7,12 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['ad_account_id', 'campaign_id', 'external_id', 'name', 'status', 'effective_status', 'daily_budget', 'spend', 'reach', 'result', 'link_click', 'landing_page_view', 'insights_synced_at'])]
+#[Fillable(['ad_account_id', 'campaign_id', 'external_id', 'name', 'status', 'effective_status', 'daily_budget', 'spend', 'reach', 'result', 'link_click', 'landing_page_view', 'insights_synced_at', 'conversion_results'])]
 class AdSet extends Model
 {
     protected function casts(): array
     {
-        return ['insights_synced_at' => 'datetime'];
+        return ['insights_synced_at' => 'datetime', 'conversion_results' => 'array'];
     }
 
     public function adAccount(): BelongsTo

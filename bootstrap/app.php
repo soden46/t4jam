@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Middleware\EnsureT4JamAuthenticated;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -12,9 +13,9 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
-            't4jam.auth' => \App\Http\Middleware\EnsureT4JamAuthenticated::class,
+            't4jam.auth' => EnsureT4JamAuthenticated::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        //
+        $exceptions->dontFlash(['access_token_app', 'kunci_rahasia', 'access_token', 'app_secret']);
     })->create();

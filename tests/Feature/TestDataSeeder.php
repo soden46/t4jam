@@ -76,6 +76,7 @@ class TestDataSeeder extends Seeder
                 ['campaign_external_id' => $campaign->external_id],
                 [
                     'id' => (string) Str::uuid(),
+                    'user_id' => $user->id,
                     'ad_account_id' => $campaign->ad_account_id,
                     'campaign_id' => $campaign->id,
                     'campaign_name' => $campaign->name,

@@ -2,7 +2,7 @@
 
 namespace App\Models;
 
-use App\Support\MetaFlowLog;
+use App\Casts\MetaCredential;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -10,31 +10,13 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 #[Fillable(['user_id', 'app_id', 'app_secret', 'access_token', 'meta_user_id', 'meta_user_name', 'meta_connected_at', 'last_meta_sync_at', 'last_meta_error'])]
 class T4JamProfile extends Model
 {
+    protected $hidden = ['access_token', 'app_secret'];
+
     protected $table = 't4jam_profiles';
 
     public static function usableForUser(int $userId): self
     {
-        $profile = self::firstOrCreate(['user_id' => $userId]);
-
-        if ($profile->hasAccessToken()) {
-            return $profile;
-        }
-
-        $fallback = self::query()
-            ->whereNotNull('access_token')
-            ->where('access_token', '<>', '')
-            ->latest('updated_at')
-            ->first();
-
-        if ($fallback) {
-            MetaFlowLog::info('meta credential fallback selected', [
-                'user_id' => $userId,
-                'profile_id' => $profile->id,
-                'fallback_profile_id' => $fallback->id,
-            ]);
-        }
-
-        return $fallback ?? $profile;
+        return self::firstOrCreate(['user_id' => $userId]);
     }
 
     public function hasAccessToken(): bool
@@ -45,6 +27,8 @@ class T4JamProfile extends Model
     protected function casts(): array
     {
         return [
+            'access_token' => MetaCredential::class,
+            'app_secret' => MetaCredential::class,
             'meta_connected_at' => 'datetime',
             'last_meta_sync_at' => 'datetime',
         ];

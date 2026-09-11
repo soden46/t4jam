@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Exceptions\MetaAdsException;
+use App\Jobs\Concerns\RetriesMetaRequests;
 use App\Models\T4JamProfile;
 use App\Services\MetaAdsSyncService;
 use App\Support\MetaFlowLog;
@@ -14,8 +15,9 @@ use Throwable;
 class SyncMetaAdsProfile implements ShouldBeUnique, ShouldQueue
 {
     use Queueable;
+    use RetriesMetaRequests;
 
-    public int $tries = 2;
+    public int $tries = 3;
 
     public int $timeout = 650;
 
@@ -71,14 +73,15 @@ class SyncMetaAdsProfile implements ShouldBeUnique, ShouldQueue
                 'meta_code' => $exception->metaCode,
                 'meta_type' => $exception->metaType,
             ]);
+            $this->retryOrFail($exception);
         } catch (Throwable $exception) {
             MetaFlowLog::warning('full sync job failed', [
                 'profile_id' => $this->profileId,
                 'exception' => $exception::class,
-                'message' => $exception->getMessage(),
             ]);
 
             $profile->update(['last_meta_error' => 'Sync Meta Ads gagal. Coba lagi beberapa saat.']);
+            throw $exception;
         }
     }
 }
