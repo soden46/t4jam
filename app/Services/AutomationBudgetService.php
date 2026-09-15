@@ -319,25 +319,14 @@ class AutomationBudgetService
             $targets[$targetKey]['tasks'][] = $task;
         });
 
+        $freshInsights = $this->bulkRefreshTargetInsights($targets, $client, $profile);
+
         foreach ($targets as $targetKey => $targetData) {
             /** @var Campaign|AdSet $target */
             $target = $targetData['target'];
-            $task = $targetData['tasks'][0];
+            $insights = $freshInsights[$targetKey] ?? null;
 
-            try {
-                $insights = $task->level === 'adset'
-                    ? $client->adSetInsights($target->external_id)
-                    : $client->campaignInsights($target->external_id);
-            } catch (MetaAdsException $exception) {
-                MetaFlowLog::warning('automation target insight sync failed', [
-                    'profile_id' => $profile->id,
-                    'automation_task_id' => $task->id,
-                    'target_id' => $target->external_id,
-                    'level' => $task->level,
-                    'http_status' => $exception->httpStatus,
-                    'meta_code' => $exception->metaCode,
-                ]);
-
+            if ($insights === null) {
                 continue;
             }
 
@@ -347,6 +336,64 @@ class AutomationBudgetService
         }
 
         return $freshTargets;
+    }
+
+    private function bulkRefreshTargetInsights(array $targets, MetaAdsClient $client, T4JamProfile $profile): array
+    {
+        $groups = [];
+        $freshInsights = [];
+
+        foreach ($targets as $targetKey => $targetData) {
+            /** @var Campaign|AdSet $target */
+            $target = $targetData['target'];
+            $task = $targetData['tasks'][0];
+            $adAccountId = $target->adAccount?->external_id;
+
+            if (! $adAccountId) {
+                continue;
+            }
+
+            $groups[$task->level][$adAccountId][$targetKey] = $targetData;
+        }
+
+        foreach ($groups as $level => $accountGroups) {
+            foreach ($accountGroups as $adAccountId => $targetGroup) {
+                $firstTargetData = reset($targetGroup);
+                $firstTask = $firstTargetData['tasks'][0];
+
+                try {
+                    $rows = $level === 'adset'
+                        ? $client->accountAdSetInsights($adAccountId)
+                        : $client->accountCampaignInsights($adAccountId);
+                } catch (MetaAdsException $exception) {
+                    MetaFlowLog::warning('automation account insights sync failed', [
+                        'profile_id' => $profile->id,
+                        'automation_task_id' => $firstTask->id,
+                        'ad_account_id' => $adAccountId,
+                        'level' => $level,
+                        'http_status' => $exception->httpStatus,
+                        'meta_code' => $exception->metaCode,
+                    ]);
+
+                    continue;
+                }
+
+                $idField = $level === 'adset' ? 'adset_id' : 'campaign_id';
+                $rowsByTarget = collect($rows)->keyBy($idField);
+
+                foreach ($targetGroup as $targetKey => $targetData) {
+                    /** @var Campaign|AdSet $target */
+                    $target = $targetData['target'];
+                    $insights = $rowsByTarget->get($target->external_id, []);
+
+                    if ($insights !== []) {
+                        $freshInsights[$targetKey] = $insights;
+                    }
+                }
+            }
+        }
+
+        return $freshInsights;
     }
 
     private function logEvaluation(T4JamProfile $profile, AutomationTask $task, string $action, ?string $reason): void

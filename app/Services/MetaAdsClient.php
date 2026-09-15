@@ -73,6 +73,11 @@ class MetaAdsClient
         return $response['data'][0] ?? [];
     }
 
+    public function accountCampaignInsights(string $adAccountId, ?string $datePreset = null): array
+    {
+        return $this->accountInsights($adAccountId, 'campaign', 'campaign_id', $datePreset);
+    }
+
     public function adSets(string $campaignId): array
     {
         return $this->paginate("/{$campaignId}/adsets", [
@@ -92,6 +97,11 @@ class MetaAdsClient
         ]);
 
         return $response['data'][0] ?? [];
+    }
+
+    public function accountAdSetInsights(string $adAccountId, ?string $datePreset = null): array
+    {
+        return $this->accountInsights($adAccountId, 'adset', 'adset_id', $datePreset);
     }
 
     public function updateCampaignBudget(string $campaignId, int $dailyBudget): array
@@ -181,6 +191,17 @@ class MetaAdsClient
 
             return [];
         }
+    }
+
+    private function accountInsights(string $adAccountId, string $level, string $idField, ?string $datePreset): array
+    {
+        return $this->paginate("/{$adAccountId}/insights", [
+            'fields' => implode(',', [$idField, 'spend', 'reach', 'actions', 'cost_per_action_type', 'inline_link_clicks']),
+            'date_preset' => $datePreset ?? config('services.meta.insights_date_preset', 'last_30d'),
+            'level' => $level,
+            'use_unified_attribution_setting' => true,
+            'limit' => 100,
+        ]);
     }
 
     private function uniqueAdAccounts(array $accounts): array

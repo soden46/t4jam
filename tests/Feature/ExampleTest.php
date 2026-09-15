@@ -664,8 +664,9 @@ class ExampleTest extends TestCase
                 ],
             ]),
             'graph.facebook.com/*/cmp_1/adsets?*' => Http::response(['data' => []]),
-            'graph.facebook.com/*/cmp_1/insights?*' => Http::response([
+            'graph.facebook.com/*/act_123/insights?*' => Http::response([
                 'data' => [[
+                    'campaign_id' => 'cmp_1',
                     'spend' => '45000',
                     'reach' => '3000',
                     'inline_link_clicks' => '120',
@@ -698,7 +699,8 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_123', 'name' => 'Meta Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_1', 'spend' => 45000, 'result' => 3, 'landing_page_view' => 90]);
         $this->assertDatabaseHas('t4jam_profiles', ['user_id' => $user->id, 'meta_user_name' => 'Meta Tester', 'last_meta_error' => null]);
-        Http::assertSent(fn ($request) => str_contains($request->url(), '/cmp_1/insights')
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/act_123/insights')
+            && $request['level'] === 'campaign'
             && $request['date_preset'] === 'last_30d');
     }
 
@@ -725,7 +727,7 @@ class ExampleTest extends TestCase
                 ],
             ]),
             'graph.facebook.com/*/cmp_456/adsets?*' => Http::response(['data' => []]),
-            'graph.facebook.com/*/cmp_456/insights?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/act_456/insights?*' => Http::response(['data' => []]),
         ]);
 
         $this->postJson('/profile/sync-meta-ads/')
@@ -785,7 +787,7 @@ class ExampleTest extends TestCase
                 ],
             ]),
             'graph.facebook.com/*/cmp_321/adsets?*' => Http::response(['data' => []]),
-            'graph.facebook.com/*/cmp_321/insights?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/act_321/insights?*' => Http::response(['data' => []]),
         ]);
 
         $this->artisan('t4jam:sync-meta-ads')
@@ -794,6 +796,9 @@ class ExampleTest extends TestCase
 
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_321']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_321', 'name' => 'Scheduled Campaign']);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/act_321/insights')
+            && $request['level'] === 'campaign');
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/cmp_321/insights'));
     }
 
     public function test_meta_sync_pauses_campaign_when_active_cpr_cap_is_reached(): void
@@ -824,8 +829,9 @@ class ExampleTest extends TestCase
                 ],
             ]),
             'graph.facebook.com/*/'.$task->campaign->external_id.'/adsets?*' => Http::response(['data' => []]),
-            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
                 'data' => [[
+                    'campaign_id' => $task->campaign->external_id,
                     'spend' => '40000',
                     'reach' => '1000',
                     'inline_link_clicks' => '10',
@@ -868,8 +874,9 @@ class ExampleTest extends TestCase
         ]);
 
         Http::fake([
-            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
                 'data' => [[
+                    'campaign_id' => $task->campaign->external_id,
                     'spend' => '40000',
                     'reach' => '1000',
                     'inline_link_clicks' => '10',
@@ -891,6 +898,43 @@ class ExampleTest extends TestCase
             && $request['status'] === 'PAUSED');
     }
 
+    public function test_automation_enforcement_bulk_fetches_campaign_insights_once_per_account(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => false]);
+        $user = User::firstOrFail();
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $tasks = AutomationTask::with('campaign.adAccount')->take(2)->get();
+        $account = $tasks[0]->campaign->adAccount;
+
+        $tasks->each(function (AutomationTask $task) use ($account, $user): void {
+            $task->campaign->update(['ad_account_id' => $account->id]);
+            $task->update([
+                'user_id' => $user->id,
+                'pause_when_cpr_loss' => false,
+                'is_active' => true,
+                'last_checked_at' => now()->subMinutes(11),
+            ]);
+        });
+
+        Http::fake([
+            'graph.facebook.com/*/'.$account->external_id.'/insights?*' => Http::response([
+                'data' => $tasks->map(fn (AutomationTask $task) => [
+                    'campaign_id' => $task->campaign->external_id,
+                    'spend' => '30000',
+                    'actions' => [['action_type' => $task->conversion, 'value' => '3']],
+                ])->all(),
+            ]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertExitCode(0);
+
+        Http::assertSentCount(1);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$account->external_id.'/insights')
+            && $request['level'] === 'campaign');
+        $tasks->each(fn (AutomationTask $task) => $this->assertSame(3, $task->fresh()->current_result));
+    }
+
     public function test_cpr_uses_the_task_conversion_instead_of_summing_other_meta_actions(): void
     {
         $this->seed(TestDataSeeder::class);
@@ -907,8 +951,9 @@ class ExampleTest extends TestCase
         ]);
 
         Http::fake([
-            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
                 'data' => [[
+                    'campaign_id' => $task->campaign->external_id,
                     'spend' => '40000',
                     'actions' => [
                         ['action_type' => 'purchase', 'value' => '1'],
@@ -945,7 +990,7 @@ class ExampleTest extends TestCase
         ]);
 
         Http::fake([
-            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
                 'error' => ['message' => 'Token tidak memiliki akses campaign', 'code' => 100],
             ], 400),
         ]);
@@ -976,8 +1021,9 @@ class ExampleTest extends TestCase
         ]);
 
         Http::fake([
-            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
                 'data' => [[
+                    'campaign_id' => $task->campaign->external_id,
                     'spend' => '20000',
                     'actions' => [['action_type' => 'purchase', 'value' => '4']],
                     'cost_per_action_type' => [['action_type' => 'purchase', 'value' => '5000']],
@@ -1017,8 +1063,9 @@ class ExampleTest extends TestCase
         ]);
 
         Http::fake([
-            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
                 'data' => [[
+                    'campaign_id' => $task->campaign->external_id,
                     'spend' => '10000',
                     'actions' => [['action_type' => 'purchase', 'value' => '1']],
                     'cost_per_action_type' => [['action_type' => 'purchase', 'value' => '10000']],
@@ -1076,8 +1123,9 @@ class ExampleTest extends TestCase
         ]);
 
         Http::fake([
-            'graph.facebook.com/*/'.$task->campaign->external_id.'/insights?*' => Http::response([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
                 'data' => [[
+                    'campaign_id' => $task->campaign->external_id,
                     'spend' => '40000',
                     'actions' => [
                         ['action_type' => 'purchase', 'value' => '1'],
@@ -1180,7 +1228,7 @@ class ExampleTest extends TestCase
                 ],
             ]),
             'graph.facebook.com/*/cmp_789/adsets?*' => Http::response(['data' => []]),
-            'graph.facebook.com/*/cmp_789/insights?*' => Http::response([
+            'graph.facebook.com/*/act_789/insights?*' => Http::response([
                 'error' => [
                     'message' => 'User request limit reached',
                     'code' => 17,

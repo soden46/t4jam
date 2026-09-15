@@ -129,36 +129,56 @@ class MetaAdsSyncService
         $count = 0;
 
         Campaign::query()
+            ->with('adAccount')
             ->whereIn('id', $campaignIds)
             ->get()
-            ->each(function (Campaign $campaign) use ($client, &$count): void {
-                $insights = $this->optionalMetaRequest(
-                    fn () => $client->campaignInsights($campaign->external_id),
-                    'Meta campaign insights skipped',
-                    ['campaign_id' => $campaign->external_id],
-                );
+            ->groupBy(fn (Campaign $campaign) => $campaign->adAccount?->external_id)
+            ->each(function ($campaigns, ?string $adAccountId) use ($client, &$count): void {
+                if (! $adAccountId) {
+                    return;
+                }
 
-                if ($insights !== []) {
-                    $campaign->update($this->insightPayload($insights));
-                    $this->freshInsightTargets['campaign:'.$campaign->external_id] = app(AutomationBudgetService::class)->metricSnapshot($insights);
-                    $count++;
+                $insightsByCampaign = collect($this->optionalMetaRequest(
+                    fn () => $client->accountCampaignInsights($adAccountId),
+                    'Meta campaign insights skipped',
+                    ['ad_account_id' => $adAccountId],
+                ))->keyBy('campaign_id');
+
+                foreach ($campaigns as $campaign) {
+                    $insights = $insightsByCampaign->get($campaign->external_id, []);
+
+                    if ($insights !== []) {
+                        $campaign->update($this->insightPayload($insights));
+                        $this->freshInsightTargets['campaign:'.$campaign->external_id] = app(AutomationBudgetService::class)->metricSnapshot($insights);
+                        $count++;
+                    }
                 }
             });
 
         AdSet::query()
+            ->with('adAccount')
             ->whereIn('id', $adSetIds)
             ->get()
-            ->each(function (AdSet $adSet) use ($client, &$count): void {
-                $insights = $this->optionalMetaRequest(
-                    fn () => $client->adSetInsights($adSet->external_id),
-                    'Meta ad set insights skipped',
-                    ['ad_set_id' => $adSet->external_id],
-                );
+            ->groupBy(fn (AdSet $adSet) => $adSet->adAccount?->external_id)
+            ->each(function ($adSets, ?string $adAccountId) use ($client, &$count): void {
+                if (! $adAccountId) {
+                    return;
+                }
 
-                if ($insights !== []) {
-                    $adSet->update($this->insightPayload($insights));
-                    $this->freshInsightTargets['adset:'.$adSet->external_id] = app(AutomationBudgetService::class)->metricSnapshot($insights);
-                    $count++;
+                $insightsByAdSet = collect($this->optionalMetaRequest(
+                    fn () => $client->accountAdSetInsights($adAccountId),
+                    'Meta ad set insights skipped',
+                    ['ad_account_id' => $adAccountId],
+                ))->keyBy('adset_id');
+
+                foreach ($adSets as $adSet) {
+                    $insights = $insightsByAdSet->get($adSet->external_id, []);
+
+                    if ($insights !== []) {
+                        $adSet->update($this->insightPayload($insights));
+                        $this->freshInsightTargets['adset:'.$adSet->external_id] = app(AutomationBudgetService::class)->metricSnapshot($insights);
+                        $count++;
+                    }
                 }
             });
 
