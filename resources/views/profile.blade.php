@@ -49,12 +49,17 @@
             @csrf
             <label>ID Aplikasi
                 <input type="text" id="id_aplikasi" name="id_aplikasi" placeholder="ID Aplikasi" value="{{ old('id_aplikasi', $profile->app_id) }}">
+                @error('id_aplikasi')<small class="text-danger">{{ $message }}</small>@enderror
             </label>
             <label>Kunci Rahasia Aplikasi
-                <input type="password" autocomplete="new-password" id="kunci_rahasia" name="kunci_rahasia" placeholder="Kunci Rahasia Aplikasi" value=""><small>{{ filled($profile->app_secret) ? "App secret sudah tersimpan. Kosongkan untuk mempertahankan." : "App secret belum diisi." }}</small>
+                <input type="password" autocomplete="new-password" id="kunci_rahasia" name="kunci_rahasia" placeholder="Kunci Rahasia Aplikasi" value="{{ old('kunci_rahasia', $profile->app_secret) }}">
+                <small>{{ filled($profile->app_secret) ? "App secret sudah tersimpan dan ditampilkan. Kosongkan untuk mempertahankan." : "App secret belum diisi." }}</small>
+                @error('kunci_rahasia')<small class="text-danger">{{ $message }}</small>@enderror
             </label>
             <label>Akses Token
-                <textarea id="access_token_app" name="access_token_app" placeholder="Akses Token"></textarea><small>{{ $profile->hasAccessToken() ? "Access token sudah tersimpan. Kosongkan untuk mempertahankan." : "Access token belum diisi." }}</small>
+                <textarea id="access_token_app" name="access_token_app" placeholder="Akses Token">{{ old('access_token_app', $profile->access_token) }}</textarea>
+                <small>{{ $profile->hasAccessToken() ? "Access token sudah tersimpan dan ditampilkan. Kosongkan untuk mempertahankan." : "Access token belum diisi." }}</small>
+                @error('access_token_app')<small class="text-danger">{{ $message }}</small>@enderror
             </label>
             <button class="btn light-primary" type="submit">Save Token</button>
         </form>

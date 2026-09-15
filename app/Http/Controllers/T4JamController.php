@@ -580,7 +580,10 @@ class T4JamController extends Controller
         $appId = $request->filled('id_aplikasi') ? $request->string('id_aplikasi')->toString() : $profile->app_id;
         $appSecret = $request->filled('kunci_rahasia') ? $request->string('kunci_rahasia')->toString() : $profile->app_secret;
 
-        if ($request->filled('access_token_app') && $appId && $appSecret) {
+        $tokenChanged = $request->filled('access_token_app')
+            && $request->string('access_token_app')->toString() !== $profile->access_token;
+
+        if ($tokenChanged && $appId && $appSecret) {
             try {
                 $accessToken = MetaAdsClient::exchangeLongLivedToken($appId, $appSecret, $accessToken);
             } catch (MetaAdsException $exception) {

@@ -176,17 +176,27 @@ class ProductionSafetyTest extends TestCase
         Http::assertNothingSent();
     }
 
-    public function test_credentials_are_encrypted_hidden_and_blank_fields_preserve_them(): void
+    public function test_credentials_are_encrypted_rendered_in_fields_and_blank_fields_preserve_them(): void
     {
         [$profile] = $this->fixture();
         Queue::fake();
-        $profile->update(['app_secret' => 'private-secret']);
+        $profile->update(['app_id' => 'app-id', 'app_secret' => 'private-secret']);
         $raw = DB::table('t4jam_profiles')->where('id', $profile->id)->first();
         $this->assertStringStartsWith('encrypted:v1:', $raw->access_token);
         $this->assertStringNotContainsString('owner-token', $raw->access_token);
         $this->assertStringNotContainsString('private-secret', $raw->app_secret);
-        $this->get('/profile/')->assertOk()->assertDontSee('owner-token')->assertDontSee('private-secret');
+        $this->get('/profile/')->assertOk()->assertSee('owner-token')->assertSee('private-secret');
         $this->assertArrayNotHasKey('access_token', $profile->toArray());
+
+        $this->post('/profile/access-token/', [
+            'id_aplikasi' => 'app-id',
+            'kunci_rahasia' => 'private-secret',
+            'access_token_app' => 'owner-token',
+        ])->assertRedirect();
+        Http::assertNothingSent();
+        $this->assertSame('owner-token', $profile->fresh()->access_token);
+        $this->assertSame('private-secret', $profile->fresh()->app_secret);
+
         $this->post('/profile/access-token/', ['access_token_app' => '', 'kunci_rahasia' => ''])->assertRedirect();
         $this->assertSame('owner-token', $profile->fresh()->access_token);
         $this->assertSame('private-secret', $profile->fresh()->app_secret);
