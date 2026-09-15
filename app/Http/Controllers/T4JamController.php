@@ -786,8 +786,11 @@ class T4JamController extends Controller
     {
         $target = $this->taskMetricTarget($task);
         $budget = (int) ($target?->daily_budget ?? $task->current_budget);
-        $spend = (int) $task->current_spend;
-        $result = max(0, (int) $task->current_result);
+        $spend = (int) ($target?->spend ?? $task->current_spend);
+        $targetResults = $target?->conversion_results ?? [];
+        $result = $target
+            ? max(0, (int) ($targetResults[$task->conversion] ?? ($task->conversion === 'purchase' ? $target->result : 0)))
+            : max(0, (int) $task->current_result);
 
         return [
             'id' => $task->id,
