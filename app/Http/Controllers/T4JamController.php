@@ -30,6 +30,8 @@ use Throwable;
 
 class T4JamController extends Controller
 {
+    private const NON_EDITABLE_META_STATUSES = ['ARCHIVED', 'DELETED'];
+
     public function root(): RedirectResponse
     {
         return redirect('/dashboard/');
@@ -100,7 +102,7 @@ class T4JamController extends Controller
             'selected' => $selectedAccount?->external_id,
             'selected_campaigns' => $this->normalizeCampaignIds(session('selected_campaigns', [])),
             'fix_campaign_list' => $selectedAccount
-                ? $selectedAccount->campaigns->map(fn (Campaign $campaign) => $this->campaignPayload($campaign))->values()
+                ? $selectedAccount->campaigns->filter(fn (Campaign $campaign) => $this->editableMetaTarget($campaign))->map(fn (Campaign $campaign) => $this->campaignPayload($campaign))->values()
                 : collect(),
         ]);
     }
@@ -298,11 +300,19 @@ class T4JamController extends Controller
             if (! $adSet || ! $campaign) {
                 return response()->json(['status' => 422, 'text' => 'Pilih ad set dari ad account yang aktif dulu.'], 422);
             }
+
+            if (! $this->editableMetaTarget($adSet)) {
+                return response()->json(['status' => 422, 'text' => 'Ad set ini sudah dihapus/diarsipkan di Meta. Klik Reload lalu pilih ad set aktif.'], 422);
+            }
         } else {
             $campaign = $account->campaigns()->where('external_id', $request->input('campaign_id'))->first();
 
             if (! $campaign) {
                 return response()->json(['status' => 422, 'text' => 'Pilih campaign dari ad account yang aktif dulu.'], 422);
+            }
+
+            if (! $this->editableMetaTarget($campaign)) {
+                return response()->json(['status' => 422, 'text' => 'Campaign ini sudah dihapus/diarsipkan di Meta. Klik Reload lalu pilih campaign aktif.'], 422);
             }
         }
 
@@ -730,13 +740,16 @@ class T4JamController extends Controller
 
     private function accountPayload(AdAccount $account): array
     {
+        $campaigns = $account->campaigns->filter(fn (Campaign $campaign) => $this->editableMetaTarget($campaign));
+        $adSets = $account->adSets->filter(fn (AdSet $adSet) => $this->editableMetaTarget($adSet));
+
         return [
             'account_id' => $account->account_id,
             'id' => $account->external_id,
             'name' => $account->name,
             'currency' => $account->currency,
-            'campaigns' => ['data' => $account->campaigns->map(fn (Campaign $campaign) => $this->campaignPayload($campaign))->values()],
-            'adsets' => ['data' => $account->adSets->map(fn (AdSet $adSet) => $this->adSetPayload($adSet))->values()],
+            'campaigns' => ['data' => $campaigns->map(fn (Campaign $campaign) => $this->campaignPayload($campaign))->values()],
+            'adsets' => ['data' => $adSets->map(fn (AdSet $adSet) => $this->adSetPayload($adSet))->values()],
         ];
     }
 
@@ -750,7 +763,7 @@ class T4JamController extends Controller
             'budget_type' => $campaign->budget_type,
             'ad_id' => $campaign->adAccount?->external_id,
             'level' => 'campaign',
-            'adsets' => ['data' => $campaign->adSets->map(fn (AdSet $adSet) => $this->adSetPayload($adSet))->values()],
+            'adsets' => ['data' => $campaign->adSets->filter(fn (AdSet $adSet) => $this->editableMetaTarget($adSet))->map(fn (AdSet $adSet) => $this->adSetPayload($adSet))->values()],
         ];
     }
 
@@ -859,6 +872,10 @@ class T4JamController extends Controller
 
     private function pushMetaBudget(Campaign|AdSet|string|null $target, int $budget, string $level, MetaAdsSyncService $metaSync): array
     {
+        if (($target instanceof Campaign || $target instanceof AdSet) && ! $this->editableMetaTarget($target)) {
+            return ['ok' => false, 'text' => ucfirst($level).' ini sudah dihapus/diarsipkan di Meta. Klik Reload lalu pilih target aktif.'];
+        }
+
         $targetId = match (true) {
             $target instanceof Campaign, $target instanceof AdSet => $target->external_id,
             is_string($target) => $target,
@@ -908,6 +925,11 @@ class T4JamController extends Controller
     private function pushMetaStatus(AutomationTask $task, bool $active, MetaAdsSyncService $metaSync): array
     {
         $targetId = $task->level === 'adset' ? $task->ad_set_external_id : $task->campaign_external_id;
+        $target = $this->taskMetricTarget($task);
+
+        if ($target && ! $this->editableMetaTarget($target)) {
+            return ['ok' => false, 'text' => ucfirst($task->level).' ini sudah dihapus/diarsipkan di Meta. Klik Reload lalu pilih target aktif.'];
+        }
 
         if (! $targetId) {
             MetaFlowLog::warning('status push rejected without target', [
@@ -995,6 +1017,11 @@ class T4JamController extends Controller
 
     private function reportMetaAutomationFailure(MetaAdsException $exception, string $targetId, string $action): void
     {
+        if ($this->metaExceptionMeansDeletedTarget($exception)) {
+            Campaign::query()->where('external_id', $targetId)->update(['status' => 'DELETED', 'effective_status' => 'DELETED']);
+            AdSet::query()->where('external_id', $targetId)->update(['status' => 'DELETED', 'effective_status' => 'DELETED']);
+        }
+
         MetaFlowLog::warning('automation meta update failed', [
             'target_id' => $targetId,
             'action' => $action,
@@ -1004,6 +1031,24 @@ class T4JamController extends Controller
             'meta_type' => $exception->metaType,
             'provider_message' => $exception->providerMessage,
         ]);
+    }
+
+    private function editableMetaTarget(Campaign|AdSet $target): bool
+    {
+        $status = strtoupper((string) $target->status);
+        $effectiveStatus = strtoupper((string) $target->effective_status);
+
+        return ! in_array($status, self::NON_EDITABLE_META_STATUSES, true)
+            && ! in_array($effectiveStatus, self::NON_EDITABLE_META_STATUSES, true);
+    }
+
+    private function metaExceptionMeansDeletedTarget(MetaAdsException $exception): bool
+    {
+        $message = strtolower((string) $exception->providerMessage);
+
+        return $exception->metaSubcode === 1487566
+            || str_contains($message, 'sudah dihapus')
+            || str_contains($message, 'has been deleted');
     }
 
     private function insightsPayload(?string $adAccountExternalId = null, array $selectedCampaigns = [], string $level = 'campaign', string $conversion = 'purchase'): array

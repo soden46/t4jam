@@ -60,11 +60,11 @@ class MetaAdsClient
         ]);
     }
 
-    public function campaignInsights(string $campaignId, string $datePreset = 'today'): array
+    public function campaignInsights(string $campaignId, ?string $datePreset = null): array
     {
         $response = $this->get("/{$campaignId}/insights", [
             'fields' => 'spend,reach,actions,cost_per_action_type,inline_link_clicks',
-            'date_preset' => $datePreset,
+            'date_preset' => $datePreset ?? config('services.meta.insights_date_preset', 'last_30d'),
             'level' => 'campaign',
             'use_unified_attribution_setting' => true,
             'limit' => 1,
@@ -81,11 +81,11 @@ class MetaAdsClient
         ]);
     }
 
-    public function adSetInsights(string $adSetId, string $datePreset = 'today'): array
+    public function adSetInsights(string $adSetId, ?string $datePreset = null): array
     {
         $response = $this->get("/{$adSetId}/insights", [
             'fields' => 'spend,reach,actions,cost_per_action_type,inline_link_clicks',
-            'date_preset' => $datePreset,
+            'date_preset' => $datePreset ?? config('services.meta.insights_date_preset', 'last_30d'),
             'level' => 'adset',
             'use_unified_attribution_setting' => true,
             'limit' => 1,

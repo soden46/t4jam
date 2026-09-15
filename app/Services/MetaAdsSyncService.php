@@ -230,6 +230,18 @@ class MetaAdsSyncService
         );
     }
 
+    private function markMissingCampaignsDeleted(AdAccount $account, array $campaignIds): void
+    {
+        $missingCampaigns = $account->campaigns()
+            ->when($campaignIds !== [], fn ($query) => $query->whereNotIn('id', $campaignIds))
+            ->get();
+
+        foreach ($missingCampaigns as $campaign) {
+            $campaign->update(['status' => 'DELETED', 'effective_status' => 'DELETED']);
+            $campaign->adSets()->update(['status' => 'DELETED', 'effective_status' => 'DELETED']);
+        }
+    }
+
     private function insightPayload(array $insights): array
     {
         return app(AutomationBudgetService::class)->insightPayload(
@@ -264,13 +276,17 @@ class MetaAdsSyncService
             &$counts
         ): void {
             $account = $this->upsertAccount($accountData);
+            $campaignIdsForAccount = [];
 
             $counts['accounts'] = 1;
 
             foreach ($campaigns as $campaignData) {
-                $this->upsertCampaign($account, $campaignData);
+                $campaign = $this->upsertCampaign($account, $campaignData);
+                $campaignIdsForAccount[] = $campaign->id;
                 $counts['campaigns']++;
             }
+
+            $this->markMissingCampaignsDeleted($account, $campaignIdsForAccount);
         });
 
         $profile->update([

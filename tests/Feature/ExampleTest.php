@@ -144,6 +144,28 @@ class ExampleTest extends TestCase
         $this->assertSame('adset', collect($insights)->firstWhere('campaign_id', $adSet->external_id)['level']);
     }
 
+    public function test_deleted_meta_targets_are_hidden_from_automation_target_lists(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        $campaign = Campaign::with(['adAccount', 'adSets'])->whereHas('adSets')->firstOrFail();
+        $adSet = $campaign->adSets->first();
+        $campaign->update(['status' => 'DELETED', 'effective_status' => 'DELETED']);
+        $adSet->update(['status' => 'DELETED', 'effective_status' => 'DELETED']);
+
+        $response = $this
+            ->withSession(['selected_ad_account' => $campaign->adAccount->external_id])
+            ->getJson('/api/get-ad-account/')
+            ->assertOk();
+
+        $account = collect($response->json('adaccount'))->firstWhere('id', $campaign->adAccount->external_id);
+        $this->assertNotContains($campaign->external_id, collect($account['campaigns']['data'])->pluck('id'));
+        $this->assertNotContains($adSet->external_id, collect($account['adsets']['data'])->pluck('id'));
+        $this->assertNotContains($campaign->external_id, collect($response->json('fix_campaign_list'))->pluck('id'));
+    }
+
     public function test_dashboard_reload_syncs_only_selected_account_campaigns(): void
     {
         $this->seed(TestDataSeeder::class);
@@ -154,6 +176,21 @@ class ExampleTest extends TestCase
             ['user_id' => $user->id],
             ['access_token' => 'token']
         );
+        $staleAccount = AdAccount::create([
+            'external_id' => 'act_901',
+            'account_id' => '901',
+            'name' => 'Stale Account',
+            'currency' => 'IDR',
+            'account_status' => 1,
+        ]);
+        $staleCampaign = Campaign::create([
+            'ad_account_id' => $staleAccount->id,
+            'external_id' => 'cmp_deleted',
+            'name' => 'Deleted Meta Campaign',
+            'status' => 'ACTIVE',
+            'effective_status' => 'ACTIVE',
+            'daily_budget' => 100000,
+        ]);
 
         Http::fake([
             'graph.facebook.com/*/act_901/campaigns?*' => Http::response([
@@ -197,6 +234,7 @@ class ExampleTest extends TestCase
             'external_id' => 'cmp_901',
             'name' => 'Testing Tools Campaign',
         ]);
+        $this->assertSame('DELETED', $staleCampaign->fresh()->status);
 
         // Membuktikan Reload tidak melakukan full sync, adset lookup, atau insights.
         Http::assertSentCount(2);
@@ -227,6 +265,28 @@ class ExampleTest extends TestCase
             'ad_account' => $firstAccount->external_id,
             'campaign_id' => $otherCampaign->external_id,
         ])->assertStatus(422)->assertJsonPath('text', 'Pilih campaign dari ad account yang aktif dulu.');
+    }
+
+    public function test_create_automation_rejects_deleted_campaign_before_meta_write(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $campaign = Campaign::with('adAccount')->firstOrFail();
+        $campaign->update(['status' => 'DELETED', 'effective_status' => 'DELETED']);
+
+        Http::fake();
+        $this->postJson('/create-automation-tasks/', [
+            'ad_account' => $campaign->adAccount->external_id,
+            'campaign_id' => $campaign->external_id,
+            'starting_budget' => 100000,
+        ])->assertUnprocessable()
+            ->assertJsonPath('text', 'Campaign ini sudah dihapus/diarsipkan di Meta. Klik Reload lalu pilih campaign aktif.');
+
+        Http::assertNothingSent();
     }
 
     public function test_update_automation_task_pushes_budget_to_meta_campaign(): void
@@ -454,6 +514,35 @@ class ExampleTest extends TestCase
         $this->assertSame($originalBudget, $task->fresh()->current_budget);
     }
 
+    public function test_deleted_meta_campaign_response_marks_local_target_deleted(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->external_id => Http::response([
+                'error' => [
+                    'message' => 'Kampanye ini sudah dihapus sehingga Anda hanya bisa mengedit nama.',
+                    'type' => 'OAuthException',
+                    'code' => 100,
+                    'error_subcode' => 1487566,
+                ],
+            ], 400),
+        ]);
+
+        $this->postJson('/update-automation-tasks/', [
+            'automation_id' => $task->id,
+            'starting_budget' => 7000,
+        ])->assertUnprocessable()
+            ->assertJsonPath('text', 'Meta menolak update: Kampanye ini sudah dihapus sehingga Anda hanya bisa mengedit nama.');
+
+        $this->assertSame('DELETED', $task->campaign->fresh()->status);
+    }
+
     public function test_rule_update_without_budget_change_does_not_require_meta_write_mode(): void
     {
         $this->seed(TestDataSeeder::class);
@@ -609,6 +698,8 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('ad_accounts', ['external_id' => 'act_123', 'name' => 'Meta Account']);
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_1', 'spend' => 45000, 'result' => 3, 'landing_page_view' => 90]);
         $this->assertDatabaseHas('t4jam_profiles', ['user_id' => $user->id, 'meta_user_name' => 'Meta Tester', 'last_meta_error' => null]);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/cmp_1/insights')
+            && $request['date_preset'] === 'last_30d');
     }
 
     public function test_manual_meta_ads_sync_is_queued_and_persists_data_in_job(): void

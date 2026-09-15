@@ -35,6 +35,7 @@ return [
         'timeout' => (int) env('META_GRAPH_TIMEOUT', 45),
         'retry_times' => (int) env('META_GRAPH_RETRY_TIMES', 3),
         'retry_sleep_ms' => (int) env('META_GRAPH_RETRY_SLEEP_MS', 500),
+        'insights_date_preset' => env('META_GRAPH_INSIGHTS_DATE_PRESET', 'last_30d'),
     ],
 
     'ses' => [
