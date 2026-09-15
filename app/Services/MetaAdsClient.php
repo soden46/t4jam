@@ -266,6 +266,8 @@ class MetaAdsClient
         $error = $response->json('error') ?? [];
         $metaCode = $error['code'] ?? null;
         $metaType = $error['type'] ?? null;
+        $metaSubcode = $error['error_subcode'] ?? null;
+        $providerMessage = $this->safeProviderMessage($error['error_user_msg'] ?? $error['message'] ?? null);
 
         if ($this->isRateLimitError($metaCode)) {
             $retryAfter = $this->parseRetryAfter($response);
@@ -290,7 +292,23 @@ class MetaAdsClient
             $this->parseRetryAfter($response),
             (bool) ($error['is_transient'] ?? false),
             $response->status() >= 500,
+            $metaSubcode,
+            $providerMessage,
         );
+    }
+
+    private function safeProviderMessage(mixed $message): ?string
+    {
+        if (! is_string($message) || trim($message) === '') {
+            return null;
+        }
+
+        $message = preg_replace('/\s+/', ' ', trim($message)) ?: '';
+        if ($this->accessToken !== '') {
+            $message = str_replace($this->accessToken, '[token]', $message);
+        }
+
+        return strlen($message) > 240 ? substr($message, 0, 237).'...' : $message;
     }
 
     private function isRateLimitError(?int $metaCode): bool

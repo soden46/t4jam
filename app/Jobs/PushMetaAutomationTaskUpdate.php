@@ -200,6 +200,10 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
         }
 
         if ($exception->httpStatus === 400) {
+            if ($exception->providerMessage) {
+                return 'Meta menolak update: '.$exception->providerMessage;
+            }
+
             return 'Meta menolak update. Cek minimum budget, status campaign/ad set, dan permission ad account.';
         }
 

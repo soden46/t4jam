@@ -983,6 +983,10 @@ class T4JamController extends Controller
         }
 
         if ($exception->httpStatus === 400) {
+            if ($exception->providerMessage) {
+                return 'Meta menolak update: '.$exception->providerMessage;
+            }
+
             return 'Meta menolak update. Cek minimum budget, status campaign/ad set, dan permission ad account.';
         }
 
@@ -996,7 +1000,9 @@ class T4JamController extends Controller
             'action' => $action,
             'http_status' => $exception->httpStatus,
             'meta_code' => $exception->metaCode,
+            'meta_subcode' => $exception->metaSubcode,
             'meta_type' => $exception->metaType,
+            'provider_message' => $exception->providerMessage,
         ]);
     }
 

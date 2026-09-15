@@ -424,6 +424,36 @@ class ExampleTest extends TestCase
         $this->assertSame($originalBudget, $task->fresh()->current_budget);
     }
 
+    public function test_budget_update_surfaces_meta_provider_message_without_local_change(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        $originalBudget = $task->current_budget;
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->external_id => Http::response([
+                'error' => [
+                    'message' => 'Invalid parameter: daily_budget is too low for this campaign.',
+                    'type' => 'OAuthException',
+                    'code' => 100,
+                    'error_subcode' => 1815755,
+                ],
+            ], 400),
+        ]);
+
+        $this->postJson('/update-automation-tasks/', [
+            'automation_id' => $task->id,
+            'starting_budget' => 7000,
+        ])->assertUnprocessable()
+            ->assertJsonPath('text', 'Meta menolak update: Invalid parameter: daily_budget is too low for this campaign.');
+
+        $this->assertSame($originalBudget, $task->fresh()->current_budget);
+    }
+
     public function test_rule_update_without_budget_change_does_not_require_meta_write_mode(): void
     {
         $this->seed(TestDataSeeder::class);
