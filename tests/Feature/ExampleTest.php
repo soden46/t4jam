@@ -387,7 +387,7 @@ class ExampleTest extends TestCase
         $this->assertSame(55000, $row['current_budget']);
         $this->assertSame(35372, $row['current_spend']);
         $this->assertSame(3, $row['current_hasil']);
-        $this->assertSame(11791.0, $row['current_cpr']);
+        $this->assertSame(11791, $row['current_cpr']);
     }
 
     public function test_automation_budget_metrics_resolve_legacy_task_by_external_campaign_id(): void
@@ -419,7 +419,7 @@ class ExampleTest extends TestCase
         $this->assertSame(55000, $row['current_budget']);
         $this->assertSame(35372, $row['current_spend']);
         $this->assertSame(1, $row['current_hasil']);
-        $this->assertSame(35372.0, $row['current_cpr']);
+        $this->assertSame(35372, $row['current_cpr']);
     }
 
     public function test_update_automation_task_pushes_budget_to_meta_adset(): void
