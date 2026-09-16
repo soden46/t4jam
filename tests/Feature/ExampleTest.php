@@ -465,6 +465,56 @@ class ExampleTest extends TestCase
         $this->assertSame(11791, $row['current_cpr']);
     }
 
+    public function test_automation_task_endpoint_refreshes_display_metrics_from_meta(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        \Illuminate\Support\Facades\Cache::flush();
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $task = AutomationTask::with(['campaign.adAccount'])->firstOrFail();
+        AutomationTask::whereKeyNot($task->id)->delete();
+        $task->campaign->update([
+            'spend' => 0,
+            'result' => 0,
+            'conversion_results' => [],
+        ]);
+        $task->update([
+            'conversion' => 'purchase',
+            'current_spend' => 0,
+            'current_result' => 0,
+            'last_checked_at' => null,
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign->external_id,
+                    'spend' => '42000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '2']],
+                ]],
+            ]),
+        ]);
+
+        $response = $this
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all')
+            ->assertOk();
+
+        $row = collect($response->json('data'))->firstWhere('id', $task->id);
+
+        $this->assertSame('ok', $response->json('meta_sync.reason'));
+        $this->assertSame(1, $response->json('meta_sync.updated'));
+        $this->assertSame(42000, $row['current_spend']);
+        $this->assertSame(2, $row['current_hasil']);
+        $this->assertSame(21000, $row['current_cpr']);
+        $this->assertSame(42000, $task->fresh()->current_spend);
+        $this->assertSame(2, $task->fresh()->current_result);
+        Http::assertSentCount(1);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign->adAccount->external_id.'/insights')
+            && $request['level'] === 'campaign');
+    }
+
     public function test_automation_budget_metrics_resolve_legacy_task_by_external_campaign_id(): void
     {
         $this->seed(TestDataSeeder::class);
@@ -616,6 +666,26 @@ class ExampleTest extends TestCase
             ->assertJsonPath('text', 'Meta menolak update: Kampanye ini sudah dihapus sehingga Anda hanya bisa mengedit nama.');
 
         $this->assertSame('DELETED', $task->campaign->fresh()->status);
+    }
+
+    public function test_delete_automation_task_removes_only_owners_strategy(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs(User::factory()->create());
+        $task = AutomationTask::firstOrFail();
+
+        $this->postJson('/delete-automation-tasks/', ['automation_id' => $task->id])
+            ->assertNotFound();
+        $this->assertDatabaseHas('automation_tasks', ['id' => $task->id]);
+
+        $this->actingAs($user);
+        $this->postJson('/delete-automation-tasks/', ['automation_id' => $task->id])
+            ->assertOk()
+            ->assertJsonPath('status', 200);
+
+        $this->assertDatabaseMissing('automation_tasks', ['id' => $task->id]);
+        $this->assertDatabaseHas('campaigns', ['id' => $task->campaign_id]);
     }
 
     public function test_rule_update_without_budget_change_does_not_require_meta_write_mode(): void

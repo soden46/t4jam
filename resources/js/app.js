@@ -411,6 +411,7 @@ function renderAutomationTable(rows) {
                 <button class="btn light" data-history="${escapeHtml(row.id)}" type="button">Log</button>
                 <button class="btn light-primary" data-edit="${escapeHtml(row.id)}" type="button">Update</button>
                 <button class="btn danger" data-budget-down="${escapeHtml(row.id)}" type="button">Turun</button>
+                <button class="btn danger" data-delete-task="${escapeHtml(row.id)}" data-campaign="${escapeHtml(row.campaign_name)}" type="button">Hapus</button>
             </td>
         </tr>
     `).join('');
@@ -441,6 +442,24 @@ function renderAutomationTable(rows) {
         try {
             const response = await request('/turun-budget-manual/', { method: 'POST', body: formBody({ automation_id: button.dataset.budgetDown }) });
             toast(response.text || 'Budget berhasil diturunkan manual');
+            await loadAutomationTasks();
+        } catch (error) {
+            toast(error.message, 'danger');
+            if (page() === 'automation') await loadAutomationTasks();
+            button.disabled = false;
+            button.textContent = originalText;
+        }
+    }));
+    qsa('[data-delete-task]').forEach((button) => button.addEventListener('click', async () => {
+        if (!confirm(`Hapus automation budget "${button.dataset.campaign}" dari tools?`)) return;
+
+        const originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Deleting...';
+
+        try {
+            const response = await request('/delete-automation-tasks/', { method: 'POST', body: formBody({ automation_id: button.dataset.deleteTask }) });
+            toast(response.text || 'Automation budget berhasil dihapus');
             await loadAutomationTasks();
         } catch (error) {
             toast(error.message, 'danger');

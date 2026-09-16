@@ -53,6 +53,48 @@ class AutomationBudgetService
         ) ?: 0;
     }
 
+    public function refreshTaskMetricsForDisplay(T4JamProfile $profile, MetaAdsClient $client, Collection $tasks): int
+    {
+        if ($tasks->isEmpty()) {
+            return 0;
+        }
+
+        return Cache::lock('automation-display-sync:'.$profile->id, 30)->get(function () use ($profile, $client, $tasks): int {
+            $freshTargets = $this->refreshMetrics($tasks, $client, $profile);
+            $updated = 0;
+
+            $tasks->each(function (AutomationTask $task) use ($freshTargets, &$updated): void {
+                $target = $this->target($task);
+
+                if (! $target) {
+                    return;
+                }
+
+                $metrics = $freshTargets[$this->targetKey($task, $target)] ?? null;
+
+                if ($metrics === null) {
+                    return;
+                }
+
+                $task->update([
+                    'current_spend' => (int) $metrics['spend'],
+                    'current_result' => max(0, (int) ($metrics['results'][$task->conversion] ?? 0)),
+                    'current_budget' => (int) $target->daily_budget,
+                    'last_checked_at' => now(),
+                ]);
+                $updated++;
+            });
+
+            MetaFlowLog::info('automation display metrics refreshed', [
+                'profile_id' => $profile->id,
+                'tasks' => $tasks->count(),
+                'updated' => $updated,
+            ]);
+
+            return $updated;
+        }) ?: 0;
+    }
+
     private function evaluateTasks(
         T4JamProfile $profile,
         MetaAdsClient $client,
@@ -385,6 +427,10 @@ class AutomationBudgetService
                     /** @var Campaign|AdSet $target */
                     $target = $targetData['target'];
                     $insights = $rowsByTarget->get($target->external_id, []);
+
+                    if ($insights === [] && count($targetGroup) === 1 && count($rows) === 1) {
+                        $insights = $rows[0];
+                    }
 
                     if ($insights !== []) {
                         $freshInsights[$targetKey] = $insights;

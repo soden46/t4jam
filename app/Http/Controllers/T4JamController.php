@@ -21,8 +21,10 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Collection;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
@@ -266,18 +268,27 @@ class T4JamController extends Controller
         return response()->json(['status' => 200, 'text' => 'Data Valid', 'max_account' => 30, 'jumlah_akun_dipilih' => AdAccount::count()]);
     }
 
-    public function automationTasks(Request $request): JsonResponse
+    public function automationTasks(
+        Request $request,
+        AutomationBudgetService $automation,
+        MetaAdsSyncService $metaSync
+    ): JsonResponse
     {
         $tasks = AutomationTask::where('user_id', Auth::id())->with(['adAccount', 'campaign', 'adSet'])
             ->when($request->query('acc') && $request->query('acc') !== 'all', fn ($query) => $query->whereHas('adAccount', fn ($account) => $account->where('external_id', $request->query('acc'))))
             ->when($request->query('level') && $request->query('level') !== 'all', fn ($query) => $query->where('level', $request->query('level')))
             ->when($request->query('funnel') && $request->query('funnel') !== 'all', fn ($query) => $query->where('event_flow', $request->query('funnel')))
             ->latest()
-            ->get()
+            ->get();
+
+        $sync = $this->refreshAutomationDisplayMetrics($request, $tasks, $automation, $metaSync);
+
+        $tasks = $tasks
+            ->fresh(['adAccount', 'campaign', 'adSet'])
             ->map(fn (AutomationTask $task) => $this->taskPayload($task))
             ->values();
 
-        return response()->json(['data' => $tasks]);
+        return response()->json(['data' => $tasks, 'meta_sync' => $sync]);
     }
 
     public function createAutomationTask(Request $request, MetaAdsSyncService $metaSync): JsonResponse
@@ -456,6 +467,25 @@ class T4JamController extends Controller
         });
 
         return response()->json(['status' => 200, 'text' => 'Status automation berhasil diperbarui dan Meta berhasil diupdate.']);
+    }
+
+    public function deleteAutomationTask(Request $request): JsonResponse
+    {
+        $task = AutomationTask::where('user_id', Auth::id())->findOrFail($request->input('automation_id'));
+        $taskName = $task->campaign_name;
+        $task->delete();
+
+        MetaFlowLog::info('automation task deleted', [
+            'user_id' => Auth::id(),
+            'automation_task_id' => $request->input('automation_id'),
+            'target_id' => $task->level === 'adset' ? $task->ad_set_external_id : $task->campaign_external_id,
+            'level' => $task->level,
+        ]);
+
+        return response()->json([
+            'status' => 200,
+            'text' => 'Automation budget '.$taskName.' berhasil dihapus dari tools.',
+        ]);
     }
 
     public function specificTask(Request $request): JsonResponse
@@ -827,6 +857,63 @@ class T4JamController extends Controller
             'counter_cpr' => $task->counter_cpr,
             'use_on_off' => $task->use_on_off,
         ];
+    }
+
+    private function refreshAutomationDisplayMetrics(
+        Request $request,
+        Collection $tasks,
+        AutomationBudgetService $automation,
+        MetaAdsSyncService $metaSync
+    ): array {
+        if ($tasks->isEmpty()) {
+            return ['attempted' => false, 'updated' => 0, 'reason' => 'empty'];
+        }
+
+        $profile = $this->metaCredentialProfile();
+        if (! $profile->hasAccessToken()) {
+            return ['attempted' => false, 'updated' => 0, 'reason' => 'missing_token'];
+        }
+
+        $filters = implode(':', [
+            Auth::id(),
+            $request->query('acc', 'all'),
+            $request->query('level', 'all'),
+            $request->query('funnel', 'all'),
+        ]);
+        $cacheKey = 'automation-display-sync:'.md5($filters);
+
+        if (! Cache::add($cacheKey, true, now()->addSeconds(45))) {
+            return ['attempted' => false, 'updated' => 0, 'reason' => 'throttled'];
+        }
+
+        try {
+            $updated = $automation->refreshTaskMetricsForDisplay(
+                $profile,
+                $metaSync->client($profile),
+                $tasks
+            );
+        } catch (MetaAdsException $exception) {
+            $profile->update(['last_meta_error' => $exception->getMessage()]);
+            MetaFlowLog::warning('automation display metrics refresh failed', [
+                'user_id' => Auth::id(),
+                'profile_id' => $profile->id,
+                'http_status' => $exception->httpStatus,
+                'meta_code' => $exception->metaCode,
+                'meta_type' => $exception->metaType,
+            ]);
+
+            return ['attempted' => true, 'updated' => 0, 'reason' => 'meta_error'];
+        } catch (Throwable $exception) {
+            MetaFlowLog::warning('automation display metrics refresh crashed', [
+                'user_id' => Auth::id(),
+                'profile_id' => $profile->id,
+                'error' => $exception->getMessage(),
+            ]);
+
+            return ['attempted' => true, 'updated' => 0, 'reason' => 'error'];
+        }
+
+        return ['attempted' => true, 'updated' => $updated, 'reason' => 'ok'];
     }
 
     private function taskMetricTarget(AutomationTask $task): Campaign|AdSet|null
