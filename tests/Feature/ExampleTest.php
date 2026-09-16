@@ -512,7 +512,8 @@ class ExampleTest extends TestCase
         $this->assertSame(2, $task->fresh()->current_result);
         Http::assertSentCount(1);
         Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign->adAccount->external_id.'/insights')
-            && $request['level'] === 'campaign');
+            && $request['level'] === 'campaign'
+            && $request['date_preset'] === 'today');
     }
 
     public function test_automation_budget_metrics_resolve_legacy_task_by_external_campaign_id(): void

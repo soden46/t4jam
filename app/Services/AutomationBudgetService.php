@@ -60,7 +60,8 @@ class AutomationBudgetService
         }
 
         return Cache::lock('automation-display-sync:'.$profile->id, 30)->get(function () use ($profile, $client, $tasks): int {
-            $freshTargets = $this->refreshMetrics($tasks, $client, $profile);
+            $datePreset = config('services.meta.automation_display_insights_date_preset', 'today');
+            $freshTargets = $this->refreshMetrics($tasks, $client, $profile, $datePreset);
             $updated = 0;
 
             $tasks->each(function (AutomationTask $task) use ($freshTargets, &$updated): void {
@@ -87,6 +88,7 @@ class AutomationBudgetService
 
             MetaFlowLog::info('automation display metrics refreshed', [
                 'profile_id' => $profile->id,
+                'date_preset' => $datePreset,
                 'tasks' => $tasks->count(),
                 'updated' => $updated,
             ]);
@@ -344,7 +346,7 @@ class AutomationBudgetService
         });
     }
 
-    private function refreshMetrics(Collection $tasks, MetaAdsClient $client, T4JamProfile $profile): array
+    private function refreshMetrics(Collection $tasks, MetaAdsClient $client, T4JamProfile $profile, ?string $datePreset = null): array
     {
         $freshTargets = [];
         $targets = [];
@@ -361,7 +363,7 @@ class AutomationBudgetService
             $targets[$targetKey]['tasks'][] = $task;
         });
 
-        $freshInsights = $this->bulkRefreshTargetInsights($targets, $client, $profile);
+        $freshInsights = $this->bulkRefreshTargetInsights($targets, $client, $profile, $datePreset);
 
         foreach ($targets as $targetKey => $targetData) {
             /** @var Campaign|AdSet $target */
@@ -380,7 +382,7 @@ class AutomationBudgetService
         return $freshTargets;
     }
 
-    private function bulkRefreshTargetInsights(array $targets, MetaAdsClient $client, T4JamProfile $profile): array
+    private function bulkRefreshTargetInsights(array $targets, MetaAdsClient $client, T4JamProfile $profile, ?string $datePreset = null): array
     {
         $groups = [];
         $freshInsights = [];
@@ -405,8 +407,8 @@ class AutomationBudgetService
 
                 try {
                     $rows = $level === 'adset'
-                        ? $client->accountAdSetInsights($adAccountId)
-                        : $client->accountCampaignInsights($adAccountId);
+                        ? $client->accountAdSetInsights($adAccountId, $datePreset)
+                        : $client->accountCampaignInsights($adAccountId, $datePreset);
                 } catch (MetaAdsException $exception) {
                     MetaFlowLog::warning('automation account insights sync failed', [
                         'profile_id' => $profile->id,
@@ -434,6 +436,16 @@ class AutomationBudgetService
 
                     if ($insights !== []) {
                         $freshInsights[$targetKey] = $insights;
+                    } else {
+                        MetaFlowLog::warning('automation insight target missing', [
+                            'profile_id' => $profile->id,
+                            'automation_task_id' => $targetData['tasks'][0]->id,
+                            'ad_account_id' => $adAccountId,
+                            'level' => $level,
+                            'target_id' => $target->external_id,
+                            'date_preset' => $datePreset ?? config('services.meta.insights_date_preset', 'last_30d'),
+                            'available_target_ids' => collect($rows)->pluck($idField)->filter()->values()->all(),
+                        ]);
                     }
                 }
             }
