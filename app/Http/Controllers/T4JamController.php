@@ -39,7 +39,7 @@ class T4JamController extends Controller
 
     public function dashboard(): View
     {
-        $accounts = AdAccount::with('campaigns.adSets')->get();
+        $accounts = $this->newestAdAccountsWithChildren()->get();
         $selectedAccount = session('selected_ad_account', $accounts->first()?->external_id);
         $settings = session('dashboard_settings', []);
         $level = $settings['level_mode'] ?? 'campaign';
@@ -56,7 +56,7 @@ class T4JamController extends Controller
     {
         return view('automation', [
             'title' => 'Automation Budget Strategy',
-            'accounts' => AdAccount::query()->orderBy('name')->get(),
+            'accounts' => $this->newestAdAccounts()->get(),
             'tasks' => AutomationTask::where('user_id', Auth::id())->with(['adAccount', 'campaign', 'adSet'])->latest()->get(),
         ]);
     }
@@ -70,7 +70,7 @@ class T4JamController extends Controller
     {
         return view('products', [
             'title' => 'Product Research',
-            'categories' => ProductCategory::query()->orderBy('name')->get(),
+            'categories' => ProductCategory::query()->latest('updated_at')->latest('id')->get(),
         ]);
     }
 
@@ -91,7 +91,7 @@ class T4JamController extends Controller
 
     public function adAccounts(): JsonResponse
     {
-        $accounts = AdAccount::with('campaigns.adSets')->get();
+        $accounts = $this->newestAdAccountsWithChildren()->get();
         $selected = session('selected_ad_account', $accounts->first()?->external_id);
         $selectedAccount = $accounts->firstWhere('external_id', $selected) ?? $accounts->first();
 
@@ -203,7 +203,7 @@ class T4JamController extends Controller
             ], 422);
         }
 
-        $accounts = AdAccount::with('campaigns.adSets')->get();
+        $accounts = $this->newestAdAccountsWithChildren()->get();
         MetaFlowLog::info('reload finished', [
             'user_id' => Auth::id(),
             'profile_id' => $profile->id,
@@ -1060,6 +1060,8 @@ class T4JamController extends Controller
         $rows = $query
             ->when($adAccountExternalId, fn ($query) => $query->whereHas('adAccount', fn ($account) => $account->where('external_id', $adAccountExternalId)))
             ->when($selectedCampaigns !== [], fn ($query) => $query->whereIn('external_id', $selectedCampaigns))
+            ->latest('updated_at')
+            ->latest('id')
             ->get()
             ->map(fn (Campaign|AdSet $item) => $this->insightRow($item, $level, $conversion));
 
@@ -1153,8 +1155,32 @@ class T4JamController extends Controller
             ->when($request->query('max_price'), fn ($query, $max) => $query->where('price', '<=', (int) $max))
             ->when($request->query('min_sold'), fn ($query, $sold) => $query->where('sold', '>=', (int) $sold))
             ->when($request->query('last_added'), fn ($query, $days) => $query->where('last_added_at', '>=', now()->subDays((int) $days)))
+            ->latest('last_added_at')
+            ->latest('updated_at')
+            ->latest('id')
             ->orderByDesc('sold')
             ->limit(100);
+    }
+
+    private function newestAdAccounts()
+    {
+        return AdAccount::query()
+            ->latest('updated_at')
+            ->latest('id');
+    }
+
+    private function newestAdAccountsWithChildren()
+    {
+        return $this->newestAdAccounts()->with([
+            'campaigns' => fn ($query) => $query
+                ->latest('updated_at')
+                ->latest('id')
+                ->with(['adSets' => fn ($query) => $query->latest('updated_at')->latest('id')]),
+            'adSets' => fn ($query) => $query
+                ->latest('updated_at')
+                ->latest('id')
+                ->with('campaign'),
+        ]);
     }
 
     private function productPayload(Product $product): array

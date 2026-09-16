@@ -167,6 +167,81 @@ class ExampleTest extends TestCase
         $this->assertNotContains($campaign->external_id, collect($response->json('fix_campaign_list'))->pluck('id'));
     }
 
+    public function test_dashboard_meta_lists_show_newest_data_first(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        $olderAccount = AdAccount::create([
+            'account_id' => 'old-acc',
+            'external_id' => 'act_oldest',
+            'name' => 'Oldest Account',
+            'currency' => 'IDR',
+            'updated_at' => now()->subDays(3),
+        ]);
+        Campaign::create([
+            'ad_account_id' => $olderAccount->id,
+            'external_id' => 'cmp_oldest',
+            'name' => 'Oldest Campaign',
+            'status' => 'ACTIVE',
+            'effective_status' => 'ACTIVE',
+            'updated_at' => now()->subDays(3),
+        ]);
+
+        $newerAccount = AdAccount::create([
+            'account_id' => 'new-acc',
+            'external_id' => 'act_newest',
+            'name' => 'Newest Account',
+            'currency' => 'IDR',
+            'updated_at' => now(),
+        ]);
+        $olderCampaign = Campaign::create([
+            'ad_account_id' => $newerAccount->id,
+            'external_id' => 'cmp_nested_oldest',
+            'name' => 'Nested Oldest Campaign',
+            'status' => 'ACTIVE',
+            'effective_status' => 'ACTIVE',
+            'updated_at' => now()->subDays(2),
+        ]);
+        $newerCampaign = Campaign::create([
+            'ad_account_id' => $newerAccount->id,
+            'external_id' => 'cmp_nested_newest',
+            'name' => 'Nested Newest Campaign',
+            'status' => 'ACTIVE',
+            'effective_status' => 'ACTIVE',
+            'updated_at' => now(),
+        ]);
+        AdSet::create([
+            'ad_account_id' => $newerAccount->id,
+            'campaign_id' => $olderCampaign->id,
+            'external_id' => 'adset_oldest',
+            'name' => 'Oldest Ad Set',
+            'status' => 'ACTIVE',
+            'effective_status' => 'ACTIVE',
+            'updated_at' => now()->subDays(2),
+        ]);
+        AdSet::create([
+            'ad_account_id' => $newerAccount->id,
+            'campaign_id' => $newerCampaign->id,
+            'external_id' => 'adset_newest',
+            'name' => 'Newest Ad Set',
+            'status' => 'ACTIVE',
+            'effective_status' => 'ACTIVE',
+            'updated_at' => now(),
+        ]);
+
+        $response = $this
+            ->withSession(['selected_ad_account' => $newerAccount->external_id])
+            ->getJson('/api/get-ad-account/')
+            ->assertOk();
+
+        $this->assertSame('act_newest', $response->json('adaccount.0.id'));
+        $this->assertSame('cmp_nested_newest', $response->json('adaccount.0.campaigns.data.0.id'));
+        $this->assertSame('adset_newest', $response->json('adaccount.0.adsets.data.0.id'));
+        $this->assertSame('cmp_nested_newest', $response->json('fix_campaign_list.0.id'));
+    }
+
     public function test_dashboard_reload_syncs_only_selected_account_campaigns(): void
     {
         $this->seed(TestDataSeeder::class);

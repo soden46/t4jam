@@ -20,7 +20,7 @@ class AdSetupController extends Controller
     {
         return view('ad-setups.index', [
             'title' => 'Setup Iklan',
-            'accounts' => AdAccount::query()->orderBy('name')->get(),
+            'accounts' => AdAccount::query()->latest('updated_at')->latest('id')->get(),
             'setups' => AdSetup::with('adAccount')
                 ->where('user_id', Auth::id())
                 ->latest()
