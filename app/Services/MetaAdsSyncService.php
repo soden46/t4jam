@@ -5,6 +5,8 @@ namespace App\Services;
 use App\Exceptions\MetaAdsException;
 use App\Models\AdAccount;
 use App\Models\AdSet;
+use App\Models\AutomationLog;
+use App\Models\AutomationTask;
 use App\Models\Campaign;
 use App\Models\T4JamProfile;
 use App\Support\MetaFlowLog;
@@ -38,7 +40,7 @@ class MetaAdsSyncService
             ]);
 
             foreach ($accounts as $accountData) {
-                $account = $this->upsertAccount($accountData);
+                $account = $this->upsertAccount($accountData, $profile);
                 $counts['accounts']++;
 
                 foreach ($accountData['_campaigns'] ?? [] as $campaignData) {
@@ -205,9 +207,9 @@ class MetaAdsSyncService
         }
     }
 
-    private function upsertAccount(array $accountData): AdAccount
+    private function upsertAccount(array $accountData, ?T4JamProfile $profile = null): AdAccount
     {
-        return AdAccount::updateOrCreate(
+        $account = AdAccount::updateOrCreate(
             ['external_id' => $accountData['id']],
             [
                 'account_id' => (string) ($accountData['account_id'] ?? str_replace('act_', '', $accountData['id'])),
@@ -216,6 +218,10 @@ class MetaAdsSyncService
                 'account_status' => $accountData['account_status'] ?? null,
             ],
         );
+
+        $profile?->adAccounts()->syncWithoutDetaching([$account->id]);
+
+        return $account;
     }
 
     private function upsertCampaign(AdAccount $account, array $campaignData): Campaign
@@ -262,6 +268,13 @@ class MetaAdsSyncService
         }
     }
 
+    private function markMissingAdSetsDeleted(AdAccount $account, array $adSetIds): void
+    {
+        $account->adSets()
+            ->when($adSetIds !== [], fn ($query) => $query->whereNotIn('id', $adSetIds))
+            ->update(['status' => 'DELETED', 'effective_status' => 'DELETED']);
+    }
+
     private function insightPayload(array $insights): array
     {
         return app(AutomationBudgetService::class)->insightPayload(
@@ -291,11 +304,12 @@ class MetaAdsSyncService
         ];
 
         DB::transaction(function () use (
+            $profile,
             $accountData,
             $campaigns,
             &$counts
         ): void {
-            $account = $this->upsertAccount($accountData);
+            $account = $this->upsertAccount($accountData, $profile);
             $campaignIdsForAccount = [];
 
             $counts['accounts'] = 1;
@@ -322,5 +336,157 @@ class MetaAdsSyncService
         ]);
 
         return $counts;
+    }
+
+    public function syncAccountFromWebhook(T4JamProfile $profile, string $adAccountExternalId): array
+    {
+        $this->warnings = [];
+        $adAccountExternalId = $this->normalizeAdAccountId($adAccountExternalId);
+        $client = $this->client($profile);
+
+        MetaFlowLog::info('webhook account sync started', [
+            'profile_id' => $profile->id,
+            'ad_account_id' => $adAccountExternalId,
+        ]);
+
+        $accountData = $client->adAccount($adAccountExternalId);
+        $campaigns = $client->campaigns($adAccountExternalId);
+        $adSets = $client->accountAdSets($adAccountExternalId);
+        $campaignInsights = collect($this->optionalMetaRequest(
+            fn () => $client->accountCampaignInsights($adAccountExternalId),
+            'Meta webhook campaign insights skipped',
+            ['ad_account_id' => $adAccountExternalId],
+        ))->keyBy('campaign_id');
+        $adSetInsights = collect($this->optionalMetaRequest(
+            fn () => $client->accountAdSetInsights($adAccountExternalId),
+            'Meta webhook ad set insights skipped',
+            ['ad_account_id' => $adAccountExternalId],
+        ))->keyBy('adset_id');
+
+        $counts = DB::transaction(function () use (
+            $profile,
+            $accountData,
+            $campaigns,
+            $adSets,
+            $campaignInsights,
+            $adSetInsights,
+        ): array {
+            $account = $this->upsertAccount($accountData, $profile);
+            $campaignModels = [];
+            $campaignIds = [];
+            $adSetIds = [];
+            $insightCount = 0;
+
+            foreach ($campaigns as $campaignData) {
+                $campaign = $this->upsertCampaign($account, $campaignData);
+                $campaignModels[$campaign->external_id] = $campaign;
+                $campaignIds[] = $campaign->id;
+
+                if ($insights = $campaignInsights->get($campaign->external_id)) {
+                    $campaign->update($this->insightPayload($insights));
+                    $insightCount++;
+                }
+            }
+
+            $this->markMissingCampaignsDeleted($account, $campaignIds);
+
+            foreach ($adSets as $adSetData) {
+                $campaignExternalId = $adSetData['campaign_id'] ?? null;
+                $campaign = $campaignExternalId ? ($campaignModels[$campaignExternalId] ?? null) : null;
+
+                if (! $campaign) {
+                    continue;
+                }
+
+                $adSet = $this->upsertAdSet($account, $campaign, $adSetData);
+                $adSetIds[] = $adSet->id;
+
+                if ($insights = $adSetInsights->get($adSet->external_id)) {
+                    $adSet->update($this->insightPayload($insights));
+                    $insightCount++;
+                }
+            }
+
+            $this->markMissingAdSetsDeleted($account, $adSetIds);
+            $this->reconcileAutomationTasks($profile, $account);
+
+            return [
+                'accounts' => 1,
+                'campaigns' => count($campaignIds),
+                'adsets' => count($adSetIds),
+                'insights' => $insightCount,
+            ];
+        });
+
+        $profile->update([
+            'last_meta_sync_at' => now(),
+            'last_meta_error' => $this->warnings === [] ? null : end($this->warnings),
+        ]);
+
+        MetaFlowLog::info('webhook account sync finished', [
+            'profile_id' => $profile->id,
+            'ad_account_id' => $adAccountExternalId,
+            'campaigns' => $counts['campaigns'],
+            'adsets' => $counts['adsets'],
+            'insights' => $counts['insights'],
+        ]);
+
+        return $counts;
+    }
+
+    private function reconcileAutomationTasks(T4JamProfile $profile, AdAccount $account): void
+    {
+        AutomationTask::query()
+            ->where('user_id', $profile->user_id)
+            ->where('ad_account_id', $account->id)
+            ->with(['campaign', 'adSet'])
+            ->get()
+            ->each(function (AutomationTask $task): void {
+                $target = $task->level === 'adset' ? $task->adSet : $task->campaign;
+
+                if (! $target) {
+                    return;
+                }
+
+                $active = strtoupper((string) $target->status) === 'ACTIVE';
+                $budgetChanged = (int) $task->current_budget !== (int) $target->daily_budget;
+                $statusChanged = (bool) $task->is_active !== $active;
+
+                if (! $budgetChanged && ! $statusChanged) {
+                    return;
+                }
+
+                $changes = ['current_budget' => (int) $target->daily_budget];
+                $messages = [];
+
+                if ($budgetChanged) {
+                    $messages[] = 'Budget disinkronkan dari Meta Ads Manager.';
+                }
+
+                if ($statusChanged) {
+                    $changes += [
+                        'is_active' => $active,
+                        'last_budget_action' => 'meta_sync',
+                    ];
+                    $messages[] = $active
+                        ? 'Status diaktifkan dari Meta Ads Manager.'
+                        : 'Status dipause dari Meta Ads Manager.';
+                }
+
+                $message = implode(' ', $messages);
+                $changes['last_log'] = $message;
+                $task->update($changes);
+                AutomationLog::create([
+                    'automation_task_id' => $task->id,
+                    'messages' => [$message],
+                ]);
+            });
+    }
+
+    private function normalizeAdAccountId(string $adAccountExternalId): string
+    {
+        return str_starts_with($adAccountExternalId, 'act_')
+            ? $adAccountExternalId
+            : 'act_'.$adAccountExternalId;
     }
 }

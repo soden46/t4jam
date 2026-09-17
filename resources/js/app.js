@@ -21,6 +21,8 @@ const safeUrl = (value) => {
 };
 let automationAccounts = [];
 let automationRequest = null;
+let adSetupRequest = null;
+let dashboardRequest = null;
 
 async function request(url, options = {}) {
     const response = await fetch(url, {
@@ -157,6 +159,38 @@ async function initDashboard() {
         renderMetrics(insights.highlight || []);
         renderCampaignTable(insights.summery || []);
         setStat('#campaign_count', (insights.summery || []).length);
+    };
+
+    const refreshFromLocal = async () => {
+        if (dashboardRequest || document.hidden || reloadBtn?.disabled || (accountPickerMenu && !accountPickerMenu.hidden) || qs('.modal:not([hidden])')) return dashboardRequest;
+
+        const selectedBeforeRefresh = accountSelect.value;
+        const selectedBeforeCampaigns = selectedCampaigns();
+        dashboardRequest = (async () => {
+            const freshAccounts = await request('/api/get-ad-account/');
+            if (document.hidden) return;
+
+            accounts = freshAccounts;
+            renderAccountSelect(selectedBeforeRefresh);
+            renderCampaignPicker(selectedBeforeCampaigns);
+            await loadInsights();
+        })();
+
+        try { await dashboardRequest; }
+        finally { dashboardRequest = null; }
+    };
+
+    const startDashboardPolling = () => {
+        const poll = async () => {
+            try { await refreshFromLocal(); }
+            catch { /* The next local poll retries quietly. */ }
+            finally { setTimeout(poll, 5000); }
+        };
+
+        setTimeout(poll, 5000);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) refreshFromLocal().catch(() => {});
+        });
     };
 
     const selectedAccount = () => (accounts.adaccount || []).find((item) => item.id === accountSelect.value);
@@ -312,6 +346,7 @@ async function initDashboard() {
         qs('#automation-submit-label').textContent = 'Create';
         openModal('#automation-modal');
     });
+    startDashboardPolling();
 }
 
 function renderMetrics(metrics) {
@@ -365,9 +400,12 @@ function startAutomationPolling() {
                 await loadAutomationTasks(true);
             }
         } catch { /* A later poll retries without repeated toasts. */ }
-        finally { setTimeout(poll, 45000); }
+        finally { setTimeout(poll, 5000); }
     };
-    setTimeout(poll, 45000);
+    setTimeout(poll, 5000);
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && !qs('.modal:not([hidden])')) loadAutomationTasks(true).catch(() => {});
+    });
 }
 
 async function loadAutomationTasks(background = false) {
@@ -380,7 +418,8 @@ async function loadAutomationTasks(background = false) {
         const acc = qs('#add_account_filter')?.value || 'all';
         const level = qs('#level_filter')?.value || 'all';
         const funnel = qs('#event_tracking_filter')?.value || 'all';
-        const response = await request(`/get-automation-task/?acc=${encodeURIComponent(acc)}&level=${encodeURIComponent(level)}&funnel=${encodeURIComponent(funnel)}`);
+        const localOnly = background === true ? '&local=1' : '';
+        const response = await request(`/get-automation-task/?acc=${encodeURIComponent(acc)}&level=${encodeURIComponent(level)}&funnel=${encodeURIComponent(funnel)}${localOnly}`);
         if (background === true && (document.hidden || qs('.modal:not([hidden])'))) return;
         renderAutomationTable(response.data || []);
         qs('#search_domain')?.dispatchEvent(new Event('input'));
@@ -704,6 +743,153 @@ function renderProducts(rows) {
     }));
 }
 
+function renderAdSetupRows(rows) {
+    const tbody = qs('#ad_setup_table_body');
+    if (!tbody) return;
+
+    if (qs('#ad_setup_total')) qs('#ad_setup_total').textContent = number(rows.length);
+
+    tbody.innerHTML = rows.length ? rows.map((row) => {
+        const badgeClass = {
+            published: 'active',
+            publishing: 'ready',
+            ready: 'ready',
+            failed: 'failed',
+            draft: 'draft',
+        }[row.status] || 'draft';
+        const action = row.status === 'publishing'
+            ? '<span class="muted">Queued</span>'
+            : row.status === 'published'
+                ? '<span class="muted">Done</span>'
+                : `
+                    <form method="POST" action="${escapeHtml(row.publish_url)}" data-ad-setup-publish>
+                        <input type="hidden" name="_token" value="${escapeHtml(csrf())}">
+                        <button class="btn light-primary" type="submit">Publish</button>
+                    </form>
+                `;
+
+        return `
+            <tr>
+                <td data-label="Setup"><strong>${escapeHtml(row.name)}</strong><br><small>${escapeHtml(row.campaign_name)}</small></td>
+                <td data-label="Ad Account">${escapeHtml(row.ad_account)}</td>
+                <td data-label="Status"><span class="badge ${badgeClass}">${escapeHtml(row.status)}</span></td>
+                <td data-label="Meta IDs">
+                    <small>Campaign: ${escapeHtml(row.meta_campaign_id || '-')}</small><br>
+                    <small>Ad Set: ${escapeHtml(row.meta_adset_id || '-')}</small><br>
+                    <small>Ad: ${escapeHtml(row.meta_ad_id || '-')}</small>
+                </td>
+                <td data-label="Last Error">${escapeHtml(row.last_error || '-')}</td>
+                <td data-label="Action">${action}</td>
+            </tr>
+        `;
+    }).join('') : '<tr><td colspan="6" class="center muted">Belum ada setup iklan.</td></tr>';
+}
+
+async function loadAdSetups(background = false) {
+    const tbody = qs('#ad_setup_table_body');
+    if (!tbody) return;
+
+    if (adSetupRequest) {
+        if (background === true) return adSetupRequest;
+        await adSetupRequest.catch(() => {});
+        return loadAdSetups(background);
+    }
+
+    adSetupRequest = (async () => {
+        const response = await request(tbody.dataset.statusUrl || '/setup-iklan/status/');
+        if (background === true && document.hidden) return;
+        renderAdSetupRows(response.setups || []);
+    })();
+
+    try { await adSetupRequest; }
+    finally { adSetupRequest = null; }
+}
+
+function startAdSetupPolling() {
+    const poll = async () => {
+        try {
+            if (!document.hidden) {
+                await loadAdSetups(true);
+            }
+        } catch { /* A later poll retries without distracting the user. */ }
+        finally {
+            const hasPublishing = !!qs('#ad_setup_table_body .badge.ready');
+            setTimeout(poll, hasPublishing ? 5000 : 15000);
+        }
+    };
+
+    setTimeout(poll, 5000);
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) loadAdSetups(true).catch(() => {});
+    });
+}
+
+function bindAdSetupForms() {
+    const form = qs('#ad-setup-form');
+    if (form && !form.dataset.bound) {
+        form.dataset.bound = '1';
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const submit = event.submitter;
+            const originalText = submit?.textContent || '';
+
+            if (submit) {
+                submit.disabled = true;
+                submit.textContent = submit.value === '1' ? 'Queuing...' : 'Saving...';
+            }
+
+            try {
+                const body = formBody(form);
+                if (submit?.name) body.set(submit.name, submit.value || '');
+                const response = await request(form.action, { method: 'POST', body });
+                toast(response.text || 'Setup iklan berhasil disimpan.');
+                form.reset();
+                await loadAdSetups();
+            } catch (error) {
+                toast(error.message, 'danger');
+                await loadAdSetups(true).catch(() => {});
+            } finally {
+                if (submit) {
+                    submit.disabled = false;
+                    submit.textContent = originalText;
+                }
+            }
+        });
+    }
+
+    document.addEventListener('submit', async (event) => {
+        const publishForm = event.target.closest?.('[data-ad-setup-publish]');
+        if (!publishForm) return;
+
+        event.preventDefault();
+        const submit = qs('button[type="submit"]', publishForm);
+        const originalText = submit?.textContent || '';
+        if (submit) {
+            submit.disabled = true;
+            submit.textContent = 'Queuing...';
+        }
+
+        try {
+            const response = await request(publishForm.action, { method: 'POST', body: formBody(publishForm) });
+            toast(response.text || 'Setup iklan diproses di background.');
+            await loadAdSetups();
+        } catch (error) {
+            toast(error.message, 'danger');
+            await loadAdSetups(true).catch(() => {});
+            if (submit) {
+                submit.disabled = false;
+                submit.textContent = originalText;
+            }
+        }
+    });
+}
+
+async function initAdSetups() {
+    bindAdSetupForms();
+    await loadAdSetups();
+    startAdSetupPolling();
+}
+
 function initProfile() {
     qs('#sync-meta-form')?.addEventListener('submit', async (event) => {
         event.preventDefault();
@@ -743,5 +929,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (page() === 'automation') await initAutomation();
     if (page() === 'interest') await initInterest();
     if (page() === 'products') await initProducts();
+    if (page() === 'ad-setups') await initAdSetups();
     if (page() === 'profile') initProfile();
 });

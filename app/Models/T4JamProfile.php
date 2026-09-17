@@ -6,6 +6,7 @@ use App\Casts\MetaCredential;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 #[Fillable(['user_id', 'app_id', 'app_secret', 'access_token', 'meta_user_id', 'meta_user_name', 'meta_connected_at', 'last_meta_sync_at', 'last_meta_error'])]
 class T4JamProfile extends Model
@@ -37,5 +38,11 @@ class T4JamProfile extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function adAccounts(): BelongsToMany
+    {
+        return $this->belongsToMany(AdAccount::class, 'meta_ad_account_profiles', 't4jam_profile_id', 'ad_account_id')
+            ->withTimestamps();
     }
 }

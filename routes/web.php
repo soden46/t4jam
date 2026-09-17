@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AdSetupController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\MetaAdsWebhookController;
 use App\Http\Controllers\T4JamController;
 use Illuminate\Support\Facades\Route;
 
@@ -18,12 +19,16 @@ Route::post('/account/riset-password/', [AuthController::class, 'reset'])->middl
 Route::get('/account/reset-password/{token}', [AuthController::class, 'showNewPassword'])->name('password.reset');
 Route::post('/account/reset-password/', [AuthController::class, 'updateResetPassword'])->middleware('throttle:5,1')->name('password.update');
 
+Route::get('/meta/webhook/', [MetaAdsWebhookController::class, 'verify'])->name('meta.webhook.verify');
+Route::post('/meta/webhook/', [MetaAdsWebhookController::class, 'handle'])->name('meta.webhook.handle');
+
 Route::middleware('t4jam.auth')->group(function () {
     Route::get('/dashboard/', [T4JamController::class, 'dashboard'])->name('dashboard');
     Route::get('/automation-task/', [T4JamController::class, 'automation'])->name('automation');
     Route::get('/interest/', [T4JamController::class, 'interest'])->name('interest');
     Route::get('/riset-produk-toped/', [T4JamController::class, 'products'])->name('products');
     Route::get('/setup-iklan/', [AdSetupController::class, 'index'])->name('ad-setups.index');
+    Route::get('/setup-iklan/status/', [AdSetupController::class, 'status'])->name('ad-setups.status');
     Route::post('/setup-iklan/', [AdSetupController::class, 'store'])->name('ad-setups.store');
     Route::post('/setup-iklan/{adSetup}/publish/', [AdSetupController::class, 'publish'])->name('ad-setups.publish');
     Route::get('/profile/', [T4JamController::class, 'profile'])->name('profile');

@@ -11,7 +11,7 @@
     </div>
     <div class="hero-stats">
         <div>
-            <strong>{{ $setups->count() }}</strong>
+            <strong id="ad_setup_total">{{ $setups->count() }}</strong>
             <span>Total Setup</span>
         </div>
         <div>
@@ -26,7 +26,7 @@
     <div class="alert warning">Meta write mode belum aktif. Publish setup dan update budget hanya tersimpan di aplikasi.</div>
 @endunless
 
-<form method="POST" action="{{ route('ad-setups.store') }}" class="setup-form">
+<form method="POST" action="{{ route('ad-setups.store') }}" class="setup-form" id="ad-setup-form">
     @csrf
     <section class="panel form-section">
         <div class="section-head">
@@ -213,7 +213,7 @@
                     <th>Action</th>
                 </tr>
             </thead>
-            <tbody>
+            <tbody id="ad_setup_table_body" data-status-url="{{ route('ad-setups.status') }}">
                 @forelse ($setups as $setup)
                     @php
                         $badgeClass = match ($setup->status) {
@@ -238,7 +238,7 @@
                             @if ($setup->status === 'publishing')
                                 <span class="muted">Queued</span>
                             @elseif ($setup->status !== 'published')
-                                <form method="POST" action="{{ route('ad-setups.publish', $setup) }}">
+                                <form method="POST" action="{{ route('ad-setups.publish', $setup) }}" data-ad-setup-publish>
                                     @csrf
                                     <button class="btn light-primary" type="submit">Publish</button>
                                 </form>

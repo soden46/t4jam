@@ -15,6 +15,10 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             't4jam.auth' => EnsureT4JamAuthenticated::class,
         ]);
+        $middleware->validateCsrfTokens(except: [
+            'meta/webhook',
+            'meta/webhook/*',
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->dontFlash(['access_token_app', 'kunci_rahasia', 'access_token', 'app_secret']);

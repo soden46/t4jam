@@ -57,7 +57,7 @@ test('polling reads only local tasks, does not overlap, and preserves open edits
         };
         startAutomationPolling();
     });
-    assert.equal(await page.evaluate(() => window.timers[0].delay), 45000);
+    assert.equal(await page.evaluate(() => window.timers[0].delay), 5000);
     await page.evaluate(() => { window.poll = window.timers.shift().callback(); });
     await page.evaluate(() => { window.second = loadAutomationTasks(true); });
     assert.equal(await page.evaluate(() => window.calls.length), 1);
@@ -74,7 +74,7 @@ test('polling reads only local tasks, does not overlap, and preserves open edits
         await window.timers.shift().callback();
     });
     assert.equal(await page.evaluate(() => window.calls.length), 1);
-    assert.ok((await page.evaluate(() => window.calls)).every(url => url.startsWith('/get-automation-task/')));
+    assert.ok((await page.evaluate(() => window.calls)).every(url => url.startsWith('/get-automation-task/') && url.includes('local=1')));
 });
 
 test('failed polling retries quietly and recovers', async () => {
@@ -86,7 +86,7 @@ test('failed polling retries quietly and recovers', async () => {
         await window.timers.shift().callback();
     });
     assert.equal(await page.locator('.toast-lite').count(), 0);
-    assert.equal(await page.evaluate(() => window.timers[0].delay), 45000);
+    assert.equal(await page.evaluate(() => window.timers[0].delay), 5000);
     await page.evaluate(async () => {
         window.fetch = async () => ({ ok: true, json: async () => ({ data: [] }) });
         await window.timers.shift().callback();

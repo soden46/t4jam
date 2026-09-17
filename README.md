@@ -61,6 +61,10 @@ META_GRAPH_VERSION=v23.0
 META_GRAPH_BASE_URL=https://graph.facebook.com
 META_GRAPH_TIMEOUT=45
 META_ADS_ENABLE_WRITES=false
+META_WEBHOOK_VERIFY_TOKEN=buat-token-verifikasi-yang-panjang
+META_WEBHOOK_APP_SECRET=app-secret-meta
+META_WEBHOOK_CALLBACK_URL=https://domain-aplikasi/meta/webhook/
+META_WEBHOOK_FIELDS=campaigns,adsets,ads
 ```
 
 `META_ADS_ENABLE_WRITES=false` artinya publish setup iklan dan update budget/status automation tidak dikirim ke Meta. UI harus memberi warning atau error yang jelas. Aktifkan hanya saat token, permission, dan ad account sudah siap.
@@ -79,6 +83,16 @@ Flow sync dibagi menjadi dua jenis:
 6. Error Meta terakhir disimpan di `t4jam_profiles.last_meta_error` dan ditampilkan di Profile.
 
 Quick reload sengaja dipisahkan dari full sync untuk mengurangi jumlah request ke Meta Graph API dan menghindari rate limit ketika user hanya membutuhkan daftar campaign terbaru.
+
+Perubahan dari Ads Manager masuk lewat webhook `ad_account`. Endpoint memverifikasi `X-Hub-Signature-256`, lalu queue `meta` mengambil snapshot account/campaign/ad set dan insights untuk account yang berubah. Dashboard dan Automation mem-poll database lokal setiap 5 detik, sehingga tab aktif ikut berubah tanpa refresh dan tanpa menambah request Graph API dari browser.
+
+Setelah deploy, daftar callback app dan subscribe seluruh ad account yang bisa diakses profile:
+
+```bash
+php artisan t4jam:configure-meta-webhook --profile_id=1
+```
+
+Callback harus HTTPS publik. Worker queue `meta` wajib aktif. Jalankan ulang command saat app Meta atau kumpulan ad account berubah.
 
 ### Auto Sync
 
@@ -237,9 +251,9 @@ App\Models\AutomationTask::whereNull('user_id')->get(['id', 'campaign_external_i
 App\Models\AutomationTask::whereKey('TASK_UUID')->whereNull('user_id')->update(['user_id' => OWNER_USER_ID]);
 ```
 
-Token setiap user wajib disimpan pada profile sendiri. Schema akun/campaign/adset masih global; isolasi penuh katalog tersebut adalah follow-up. Task baru dan job automation/publish sudah memeriksa owner. Tidak ada fallback credential lintas user.
+Token setiap user wajib disimpan pada profile sendiri. Schema akun/campaign/adset masih global; tabel pivot `meta_ad_account_profiles` dipakai untuk mengarahkan event webhook ke credential profile yang memang pernah menyinkronkan account tersebut. Isolasi penuh katalog masih merupakan follow-up. Task baru dan job automation/publish sudah memeriksa owner. Tidak ada fallback credential lintas user.
 
-Dashboard menyimpan hasil per conversion dari full sync; jalankan full sync profile setelah migration untuk mengisi hasil Lead/ATC/Checkout/WhatsApp. Data lama hanya punya Purchase generic. Automation memakai snapshot task dan polling lokal setiap 45 detik, tanpa Meta call; tab hidden/modal terbuka menunda polling.
+Dashboard menyimpan hasil per conversion dari full sync; jalankan full sync profile setelah migration untuk mengisi hasil Lead/ATC/Checkout/WhatsApp. Data lama hanya punya Purchase generic. Dashboard dan Automation memakai polling database lokal 5 detik; tab hidden/modal terbuka menunda polling. Initial Automation load tetap boleh menyegarkan insights dari Meta, sedangkan polling background mengirim `local=1` dan tidak melakukan Meta call.
 
 ### Manual server check
 
@@ -249,6 +263,7 @@ php artisan schedule:list
 crontab -l
 supervisorctl status
 php artisan queue:failed
+php artisan t4jam:configure-meta-webhook --profile_id=1
 php artisan t4jam:sync-meta-ads --profile_id=1
 php artisan t4jam:enforce-automation
 tail -f storage/logs/laravel.log

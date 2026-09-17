@@ -117,25 +117,35 @@ class AutomationBudgetService
                                 $pauseStateQuery
                                     ->where('last_budget_action', 'pause');
                             });
+                    })
+                    ->orWhere(function ($scheduleQuery): void {
+                        $scheduleQuery
+                            ->where('is_active', false)
+                            ->where('use_on_off', true)
+                            ->where(function ($pauseStateQuery): void {
+                                $pauseStateQuery
+                                    ->where('last_budget_action', 'schedule_pause');
+                            });
                     });
             })
             ->get();
 
         if ($refreshMetrics) {
             $tasks = $tasks
-                ->filter(function (AutomationTask $task) use ($profile): bool {
-                    if (! $this->isDue($task) || ! $this->isWithinAutomationWindow($task)) {
-                        $this->logEvaluation($profile, $task, 'none', 'not_due_or_outside_window');
+                ->filter(function (AutomationTask $task) use ($profile, $client): bool {
+                    if (! $this->isDue($task)) {
+                        $this->logEvaluation($profile, $task, 'none', 'not_due');
 
                         return false;
                     }
 
-                    return true;
+                    return $this->applyScheduledStatusIfNeeded($task, $client, $profile);
                 })
                 ->values();
         }
 
-        $freshTargets = $refreshMetrics ? $this->refreshMetrics($tasks, $client, $profile) : $syncedTargets;
+        $datePreset = config('services.meta.automation_enforcement_insights_date_preset', 'today');
+        $freshTargets = $refreshMetrics ? $this->refreshMetrics($tasks, $client, $profile, $datePreset) : $syncedTargets;
 
         $tasks
             ->each(function (AutomationTask $task) use ($profile, $client, $freshTargets, &$paused): void {
@@ -152,6 +162,8 @@ class AutomationBudgetService
                     }
 
                     if (! $this->isWithinAutomationWindow($task)) {
+                        $reason = 'outside_automation_window';
+
                         return;
                     }
 
@@ -278,12 +290,115 @@ class AutomationBudgetService
 
                     $paused++;
                 } finally {
-                    $action = ($task->last_budget_action !== $beforeAction || ($task->last_budget_action === 'increase' && $beforeLog !== $task->last_log)) && in_array($task->last_budget_action, ['pause', 'resume', 'increase'], true) ? $task->last_budget_action : 'none';
+                    $action = ($task->last_budget_action !== $beforeAction || ($task->last_budget_action === 'increase' && $beforeLog !== $task->last_log)) && in_array($task->last_budget_action, ['pause', 'resume', 'increase', 'schedule_pause', 'schedule_resume'], true) ? $task->last_budget_action : 'none';
                     $this->logEvaluation($profile, $task, $action, $action === 'none' ? $reason : null);
                 }
             });
 
         return $paused;
+    }
+
+    private function applyScheduledStatusIfNeeded(
+        AutomationTask $task,
+        MetaAdsClient $client,
+        T4JamProfile $profile,
+    ): bool {
+        if (! $task->use_on_off) {
+            return true;
+        }
+
+        $target = $this->target($task);
+
+        if (! $target) {
+            $this->logEvaluation($profile, $task, 'none', 'target_missing');
+
+            return false;
+        }
+
+        if (! $this->isWithinAutomationWindow($task)) {
+            if ($task->is_active) {
+                $this->setScheduledStatus($task, $target, $client, $profile, false);
+            } else {
+                $this->logEvaluation($profile, $task, 'none', 'outside_automation_window');
+            }
+
+            return false;
+        }
+
+        if (! $task->is_active && $task->last_budget_action === 'schedule_pause') {
+            return $this->setScheduledStatus($task, $target, $client, $profile, true);
+        }
+
+        return true;
+    }
+
+    private function setScheduledStatus(
+        AutomationTask $task,
+        Campaign|AdSet $target,
+        MetaAdsClient $client,
+        T4JamProfile $profile,
+        bool $active,
+    ): bool {
+        if (! config('services.meta.enable_writes')) {
+            $this->logEvaluation($profile, $task, 'none', 'writes_disabled');
+
+            return false;
+        }
+
+        try {
+            if ($task->level === 'adset') {
+                $client->updateAdSetStatus($target->external_id, $active);
+            } else {
+                $client->updateCampaignStatus($target->external_id, $active);
+            }
+        } catch (MetaAdsException $exception) {
+            MetaFlowLog::warning('automation schedule status update failed', [
+                'profile_id' => $profile->id,
+                'automation_task_id' => $task->id,
+                'target_id' => $target->external_id,
+                'active' => $active,
+                'http_status' => $exception->httpStatus,
+                'meta_code' => $exception->metaCode,
+            ]);
+
+            $this->logEvaluation($profile, $task, 'none', 'schedule_status_update_failed');
+
+            return false;
+        }
+
+        $action = $active ? 'schedule_resume' : 'schedule_pause';
+        $message = $active
+            ? sprintf(
+                'Campaign otomatis diaktifkan kembali karena sudah masuk jam aktif %s-%s.',
+                substr((string) $task->on_time, 0, 5),
+                substr((string) $task->off_time, 0, 5),
+            )
+            : sprintf(
+                'Campaign otomatis dipause karena sudah di luar jam aktif %s-%s.',
+                substr((string) $task->on_time, 0, 5),
+                substr((string) $task->off_time, 0, 5),
+            );
+
+        DB::transaction(function () use ($task, $target, $active, $action, $message): void {
+            $target->update([
+                'status' => $active ? 'ACTIVE' : 'PAUSED',
+                'effective_status' => $active ? 'ACTIVE' : 'PAUSED',
+            ]);
+            $task->update([
+                'is_active' => $active,
+                'last_log' => $message,
+                'last_checked_at' => now(),
+                'last_budget_action' => $action,
+            ]);
+            AutomationLog::create([
+                'automation_task_id' => $task->id,
+                'messages' => [$message],
+            ]);
+        });
+
+        $this->logEvaluation($profile, $task->fresh(), $action, null);
+
+        return $active;
     }
 
     private function resumeTaskIfEligible(

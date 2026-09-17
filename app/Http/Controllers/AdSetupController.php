@@ -9,6 +9,7 @@ use App\Models\AdSetup;
 use App\Models\T4JamProfile;
 use App\Services\MetaAdSetupPublisher;
 use App\Support\MetaFlowLog;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -18,18 +19,28 @@ class AdSetupController extends Controller
 {
     public function index(): View
     {
+        $setups = $this->setupQuery()->get();
+
         return view('ad-setups.index', [
             'title' => 'Setup Iklan',
             'accounts' => AdAccount::query()->latest('updated_at')->latest('id')->get(),
-            'setups' => AdSetup::with('adAccount')
-                ->where('user_id', Auth::id())
-                ->latest()
-                ->get(),
+            'setups' => $setups,
             'metaWritesEnabled' => config('services.meta.enable_writes'),
         ]);
     }
 
-    public function store(Request $request, MetaAdSetupPublisher $publisher): RedirectResponse
+    public function status(): JsonResponse
+    {
+        $setups = $this->setupQuery()->get();
+
+        return response()->json([
+            'status' => 200,
+            'total_setup' => $setups->count(),
+            'setups' => $setups->map(fn (AdSetup $setup) => $this->setupPayload($setup))->values(),
+        ]);
+    }
+
+    public function store(Request $request, MetaAdSetupPublisher $publisher): RedirectResponse|JsonResponse
     {
         $data = $request->validate([
             'ad_account_id' => ['required', 'exists:ad_accounts,id'],
@@ -72,25 +83,41 @@ class AdSetupController extends Controller
                 'ad_account_id' => $setup->adAccount?->external_id,
             ]);
 
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'status' => 200,
+                    'text' => 'Draft setup iklan berhasil disimpan.',
+                    'setup' => $this->setupPayload($setup->load('adAccount')),
+                ]);
+            }
+
             return redirect()->route('ad-setups.index')->with('status', 'Draft setup iklan berhasil disimpan.');
         }
 
-        return $this->publishOrQueue($setup, $publisher);
+        return $this->publishOrQueue($request, $setup, $publisher);
     }
 
-    public function publish(AdSetup $adSetup, MetaAdSetupPublisher $publisher): RedirectResponse
+    public function publish(Request $request, AdSetup $adSetup, MetaAdSetupPublisher $publisher): RedirectResponse|JsonResponse
     {
         abort_unless($adSetup->user_id === Auth::id(), 403);
 
         if ($adSetup->status === 'published') {
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'status' => 200,
+                    'text' => 'Setup iklan sudah dipublish.',
+                    'setup' => $this->setupPayload($adSetup->load('adAccount')),
+                ]);
+            }
+
             return redirect()->route('ad-setups.index')->with('status', 'Setup iklan sudah dipublish.');
         }
         $adSetup->update(['status' => 'publishing', 'last_error' => null]);
 
-        return $this->publishOrQueue($adSetup, $publisher);
+        return $this->publishOrQueue($request, $adSetup, $publisher);
     }
 
-    private function publishOrQueue(AdSetup $setup, MetaAdSetupPublisher $publisher): RedirectResponse
+    private function publishOrQueue(Request $request, AdSetup $setup, MetaAdSetupPublisher $publisher): RedirectResponse|JsonResponse
     {
         try {
             $profile = T4JamProfile::usableForUser(Auth::id());
@@ -102,6 +129,14 @@ class AdSetupController extends Controller
                     'profile_id' => $profile->id,
                     'ad_setup_id' => $setup->id,
                 ]);
+
+                if ($request->expectsJson()) {
+                    return response()->json([
+                        'status' => 200,
+                        'text' => 'Setup iklan sudah siap. Publish ke Meta belum dijalankan karena write mode belum aktif.',
+                        'setup' => $this->setupPayload($setup->fresh('adAccount')),
+                    ]);
+                }
 
                 return redirect()->route('ad-setups.index')->with('warning', 'Setup iklan sudah siap. Publish ke Meta belum dijalankan karena write mode belum aktif.');
             }
@@ -115,10 +150,18 @@ class AdSetupController extends Controller
                     'ad_setup_id' => $setup->id,
                 ]);
 
+                if ($request->expectsJson()) {
+                    return response()->json([
+                        'status' => 422,
+                        'text' => $message,
+                        'setup' => $this->setupPayload($setup->fresh('adAccount')),
+                    ], 422);
+                }
+
                 return redirect()->route('ad-setups.index')->withErrors(['meta' => $message]);
             }
 
-            PublishMetaAdSetup::dispatch($setup->id, $profile->id)->afterCommit();
+            PublishMetaAdSetup::dispatch($setup->id, $profile->id)->afterResponse();
             MetaFlowLog::info('ad setup publish queued', [
                 'user_id' => Auth::id(),
                 'profile_id' => $profile->id,
@@ -130,10 +173,49 @@ class AdSetupController extends Controller
             $setup->update(['status' => 'failed', 'last_error' => $message]);
             $this->reportMetaPublishFailure($exception, $setup);
 
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'status' => 422,
+                    'text' => $message,
+                    'setup' => $this->setupPayload($setup->fresh('adAccount')),
+                ], 422);
+            }
+
             return redirect()->route('ad-setups.index')->withErrors(['meta' => $message]);
         }
 
+        if ($request->expectsJson()) {
+            return response()->json([
+                'status' => 200,
+                'text' => 'Setup iklan diproses di background.',
+                'setup' => $this->setupPayload($setup->fresh('adAccount')),
+            ]);
+        }
+
         return redirect()->route('ad-setups.index')->with('status', 'Setup iklan masuk antrean queue. Worker akan publish ke Meta di background.');
+    }
+
+    private function setupQuery()
+    {
+        return AdSetup::with('adAccount')
+            ->where('user_id', Auth::id())
+            ->latest();
+    }
+
+    private function setupPayload(AdSetup $setup): array
+    {
+        return [
+            'id' => $setup->id,
+            'name' => $setup->name,
+            'campaign_name' => $setup->campaign_name,
+            'ad_account' => $setup->adAccount?->name ?? '-',
+            'status' => $setup->status,
+            'meta_campaign_id' => $setup->meta_campaign_id,
+            'meta_adset_id' => $setup->meta_adset_id,
+            'meta_ad_id' => $setup->meta_ad_id,
+            'last_error' => $setup->last_error,
+            'publish_url' => route('ad-setups.publish', $setup),
+        ];
     }
 
     private function payload(array $data): array

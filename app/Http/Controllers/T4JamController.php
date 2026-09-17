@@ -20,11 +20,11 @@ use App\Support\MetaFlowLog;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Collection;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
@@ -272,8 +272,7 @@ class T4JamController extends Controller
         Request $request,
         AutomationBudgetService $automation,
         MetaAdsSyncService $metaSync
-    ): JsonResponse
-    {
+    ): JsonResponse {
         $tasks = AutomationTask::where('user_id', Auth::id())->with(['adAccount', 'campaign', 'adSet'])
             ->when($request->query('acc') && $request->query('acc') !== 'all', fn ($query) => $query->whereHas('adAccount', fn ($account) => $account->where('external_id', $request->query('acc'))))
             ->when($request->query('level') && $request->query('level') !== 'all', fn ($query) => $query->where('level', $request->query('level')))
@@ -387,8 +386,11 @@ class T4JamController extends Controller
         }
 
         $budgetChanged = $budget !== (int) $task->starting_budget;
+        $requestedActive = $this->automationActive($request);
+        $statusChanged = $requestedActive !== (bool) $task->is_active;
         $baseMessage = 'Automation strategy berhasil diupdate';
-        $metaPushed = false;
+        $metaBudgetPushed = false;
+        $metaStatusPushed = false;
         $target = $task->level === 'adset'
             ? ($task->adSet ?? $task->ad_set_external_id)
             : ($task->campaign ?? $task->campaign_external_id);
@@ -400,23 +402,53 @@ class T4JamController extends Controller
                     return response()->json(['status' => 422, 'text' => $metaResult['text']], 422);
                 }
             } else {
-                $metaPushed = true;
+                $metaBudgetPushed = true;
             }
-
         }
 
+        if ($statusChanged) {
+            $metaResult = $this->pushMetaStatus($task, $requestedActive, $metaSync);
+            if (! $metaResult['ok']) {
+                if ($budgetChanged && $metaBudgetPushed) {
+                    DB::transaction(function () use ($task, $target, $budget): void {
+                        $this->persistLocalBudget($target, $budget, $task->level);
+                        $task->update([
+                            'starting_budget' => $budget,
+                            'current_budget' => $budget,
+                            'last_budget_changed_at' => now(),
+                            'last_budget_before' => $task->current_budget,
+                            'last_budget_action' => 'manual',
+                            'last_log' => 'Budget Meta berhasil diupdate, tetapi perubahan status gagal.',
+                        ]);
+                    });
+                }
+
+                return response()->json(['status' => 422, 'text' => $metaResult['text']], 422);
+            }
+
+            $metaStatusPushed = true;
+        }
+
+        $metaPushed = $metaBudgetPushed || $metaStatusPushed;
         $logMessage = $metaPushed ? $baseMessage.'; Meta berhasil diupdate.' : $baseMessage;
 
-        DB::transaction(function () use ($request, $task, $target, $logMessage, $budgetChanged, $budget): void {
+        DB::transaction(function () use ($request, $task, $target, $logMessage, $budgetChanged, $budget, $requestedActive, $statusChanged): void {
             if ($budgetChanged) {
                 $this->persistLocalBudget($target, $budget, $task->level);
+            }
+
+            if ($statusChanged && ($target instanceof Campaign || $target instanceof AdSet)) {
+                $target->update([
+                    'status' => $requestedActive ? 'ACTIVE' : 'PAUSED',
+                    'effective_status' => $requestedActive ? 'ACTIVE' : 'PAUSED',
+                ]);
             }
 
             $taskData = $this->automationPayload($request) + [
                 'last_log' => $logMessage,
                 'last_checked_at' => null,
                 'last_budget_action' => 'manual',
-                'is_active' => $this->automationActive($request),
+                'is_active' => $requestedActive,
             ] + ($budgetChanged ? [
                 'current_budget' => $budget,
                 'last_budget_changed_at' => now(),
@@ -865,6 +897,10 @@ class T4JamController extends Controller
         AutomationBudgetService $automation,
         MetaAdsSyncService $metaSync
     ): array {
+        if ($request->boolean('local')) {
+            return ['attempted' => false, 'updated' => 0, 'reason' => 'local_only'];
+        }
+
         if ($tasks->isEmpty()) {
             return ['attempted' => false, 'updated' => 0, 'reason' => 'empty'];
         }

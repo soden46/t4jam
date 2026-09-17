@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Jobs\PublishMetaAdSetup;
+use App\Jobs\SyncMetaAdsAccount;
 use App\Jobs\SyncMetaAdsProfile;
 use App\Models\AdAccount;
 use App\Models\AdSet;
@@ -15,6 +16,7 @@ use App\Services\AutomationBudgetService;
 use App\Services\MetaAdsSyncService;
 use App\Support\MetaFlowLog;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
@@ -468,7 +470,7 @@ class ExampleTest extends TestCase
     public function test_automation_task_endpoint_refreshes_display_metrics_from_meta(): void
     {
         $this->seed(TestDataSeeder::class);
-        \Illuminate\Support\Facades\Cache::flush();
+        Cache::flush();
         $user = User::firstOrFail();
         $this->actingAs($user);
         T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
@@ -890,6 +892,182 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('campaigns', ['external_id' => 'cmp_456', 'name' => 'Manual Campaign']);
     }
 
+    public function test_meta_webhook_verification_requires_matching_token(): void
+    {
+        config(['services.meta.webhook_verify_token' => 'verify-me']);
+
+        $this->get('/meta/webhook/?hub_mode=subscribe&hub_verify_token=wrong&hub_challenge=123')
+            ->assertForbidden();
+        $this->get('/meta/webhook/?hub_mode=subscribe&hub_verify_token=verify-me&hub_challenge=123')
+            ->assertOk()
+            ->assertSeeText('123');
+    }
+
+    public function test_signed_meta_webhook_queues_account_sync_for_linked_profile(): void
+    {
+        Queue::fake();
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], [
+            'access_token' => 'token',
+            'app_secret' => 'webhook-secret',
+        ]);
+        $account = AdAccount::firstOrFail();
+        $profile->adAccounts()->syncWithoutDetaching([$account->id]);
+        $body = json_encode([
+            'object' => 'ad_account',
+            'entry' => [[
+                'id' => str_replace('act_', '', $account->external_id),
+                'changes' => [['field' => 'campaigns'], ['field' => 'adsets']],
+            ]],
+        ], JSON_THROW_ON_ERROR);
+        $signature = 'sha256='.hash_hmac('sha256', $body, 'webhook-secret');
+
+        $this->call('POST', '/meta/webhook/', [], [], [], [
+            'CONTENT_TYPE' => 'application/json',
+            'HTTP_X_HUB_SIGNATURE_256' => $signature,
+        ], $body)
+            ->assertOk()
+            ->assertJson(['status' => 'received', 'queued' => 1]);
+
+        Queue::assertPushed(SyncMetaAdsAccount::class, fn (SyncMetaAdsAccount $job) => $job->profileId === $profile->id
+            && $job->adAccountExternalId === $account->external_id
+            && $job->queue === 'meta');
+    }
+
+    public function test_meta_webhook_rejects_invalid_signature_without_queueing(): void
+    {
+        Queue::fake();
+        config(['services.meta.webhook_app_secret' => 'webhook-secret']);
+
+        $this->withHeader('X-Hub-Signature-256', 'sha256=invalid')
+            ->postJson('/meta/webhook/', ['object' => 'ad_account', 'entry' => []])
+            ->assertUnauthorized();
+
+        Queue::assertNothingPushed();
+    }
+
+    public function test_webhook_account_sync_reconciles_meta_budget_and_status_locally(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $task = AutomationTask::query()->where('user_id', $user->id)->where('level', 'campaign')->with(['campaign.adAccount'])->firstOrFail();
+        $campaign = $task->campaign;
+        $account = $campaign->adAccount;
+        $task->update(['is_active' => true, 'current_budget' => 100000, 'last_budget_action' => 'manual']);
+
+        Http::fake(function ($request) use ($account, $campaign) {
+            $url = $request->url();
+
+            if (str_contains($url, '/'.$account->external_id.'/campaigns')) {
+                return Http::response(['data' => [[
+                    'id' => $campaign->external_id,
+                    'name' => $campaign->name,
+                    'status' => 'PAUSED',
+                    'effective_status' => 'PAUSED',
+                    'daily_budget' => '210000',
+                    'objective' => 'OUTCOME_SALES',
+                ]]]);
+            }
+
+            if (str_contains($url, '/'.$account->external_id.'/adsets')) {
+                return Http::response(['data' => []]);
+            }
+
+            if (str_contains($url, '/'.$account->external_id.'/insights')) {
+                return Http::response(['data' => $request['level'] === 'campaign' ? [[
+                    'campaign_id' => $campaign->external_id,
+                    'spend' => '45000',
+                    'reach' => '1000',
+                    'inline_link_clicks' => '20',
+                    'actions' => [['action_type' => 'purchase', 'value' => '3']],
+                ]] : []]);
+            }
+
+            if (str_contains($url, '/'.$account->external_id)) {
+                return Http::response([
+                    'account_id' => $account->account_id,
+                    'id' => $account->external_id,
+                    'name' => $account->name,
+                    'currency' => $account->currency,
+                    'account_status' => 1,
+                ]);
+            }
+
+            return Http::response([], 404);
+        });
+
+        (new SyncMetaAdsAccount($profile->id, $account->external_id))
+            ->handle(app(MetaAdsSyncService::class));
+
+        $this->assertDatabaseHas('campaigns', [
+            'id' => $campaign->id,
+            'status' => 'PAUSED',
+            'daily_budget' => 210000,
+            'spend' => 45000,
+            'result' => 3,
+        ]);
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame(210000, $task->fresh()->current_budget);
+        $this->assertSame('meta_sync', $task->fresh()->last_budget_action);
+        $this->assertTrue($profile->fresh()->adAccounts->contains($account));
+        Http::assertSentCount(5);
+    }
+
+    public function test_automation_background_refresh_reads_local_database_only(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        Http::fake();
+
+        $this->getJson('/get-automation-task/?acc=all&level=all&funnel=all&local=1')
+            ->assertOk()
+            ->assertJsonPath('meta_sync.reason', 'local_only');
+
+        Http::assertNothingSent();
+    }
+
+    public function test_configure_meta_webhook_command_registers_app_and_ad_account(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $account = AdAccount::firstOrFail();
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], [
+            'app_id' => 'app-123',
+            'app_secret' => 'secret-123',
+            'access_token' => 'token-123',
+        ]);
+        config([
+            'services.meta.webhook_verify_token' => 'verify-123',
+            'services.meta.webhook_callback_url' => 'https://example.test/meta/webhook/',
+            'services.meta.webhook_fields' => ['campaigns', 'adsets', 'ads'],
+        ]);
+        Http::fake([
+            'graph.facebook.com/*/app-123/subscriptions' => Http::response(['success' => true]),
+            'graph.facebook.com/*/me/adaccounts?*' => Http::response(['data' => [[
+                'account_id' => $account->account_id,
+                'id' => $account->external_id,
+                'name' => $account->name,
+            ]]]),
+            'graph.facebook.com/*/me/businesses?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/'.$account->external_id.'/subscribed_apps' => Http::response(['success' => true]),
+        ]);
+
+        $this->artisan('t4jam:configure-meta-webhook', ['--profile_id' => $profile->id])
+            ->expectsOutput('Webhook Meta aktif untuk 1 ad account.')
+            ->assertExitCode(0);
+
+        $this->assertTrue($profile->fresh()->adAccounts->contains($account));
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/app-123/subscriptions')
+            && $request['object'] === 'ad_account'
+            && $request['fields'] === 'campaigns,adsets,ads');
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$account->external_id.'/subscribed_apps')
+            && $request['app_id'] === 'app-123');
+    }
+
     public function test_meta_flow_logs_use_searchable_tag(): void
     {
         Log::spy();
@@ -1077,7 +1255,8 @@ class ExampleTest extends TestCase
 
         Http::assertSentCount(1);
         Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$account->external_id.'/insights')
-            && $request['level'] === 'campaign');
+            && $request['level'] === 'campaign'
+            && $request['date_preset'] === 'today');
         $tasks->each(fn (AutomationTask $task) => $this->assertSame(3, $task->fresh()->current_result));
     }
 
@@ -1229,7 +1408,7 @@ class ExampleTest extends TestCase
             && $request['status'] === 'ACTIVE');
     }
 
-    public function test_on_off_window_skips_meta_evaluation_outside_bot_hours(): void
+    public function test_on_off_window_pauses_and_resumes_campaign_on_schedule(): void
     {
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
@@ -1246,12 +1425,43 @@ class ExampleTest extends TestCase
             'last_checked_at' => now()->subMinutes(11),
         ]);
 
-        Http::fake();
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true]),
+        ]);
 
         $this->artisan('t4jam:enforce-automation')->assertExitCode(0);
 
-        Http::assertNothingSent();
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame('schedule_pause', $task->fresh()->last_budget_action);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign->external_id)
+            && $request['status'] === 'PAUSED');
+
+        $this->travel(11)->minutes();
+        $task->refresh()->update([
+            'on_time' => now('Asia/Jakarta')->subHour()->format('H:i'),
+            'off_time' => now('Asia/Jakarta')->addHour()->format('H:i'),
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true]),
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign->external_id,
+                    'spend' => '10000',
+                    'actions' => [['action_type' => $task->conversion, 'value' => '1']],
+                ]],
+            ]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertExitCode(0);
+
         $this->assertTrue($task->fresh()->is_active);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign->external_id)
+            && $request['status'] === 'ACTIVE');
     }
 
     public function test_meta_conversion_metric_is_synced_even_when_pause_action_is_off(): void
@@ -1439,6 +1649,45 @@ class ExampleTest extends TestCase
             'status' => 'draft',
             'daily_budget' => 125000,
         ]);
+    }
+
+    public function test_ad_setup_status_endpoint_returns_current_owner_rows(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        $accountId = AdAccount::firstOrFail()->id;
+        $this->postJson('/setup-iklan/', $this->adSetupPayload($accountId, ['publish' => 0]))
+            ->assertOk()
+            ->assertJsonPath('setup.status', 'draft');
+
+        $this->getJson('/setup-iklan/status/')
+            ->assertOk()
+            ->assertJsonPath('total_setup', 1)
+            ->assertJsonPath('setups.0.name', 'Setup Test')
+            ->assertJsonPath('setups.0.status', 'draft')
+            ->assertJsonPath('setups.0.ad_account', AdAccount::firstOrFail()->name);
+    }
+
+    public function test_ad_setup_ajax_publish_queues_without_waiting_for_meta_publish(): void
+    {
+        Queue::fake();
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => true]);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $account = AdAccount::firstOrFail();
+
+        $this->postJson('/setup-iklan/', $this->adSetupPayload($account->id, ['publish' => 1]))
+            ->assertOk()
+            ->assertJsonPath('text', 'Setup iklan diproses di background.')
+            ->assertJsonPath('setup.status', 'publishing');
+
+        Queue::assertPushed(PublishMetaAdSetup::class, fn (PublishMetaAdSetup $job) => $job->queue === 'meta');
+        $this->assertSame('publishing', AdSetup::where('name', 'Setup Test')->firstOrFail()->status);
     }
 
     public function test_ad_setup_publish_creates_meta_campaign_adset_creative_and_ad(): void

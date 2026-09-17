@@ -86,6 +86,14 @@ class MetaAdsClient
         ]);
     }
 
+    public function accountAdSets(string $adAccountId): array
+    {
+        return $this->paginate("/{$adAccountId}/adsets", [
+            'fields' => 'id,name,status,effective_status,daily_budget,campaign_id',
+            'limit' => 100,
+        ]);
+    }
+
     public function adSetInsights(string $adSetId, ?string $datePreset = null): array
     {
         $response = $this->get("/{$adSetId}/insights", [
@@ -142,6 +150,27 @@ class MetaAdsClient
     public function createAd(string $adAccountId, array $payload): array
     {
         return $this->post("/{$adAccountId}/ads", $payload);
+    }
+
+    public function subscribeAdAccount(string $adAccountId, string $appId): array
+    {
+        return $this->post("/{$adAccountId}/subscribed_apps", ['app_id' => $appId]);
+    }
+
+    public static function configureWebhookSubscription(
+        string $appId,
+        string $appSecret,
+        string $callbackUrl,
+        string $verifyToken,
+        array $fields,
+    ): array {
+        return (new self($appId.'|'.$appSecret))->post("/{$appId}/subscriptions", [
+            'object' => 'ad_account',
+            'callback_url' => $callbackUrl,
+            'verify_token' => $verifyToken,
+            'fields' => implode(',', $fields),
+            'include_values' => true,
+        ]);
     }
 
     public static function exchangeLongLivedToken(string $appId, string $appSecret, string $shortLivedToken): string
