@@ -6,6 +6,7 @@ use App\Exceptions\MetaAdsException;
 use App\Models\AdAccount;
 use App\Models\T4JamProfile;
 use App\Services\MetaAdsClient;
+use App\Support\MetaFlowLog;
 use Illuminate\Console\Command;
 
 class ConfigureMetaAdsWebhook extends Command
@@ -47,6 +48,8 @@ class ConfigureMetaAdsWebhook extends Command
 
             $client = new MetaAdsClient((string) $profile->access_token);
             $accounts = $client->adAccounts();
+            $subscribed = 0;
+            $skipped = 0;
 
             foreach ($accounts as $accountData) {
                 $externalId = (string) ($accountData['id'] ?? '');
@@ -54,7 +57,23 @@ class ConfigureMetaAdsWebhook extends Command
                     continue;
                 }
 
-                $client->subscribeAdAccount($externalId, (string) $profile->app_id);
+                try {
+                    $client->subscribeAdAccount($externalId, (string) $profile->app_id);
+                } catch (MetaAdsException $exception) {
+                    $skipped++;
+                    $this->warn("Ad account {$externalId} dilewati: {$exception->getMessage()}");
+                    MetaFlowLog::warning('meta webhook ad account subscription skipped', [
+                        'profile_id' => $profile->id,
+                        'ad_account_id' => $externalId,
+                        'http_status' => $exception->httpStatus,
+                        'meta_code' => $exception->metaCode,
+                        'meta_type' => $exception->metaType,
+                    ]);
+
+                    continue;
+                }
+
+                $subscribed++;
                 $account = AdAccount::query()->where('external_id', $externalId)->first();
                 if ($account) {
                     $profile->adAccounts()->syncWithoutDetaching([$account->id]);
@@ -66,7 +85,10 @@ class ConfigureMetaAdsWebhook extends Command
             return self::FAILURE;
         }
 
-        $this->info(sprintf('Webhook Meta aktif untuk %d ad account.', count($accounts)));
+        $this->info(sprintf('Webhook Meta aktif untuk %d ad account.', $subscribed));
+        if ($skipped > 0) {
+            $this->warn(sprintf('%d ad account dilewati karena Meta menolak subscribe webhook.', $skipped));
+        }
 
         return self::SUCCESS;
     }

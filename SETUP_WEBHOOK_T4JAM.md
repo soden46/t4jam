@@ -126,6 +126,15 @@ Output sukses:
 Webhook Meta aktif untuk N ad account.
 ```
 
+Jika ada ad account yang ditolak Meta saat subscribe webhook, command tetap lanjut untuk account lain dan menampilkan warning:
+
+```text
+Ad account act_xxx dilewati: Permission Meta tidak mencukupi.
+N ad account dilewati karena Meta menolak subscribe webhook.
+```
+
+Kasus ini biasanya terjadi saat user/token punya akses ke banyak ad account, tetapi sebagian account tidak memberi permission yang cukup untuk subscribe webhook. Account yang sukses tetap disimpan ke relasi profile, sedangkan account yang gagal bisa dibereskan permission-nya belakangan lalu command dijalankan ulang.
+
 Jalankan ulang command ini jika:
 
 - App Meta berubah.
@@ -135,33 +144,65 @@ Jalankan ulang command ini jika:
 
 ## 6. Setup Manual di Meta Developer Dashboard
 
-Jika ingin cek atau setup manual:
+Jika ingin cek atau setup manual lewat halaman Meta Developer:
 
-1. Buka `https://developers.facebook.com/`.
+1. Buka `https://developers.facebook.com/apps/`.
 2. Pilih Meta App yang dipakai T4Jam.
-3. Buka product `Webhooks`.
-4. Pilih object `ad_account`.
-5. Isi callback URL:
+3. Cocokkan App ID di dashboard Meta dengan App ID yang tersimpan di profile T4Jam.
+4. Buka product `Webhooks`.
+5. Pada daftar object/produk webhook, pilih `Ad Account`.
+
+Jangan pilih `User` untuk kebutuhan sync campaign/ad set/ad T4Jam. Object yang dibutuhkan adalah `Ad Account`.
+
+Setelah `Ad Account` terpilih, isi form konfigurasi webhook:
+
+**URL Callback**
 
 ```text
 https://domain-aplikasi/meta/webhook/
 ```
 
-6. Isi Verify Token dengan nilai:
+Contoh production:
+
+```text
+https://demo-digmarttools.prosesin.id/meta/webhook/
+```
+
+**Verifikasi token**
 
 ```text
 META_WEBHOOK_VERIFY_TOKEN
 ```
 
-7. Subscribe fields:
+Contoh jika env berisi `META_WEBHOOK_VERIFY_TOKEN=t4jam_webhook`:
+
+```text
+t4jam_webhook
+```
+
+Lalu klik `Verifikasi dan simpan`.
+
+Jika berhasil, subscribe field secara bertahap. Mulai dari:
 
 ```text
 campaigns
+```
+
+Jika `campaigns` sukses, lanjutkan dengan:
+
+```text
 adsets
+```
+
+Jika `adsets` sukses, lanjutkan dengan:
+
+```text
 ads
 ```
 
-8. Pastikan ad account juga tersubscribe ke app.
+Jika Meta menolak field sejak `campaigns`, biasanya masalahnya ada di permission Meta App, bukan di Laravel. Cek permission/app review untuk `ads_read` dan `ads_management`, pastikan user token berasal dari app yang sama, dan pastikan user tersebut punya role atau akses yang benar ke app/ad account.
+
+Terakhir, pastikan ad account juga tersubscribe ke app. Command `t4jam:configure-meta-webhook` akan melakukan bagian ini otomatis untuk ad account yang dapat diakses profile.
 
 Command `t4jam:configure-meta-webhook` biasanya lebih aman karena melakukan konfigurasi callback dan subscribe ad account lewat Graph API.
 

@@ -1068,6 +1068,78 @@ class ExampleTest extends TestCase
             && $request['app_id'] === 'app-123');
     }
 
+    public function test_configure_meta_webhook_skips_ad_accounts_rejected_by_meta(): void
+    {
+        Log::spy();
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $allowed = AdAccount::firstOrFail();
+        $rejected = AdAccount::create([
+            'account_id' => '999',
+            'external_id' => 'act_999',
+            'name' => 'Rejected Account',
+            'currency' => 'IDR',
+            'account_status' => 1,
+        ]);
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], [
+            'app_id' => 'app-123',
+            'app_secret' => 'secret-123',
+            'access_token' => 'token-123',
+        ]);
+        config([
+            'services.meta.webhook_verify_token' => 'verify-123',
+            'services.meta.webhook_callback_url' => 'https://example.test/meta/webhook/',
+            'services.meta.webhook_fields' => ['with_issues_ad_objects'],
+        ]);
+        Http::fake(function ($request) use ($allowed, $rejected) {
+            $url = $request->url();
+
+            if (str_contains($url, '/app-123/subscriptions')) {
+                return Http::response(['success' => true]);
+            }
+
+            if (str_contains($url, '/me/adaccounts')) {
+                return Http::response(['data' => [
+                    ['account_id' => $allowed->account_id, 'id' => $allowed->external_id, 'name' => $allowed->name],
+                    ['account_id' => $rejected->account_id, 'id' => $rejected->external_id, 'name' => $rejected->name],
+                ]]);
+            }
+
+            if (str_contains($url, '/me/businesses')) {
+                return Http::response(['data' => []]);
+            }
+
+            if (str_contains($url, '/'.$allowed->external_id.'/subscribed_apps')) {
+                return Http::response(['success' => true]);
+            }
+
+            if (str_contains($url, '/'.$rejected->external_id.'/subscribed_apps')) {
+                return Http::response([
+                    'error' => [
+                        'message' => 'User does not have permission',
+                        'type' => 'OAuthException',
+                        'code' => 200,
+                    ],
+                ], 403);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $this->artisan('t4jam:configure-meta-webhook', ['--profile_id' => $profile->id])
+            ->expectsOutput('Ad account '.$rejected->external_id.' dilewati: Permission Meta tidak mencukupi.')
+            ->expectsOutput('Webhook Meta aktif untuk 1 ad account.')
+            ->expectsOutput('1 ad account dilewati karena Meta menolak subscribe webhook.')
+            ->assertExitCode(0);
+
+        $freshProfile = $profile->fresh();
+        $this->assertTrue($freshProfile->adAccounts->contains($allowed));
+        $this->assertFalse($freshProfile->adAccounts->contains($rejected));
+        Log::shouldHaveReceived('warning')->withArgs(fn (string $message, array $context = []) => str_contains($message, 'meta webhook ad account subscription skipped')
+            && ($context['ad_account_id'] ?? null) === $rejected->external_id
+            && ($context['meta_code'] ?? null) === 200);
+    }
+
     public function test_meta_flow_logs_use_searchable_tag(): void
     {
         Log::spy();
