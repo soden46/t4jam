@@ -80,7 +80,8 @@ class ProductionSafetyTest extends TestCase
         [, $task] = $this->fixture();
         $target = $level === 'adset' ? $task->campaign->adSets()->firstOrFail() : $task->campaign;
         $task->update(['conversion' => $conversion, 'level' => $level, 'ad_set_id' => $level === 'adset' ? $target->id : null,
-            'ad_set_external_id' => $level === 'adset' ? $target->external_id : null]);
+            'ad_set_external_id' => $level === 'adset' ? $target->external_id : null,
+            'maximum_budget' => (int) $target->daily_budget]);
         Http::fake([
             '*/insights?*' => Http::response(['data' => [['spend' => '40000', 'actions' => [
                 ['action_type' => 'purchase', 'value' => '1'], ['action_type' => 'lead', 'value' => '4'],

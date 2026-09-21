@@ -17,10 +17,6 @@ class AutomationBudgetService
 {
     private const BUDGET_INCREASE_RATIO = 0.15;
 
-    private const BUDGET_INCREASE_COOLDOWN_HOURS = 72;
-
-    private const MINIMUM_CONVERSIONS_TO_SCALE = 3;
-
     private const CONVERSION_ACTION_TYPES = [
         'purchase' => ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase', 'onsite_conversion.purchase'],
         'add_to_cart' => ['add_to_cart', 'omni_add_to_cart', 'offsite_conversion.fb_pixel_add_to_cart', 'onsite_conversion.add_to_cart'],
@@ -624,25 +620,12 @@ class AutomationBudgetService
         int $result,
         int $cpr,
     ): void {
-        if ($target->status !== 'ACTIVE' || ! config('services.meta.enable_writes') || $result < self::MINIMUM_CONVERSIONS_TO_SCALE) {
+        if ($target->status !== 'ACTIVE' || ! config('services.meta.enable_writes') || $result <= 0) {
             return;
         }
 
         $cprTarget = (int) $task->cpr_cap;
-        if ($cprTarget <= 0 || $cpr > (int) floor($cprTarget * 0.8)) {
-            return;
-        }
-
-        if (! $task->last_budget_changed_at) {
-            $task->update([
-                'last_budget_changed_at' => now(),
-                'last_budget_action' => 'baseline',
-            ]);
-
-            return;
-        }
-
-        if ($task->last_budget_changed_at->gt(now()->subHours(self::BUDGET_INCREASE_COOLDOWN_HOURS))) {
+        if ($cprTarget <= 0 || $cpr >= $cprTarget) {
             return;
         }
 
@@ -687,10 +670,11 @@ class AutomationBudgetService
         }
 
         $message = sprintf(
-            'Budget otomatis dinaikkan dari Rp. %s menjadi Rp. %s karena CPR Rp. %s berada di bawah 80%% target.',
+            'Budget otomatis dinaikkan dari Rp. %s menjadi Rp. %s karena CPR Rp. %s berada di bawah batas Rp. %s.',
             number_format($currentBudget, 0, ',', '.'),
             number_format($nextBudget, 0, ',', '.'),
             number_format($cpr, 0, ',', '.'),
+            number_format($cprTarget, 0, ',', '.'),
         );
 
         DB::transaction(function () use ($task, $target, $currentBudget, $nextBudget, $message): void {

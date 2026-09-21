@@ -91,7 +91,7 @@ class ExampleTest extends TestCase
 
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $campaign->external_id)
-            && $request['daily_budget'] === 125000);
+            && ($request->data()['daily_budget'] ?? null) === 125000);
     }
 
     public function test_dashboard_campaign_data_is_scoped_to_selected_ad_account_and_campaigns(): void
@@ -397,7 +397,7 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('campaigns', ['id' => $task->campaign_id, 'daily_budget' => 1500000]);
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $task->campaign->external_id)
-            && $request['daily_budget'] === 1500000);
+            && ($request->data()['daily_budget'] ?? null) === 1500000);
     }
 
     public function test_update_automation_rejects_another_users_task(): void
@@ -590,7 +590,7 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('ad_sets', ['id' => $adSet->id, 'daily_budget' => 20000]);
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $adSet->external_id)
-            && $request['daily_budget'] === 20000);
+            && ($request->data()['daily_budget'] ?? null) === 20000);
     }
 
     public function test_budget_update_fails_clearly_when_meta_write_mode_is_disabled(): void
@@ -755,7 +755,7 @@ class ExampleTest extends TestCase
 
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $task->campaign->external_id)
-            && $request['daily_budget'] === 999988);
+            && ($request->data()['daily_budget'] ?? null) === 999988);
     }
 
     public function test_update_automation_task_updates_meta_immediately(): void
@@ -778,7 +778,7 @@ class ExampleTest extends TestCase
         $this->assertSame(200000, $task->fresh()->current_budget);
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $task->campaign->external_id)
-            && $request['daily_budget'] === 200000);
+            && ($request->data()['daily_budget'] ?? null) === 200000);
     }
 
     public function test_google_sign_in_button_logs_in_with_local_fallback(): void
@@ -1342,6 +1342,7 @@ class ExampleTest extends TestCase
         $task->update([
             'conversion' => 'initiate_checkout',
             'cpr_cap' => 25000,
+            'maximum_budget' => (int) $task->campaign->daily_budget,
             'pause_when_cpr_loss' => true,
             'is_active' => true,
             'last_checked_at' => now()->subMinutes(11),
@@ -1398,7 +1399,7 @@ class ExampleTest extends TestCase
         $this->assertTrue($task->fresh()->is_active);
     }
 
-    public function test_automation_scales_budget_by_fifteen_percent_after_a_stable_window(): void
+    public function test_automation_scales_budget_by_fifteen_percent_when_cpr_is_under_cap(): void
     {
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
@@ -1409,21 +1410,21 @@ class ExampleTest extends TestCase
         $task->campaign->update(['daily_budget' => 100000]);
         $task->update([
             'conversion' => 'purchase',
-            'cpr_cap' => 20000,
+            'cpr_cap' => 25000,
             'maximum_budget' => 150000,
             'pause_when_cpr_loss' => true,
             'is_active' => true,
             'last_checked_at' => now()->subMinutes(11),
-            'last_budget_changed_at' => now()->subHours(73),
+            'last_budget_changed_at' => null,
         ]);
 
         Http::fake([
             'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
                 'data' => [[
                     'campaign_id' => $task->campaign->external_id,
-                    'spend' => '20000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '4']],
-                    'cost_per_action_type' => [['action_type' => 'purchase', 'value' => '5000']],
+                    'spend' => '31929',
+                    'actions' => [['action_type' => 'purchase', 'value' => '2']],
+                    'cost_per_action_type' => [['action_type' => 'purchase', 'value' => '15965']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true]),
@@ -1438,7 +1439,7 @@ class ExampleTest extends TestCase
         $this->assertSame('increase', $task->fresh()->last_budget_action);
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $task->campaign->external_id)
-            && $request['daily_budget'] === 115000);
+            && ($request->data()['daily_budget'] ?? null) === 115000);
     }
 
     public function test_counter_cpr_resumes_only_an_automation_paused_campaign(): void
@@ -1574,17 +1575,19 @@ class ExampleTest extends TestCase
     public function test_unchecked_automation_activation_disables_task_on_update(): void
     {
         $this->seed(TestDataSeeder::class);
-        config(['services.meta.enable_writes' => false]);
+        config(['services.meta.enable_writes' => true]);
         $user = User::firstOrFail();
         $this->actingAs($user);
-        $task = AutomationTask::firstOrFail();
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        $task = AutomationTask::with('campaign')->firstOrFail();
         $task->update(['is_active' => true]);
+        Http::fake(['graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true])]);
 
         $this->postJson('/update-automation-tasks/', [
             'automation_id' => $task->id,
-            'starting_budget' => $task->starting_budget,
-            'cpr_cap' => $task->cpr_cap,
-            'period' => $task->period,
+            'starting_budget' => 100000,
+            'cpr_cap' => 25000,
+            'period' => 10,
         ])->assertOk();
 
         $this->assertFalse($task->fresh()->is_active);
