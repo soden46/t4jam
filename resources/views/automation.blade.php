@@ -44,14 +44,14 @@
     <div class="table-wrap">
         <table class="data-table" id="automation_table">
             <colgroup>
-                <col style="width: 200px">
-                <col style="width: 135px">
-                <col style="width: 95px">
-                <col style="width: 95px">
-                <col style="width: 60px">
-                <col style="width: 130px">
-                <col style="width: 180px">
-                <col style="width: 65px">
+                <col style="width: auto">
+                <col style="width: auto">
+                <col style="width: auto">
+                <col style="width: auto">
+                <col style="width: auto">
+                <col style="width: auto">
+                <col style="width: auto">
+                <col style="width: 44px">
             </colgroup>
             <thead>
                 <tr>

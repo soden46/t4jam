@@ -125,7 +125,7 @@ class ProductionSafetyTest extends TestCase
         $this->artisan('t4jam:enforce-automation')->assertSuccessful();
         $this->assertTrue($task->fresh()->is_active);
         $this->postJson('/update-status-automation-tasks/', ['automation_id' => $task->id, 'status' => 'false'])->assertOk();
-        $this->assertSame('manual', $task->fresh()->last_budget_action);
+        $this->assertSame('manual_pause', $task->fresh()->last_budget_action);
         $this->travel(11)->minutes();
         Http::fake();
         $this->artisan('t4jam:enforce-automation')->assertSuccessful();

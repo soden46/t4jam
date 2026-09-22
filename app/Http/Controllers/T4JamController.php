@@ -419,6 +419,9 @@ class T4JamController extends Controller
         $budgetChanged = $budget !== (int) $task->starting_budget;
         $requestedActive = $this->automationActive($request);
         $statusChanged = $requestedActive !== (bool) $task->is_active;
+        $manualAction = $statusChanged
+            ? ($requestedActive ? 'manual_resume' : 'manual_pause')
+            : ($budgetChanged ? 'manual_budget_decrease' : 'manual');
         $baseMessage = 'Automation strategy berhasil diupdate';
         $metaBudgetPushed = false;
         $metaStatusPushed = false;
@@ -448,7 +451,7 @@ class T4JamController extends Controller
                             'current_budget' => $budget,
                             'last_budget_changed_at' => now(),
                             'last_budget_before' => $task->current_budget,
-                            'last_budget_action' => 'manual',
+                            'last_budget_action' => $manualAction,
                             'last_log' => 'Budget Meta berhasil diupdate, tetapi perubahan status gagal.',
                         ]);
                     });
@@ -478,13 +481,13 @@ class T4JamController extends Controller
             $taskData = $this->automationPayload($request) + [
                 'last_log' => $logMessage,
                 'last_checked_at' => null,
-                'last_budget_action' => 'manual',
+                'last_budget_action' => $manualAction,
                 'is_active' => $requestedActive,
             ] + ($budgetChanged ? [
                 'current_budget' => $budget,
                 'last_budget_changed_at' => now(),
                 'last_budget_before' => $task->current_budget,
-                'last_budget_action' => 'manual',
+                'last_budget_action' => $manualAction,
             ] : []);
 
             if (($taskData['conversion'] ?? $task->conversion) !== $task->conversion) {
@@ -521,7 +524,7 @@ class T4JamController extends Controller
                 'is_active' => $isActive,
                 'last_log' => $successMessage,
                 'last_checked_at' => $isActive ? null : now(),
-                'last_budget_action' => 'manual',
+                'last_budget_action' => $isActive ? 'manual_resume' : 'manual_pause',
             ]);
             AutomationLog::create([
                 'automation_task_id' => $task->id,
@@ -601,7 +604,7 @@ class T4JamController extends Controller
                 'last_checked_at' => now(),
                 'last_budget_changed_at' => now(),
                 'last_budget_before' => $task->current_budget,
-                'last_budget_action' => 'manual',
+                'last_budget_action' => 'manual_budget_decrease',
             ]);
             AutomationLog::create([
                 'automation_task_id' => $task->id,

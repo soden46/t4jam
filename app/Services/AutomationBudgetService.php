@@ -188,7 +188,9 @@ class AutomationBudgetService
                             ->where('use_on_off', true)
                             ->where(function ($pauseStateQuery): void {
                                 $pauseStateQuery
-                                    ->where('last_budget_action', 'schedule_pause');
+                                    ->where('last_budget_action', 'schedule_pause')
+                                    ->orWhere('last_budget_action', 'manual_pause')
+                                    ->orWhere('last_budget_action', 'manual');
                             });
                     });
             })
@@ -374,7 +376,7 @@ class AutomationBudgetService
 
                     $paused++;
                 } finally {
-                    $action = ($task->last_budget_action !== $beforeAction || ($task->last_budget_action === 'increase' && $beforeLog !== $task->last_log)) && in_array($task->last_budget_action, ['pause', 'resume', 'increase', 'schedule_pause', 'schedule_resume'], true) ? $task->last_budget_action : 'none';
+                    $action = ($task->last_budget_action !== $beforeAction || ($task->last_budget_action === 'increase' && $beforeLog !== $task->last_log)) && in_array($task->last_budget_action, ['pause', 'resume', 'increase', 'schedule_pause', 'schedule_resume', 'manual_pause', 'manual_resume', 'manual_budget_decrease'], true) ? $task->last_budget_action : 'none';
                     $this->logEvaluation($profile, $task, $action, $action === 'none' ? $reason : null, $source);
                 }
             });
@@ -410,7 +412,13 @@ class AutomationBudgetService
             return false;
         }
 
-        if (! $task->is_active && $task->last_budget_action === 'schedule_pause') {
+        if (! $task->is_active && in_array($task->last_budget_action, ['schedule_pause', 'manual_pause'], true)) {
+            return $this->setScheduledStatus($task, $target, $client, $profile, true, $source);
+        }
+
+        if (! $task->is_active && $task->last_budget_action === 'manual' && $target->status === 'PAUSED') {
+            $task->update(['last_budget_action' => 'manual_pause']);
+
             return $this->setScheduledStatus($task, $target, $client, $profile, true, $source);
         }
 
