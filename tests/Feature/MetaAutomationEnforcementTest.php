@@ -52,8 +52,8 @@ class MetaAutomationEnforcementTest extends TestCase
     public function test_display_metric_refresh_does_not_advance_last_checked_at(): void
     {
         Cache::flush();
+        config(['services.meta.automation_insights_date_preset' => 'last_7d']);
         [$profile, $task] = $this->automationFixture();
-        $this->actingAs(User::firstOrFail());
         $checkedAt = now()->subMinutes(3)->startOfSecond();
         $task->update(['last_checked_at' => $checkedAt, 'last_metrics_synced_at' => null]);
 
@@ -67,14 +67,20 @@ class MetaAutomationEnforcementTest extends TestCase
             ]),
         ]);
 
-        $this->getJson('/get-automation-task/?acc=all&level=all&funnel=all')
-            ->assertOk()
-            ->assertJsonPath('meta_sync.updated', 1);
+        $updated = app(AutomationBudgetService::class)->refreshTaskMetricsForDisplay(
+            $profile,
+            app(MetaAdsSyncService::class)->client($profile),
+            collect([$task])
+        );
 
         $fresh = $task->fresh();
+        $this->assertSame(1, $updated);
         $this->assertTrue($fresh->last_checked_at->equalTo($checkedAt));
         $this->assertNotNull($fresh->last_metrics_synced_at);
         $this->assertSame($profile->id, T4JamProfile::where('user_id', User::firstOrFail()->id)->value('id'));
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign->adAccount->external_id.'/insights')
+            && $request['level'] === 'campaign'
+            && $request['date_preset'] === 'last_7d');
     }
 
     public function test_relevant_campaign_webhook_sync_enforces_cpr_pause_immediately(): void

@@ -20,9 +20,7 @@ use App\Support\MetaFlowLog;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rule;
@@ -268,11 +266,8 @@ class T4JamController extends Controller
         return response()->json(['status' => 200, 'text' => 'Data Valid', 'max_account' => 30, 'jumlah_akun_dipilih' => AdAccount::count()]);
     }
 
-    public function automationTasks(
-        Request $request,
-        AutomationBudgetService $automation,
-        MetaAdsSyncService $metaSync
-    ): JsonResponse {
+    public function automationTasks(Request $request): JsonResponse
+    {
         $tasks = AutomationTask::where('user_id', Auth::id())->with(['adAccount', 'campaign', 'adSet'])
             ->when($request->query('acc') && $request->query('acc') !== 'all', fn ($query) => $query->whereHas('adAccount', fn ($account) => $account->where('external_id', $request->query('acc'))))
             ->when($request->query('level') && $request->query('level') !== 'all', fn ($query) => $query->where('level', $request->query('level')))
@@ -280,14 +275,14 @@ class T4JamController extends Controller
             ->latest()
             ->get();
 
-        $sync = $this->refreshAutomationDisplayMetrics($request, $tasks, $automation, $metaSync);
-
         $tasks = $tasks
-            ->fresh(['adAccount', 'campaign', 'adSet'])
             ->map(fn (AutomationTask $task) => $this->taskPayload($task))
             ->values();
 
-        return response()->json(['data' => $tasks, 'meta_sync' => $sync]);
+        return response()->json([
+            'data' => $tasks,
+            'meta_sync' => ['attempted' => false, 'updated' => 0, 'reason' => 'local_only'],
+        ]);
     }
 
     public function createAutomationTask(Request $request, MetaAdsSyncService $metaSync): JsonResponse
@@ -897,67 +892,6 @@ class T4JamController extends Controller
             'counter_cpr' => $task->counter_cpr,
             'use_on_off' => $task->use_on_off,
         ];
-    }
-
-    private function refreshAutomationDisplayMetrics(
-        Request $request,
-        Collection $tasks,
-        AutomationBudgetService $automation,
-        MetaAdsSyncService $metaSync
-    ): array {
-        if ($request->boolean('local')) {
-            return ['attempted' => false, 'updated' => 0, 'reason' => 'local_only'];
-        }
-
-        if ($tasks->isEmpty()) {
-            return ['attempted' => false, 'updated' => 0, 'reason' => 'empty'];
-        }
-
-        $profile = $this->metaCredentialProfile();
-        if (! $profile->hasAccessToken()) {
-            return ['attempted' => false, 'updated' => 0, 'reason' => 'missing_token'];
-        }
-
-        $filters = implode(':', [
-            Auth::id(),
-            $request->query('acc', 'all'),
-            $request->query('level', 'all'),
-            $request->query('funnel', 'all'),
-        ]);
-        $cacheKey = 'automation-display-sync:'.md5($filters);
-
-        if (! Cache::add($cacheKey, true, now()->addSeconds(45))) {
-            return ['attempted' => false, 'updated' => 0, 'reason' => 'throttled'];
-        }
-
-        try {
-            $updated = $automation->refreshTaskMetricsForDisplay(
-                $profile,
-                $metaSync->client($profile),
-                $tasks
-            );
-        } catch (MetaAdsException $exception) {
-            $profile->update(['last_meta_error' => $exception->getMessage()]);
-            MetaFlowLog::warning('automation display metrics refresh failed', [
-                'user_id' => Auth::id(),
-                'profile_id' => $profile->id,
-                'http_status' => $exception->httpStatus,
-                'meta_code' => $exception->metaCode,
-                'meta_type' => $exception->metaType,
-            ]);
-
-            return ['attempted' => true, 'updated' => 0, 'reason' => 'meta_error'];
-        } catch (Throwable $exception) {
-            MetaFlowLog::warning('automation display metrics refresh crashed', [
-                'user_id' => Auth::id(),
-                'profile_id' => $profile->id,
-                'error' => $exception->getMessage(),
-            ]);
-
-            return ['attempted' => true, 'updated' => 0, 'reason' => 'error'];
-        }
-
-        return ['attempted' => true, 'updated' => $updated, 'reason' => 'ok'];
     }
 
     private function taskMetricTarget(AutomationTask $task): Campaign|AdSet|null

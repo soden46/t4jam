@@ -32,9 +32,9 @@
         </select>
     </div>
     <div class="stat-row">
-        <div><span id="total_ad_spend">Rp. 0,-</span><small>Total Spend</small></div>
-        <div><span id="total_ad_result">0</span><small>Total Hasil</small></div>
-        <div><span id="avg_ad_cpr">Rp. 0,-</span><small>Average CPR</small></div>
+        <div><span id="total_ad_spend">-</span><small>Total Spend</small></div>
+        <div><span id="total_ad_result">-</span><small>Total Hasil</small></div>
+        <div><span id="avg_ad_cpr">-</span><small>Average CPR</small></div>
     </div>
     <div class="table-wrap">
         <table class="data-table" id="automation_table">
@@ -53,7 +53,11 @@
                     <th>Options</th>
                 </tr>
             </thead>
-            <tbody></tbody>
+            <tbody>
+                <tr>
+                    <td colspan="11" class="table-empty">Memuat data automation...</td>
+                </tr>
+            </tbody>
         </table>
     </div>
 </section>

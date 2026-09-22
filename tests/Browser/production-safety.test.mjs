@@ -87,7 +87,7 @@ test('polling reads only local tasks, does not overlap, and preserves open edits
     });
     assert.equal(await page.evaluate(() => window.timers[0].delay), 5000);
     await page.evaluate(() => { window.poll = window.timers.shift().callback(); });
-    await page.evaluate(() => { window.second = loadAutomationTasks(true); });
+    await page.evaluate(() => { window.second = loadAutomationTasks({ background: true, localOnly: true }); });
     assert.equal(await page.evaluate(() => window.calls.length), 1);
     await page.evaluate(async () => { window.resolveRequest(); await Promise.all([window.poll, window.second]); });
     await page.evaluate(async () => {
@@ -109,11 +109,27 @@ test('failed polling retries quietly and recovers', async () => {
     await page.evaluate(async () => {
         window.timers = [];
         window.setTimeout = (callback, delay) => { window.timers.push({ callback, delay }); };
+        renderAutomationTable([{
+            id: 'task-visible',
+            campaign_name: 'Visible Campaign',
+            ad_account: 'Visible Account',
+            event_flow: 'lp_to_wa',
+            conversion: 'purchase',
+            automation_status: 'active',
+            meta_status: 'ACTIVE',
+            current_budget: 100000,
+            current_spend: 42074,
+            current_hasil: 1,
+            current_cpr: 42074,
+            cpr_cap: 24555,
+        }]);
         window.fetch = async () => { throw new Error('offline'); };
         startAutomationPolling();
         await window.timers.shift().callback();
     });
     assert.equal(await page.locator('.toast-lite').count(), 0);
+    assert.equal(await page.locator('#automation_table .campaign-name').textContent(), 'Visible Campaign');
+    assert.equal(await page.locator('#total_ad_spend').textContent(), 'Rp. 42.074,-');
     assert.equal(await page.evaluate(() => window.timers[0].delay), 5000);
     await page.evaluate(async () => {
         window.fetch = async () => ({ ok: true, json: async () => ({ data: [] }) });

@@ -378,9 +378,11 @@ function renderCampaignTable(rows) {
 }
 
 async function initAutomation() {
-    bindAutomationForm('update', loadAutomationTasks);
+    bindAutomationForm('update', () => loadAutomationTasks({ localOnly: true }));
     bindSearch('#search_domain', '#automation_table');
-    qsa('#add_account_filter, #level_filter, #event_tracking_filter').forEach((el) => el.addEventListener('change', loadAutomationTasks));
+    qsa('#add_account_filter, #level_filter, #event_tracking_filter').forEach((el) => {
+        el.addEventListener('change', () => loadAutomationTasks({ localOnly: true }));
+    });
     qs('#new_automation')?.addEventListener('click', () => {
         resetAutomationForm();
         showAutomationTargetFields();
@@ -388,8 +390,8 @@ async function initAutomation() {
         qs('#automation-submit-label').textContent = 'Create';
         openModal('#automation-modal');
     });
-    await loadAutomationTargetAccounts();
-    await loadAutomationTasks();
+    await loadAutomationTasks({ localOnly: true });
+    loadAutomationTargetAccounts().catch(() => {});
     startAutomationPolling();
 }
 
@@ -397,29 +399,30 @@ function startAutomationPolling() {
     const poll = async () => {
         try {
             if (!document.hidden && !qs('.modal:not([hidden])') && !qs('#automation_table button:disabled')) {
-                await loadAutomationTasks(true);
+                await loadAutomationTasks({ background: true, localOnly: true });
             }
         } catch { /* A later poll retries without repeated toasts. */ }
         finally { setTimeout(poll, 5000); }
     };
     setTimeout(poll, 5000);
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && !qs('.modal:not([hidden])')) loadAutomationTasks(true).catch(() => {});
+        if (!document.hidden && !qs('.modal:not([hidden])')) loadAutomationTasks({ background: true, localOnly: true }).catch(() => {});
     });
 }
 
-async function loadAutomationTasks(background = false) {
+async function loadAutomationTasks(options = {}) {
+    const { background = false, localOnly = true } = options || {};
     if (automationRequest) {
         if (background === true) return automationRequest;
         await automationRequest.catch(() => {});
-        return loadAutomationTasks(background);
+        return loadAutomationTasks({ background, localOnly });
     }
     automationRequest = (async () => {
         const acc = qs('#add_account_filter')?.value || 'all';
         const level = qs('#level_filter')?.value || 'all';
         const funnel = qs('#event_tracking_filter')?.value || 'all';
-        const localOnly = background === true ? '&local=1' : '';
-        const response = await request(`/get-automation-task/?acc=${encodeURIComponent(acc)}&level=${encodeURIComponent(level)}&funnel=${encodeURIComponent(funnel)}${localOnly}`);
+        const localFlag = localOnly ? '&local=1' : '';
+        const response = await request(`/get-automation-task/?acc=${encodeURIComponent(acc)}&level=${encodeURIComponent(level)}&funnel=${encodeURIComponent(funnel)}${localFlag}`);
         if (background === true && (document.hidden || qs('.modal:not([hidden])'))) return;
         renderAutomationTable(response.data || []);
         qs('#search_domain')?.dispatchEvent(new Event('input'));
@@ -435,6 +438,12 @@ function renderAutomationTable(rows) {
     qs('#total_ad_spend').textContent = rupiah(spend);
     qs('#total_ad_result').textContent = number(result);
     qs('#avg_ad_cpr').textContent = rupiah(result ? spend / result : spend);
+
+    if (!rows.length) {
+        qs('#automation_table tbody').innerHTML = '<tr><td colspan="11" class="table-empty">Tidak ada data automation.</td></tr>';
+
+        return;
+    }
 
     qs('#automation_table tbody').innerHTML = rows.map((row) => {
         const currentCpr = Number(row.current_cpr || 0);

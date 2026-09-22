@@ -499,11 +499,10 @@ class ExampleTest extends TestCase
         $this->assertSame(25000, $row['cpr_cap']);
     }
 
-    public function test_automation_task_endpoint_refreshes_display_metrics_from_meta(): void
+    public function test_automation_task_endpoint_returns_local_metrics_without_meta_refresh(): void
     {
         $this->seed(TestDataSeeder::class);
         Cache::flush();
-        config(['services.meta.automation_insights_date_preset' => 'last_7d']);
         $user = User::firstOrFail();
         $this->actingAs($user);
         T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
@@ -517,20 +516,13 @@ class ExampleTest extends TestCase
         ]);
         $task->update([
             'conversion' => 'purchase',
-            'current_spend' => 0,
-            'current_result' => 0,
+            'current_spend' => 42000,
+            'current_result' => 2,
             'last_checked_at' => null,
+            'last_metrics_synced_at' => now(),
         ]);
 
-        Http::fake([
-            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
-                'data' => [[
-                    'campaign_id' => $task->campaign->external_id,
-                    'spend' => '42000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '2']],
-                ]],
-            ]),
-        ]);
+        Http::fake(['*' => Http::response(['error' => ['message' => 'Meta unavailable']], 500)]);
 
         $response = $this
             ->getJson('/get-automation-task/?acc=all&level=all&funnel=all')
@@ -538,8 +530,8 @@ class ExampleTest extends TestCase
 
         $row = collect($response->json('data'))->firstWhere('id', $task->id);
 
-        $this->assertSame('ok', $response->json('meta_sync.reason'));
-        $this->assertSame(1, $response->json('meta_sync.updated'));
+        $this->assertSame('local_only', $response->json('meta_sync.reason'));
+        $this->assertSame(0, $response->json('meta_sync.updated'));
         $this->assertSame(42000, $row['current_spend']);
         $this->assertSame(2, $row['current_hasil']);
         $this->assertSame(21000, $row['current_cpr']);
@@ -547,10 +539,29 @@ class ExampleTest extends TestCase
         $this->assertFalse($row['metrics_stale']);
         $this->assertSame(42000, $task->fresh()->current_spend);
         $this->assertSame(2, $task->fresh()->current_result);
-        Http::assertSentCount(1);
-        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign->adAccount->external_id.'/insights')
-            && $request['level'] === 'campaign'
-            && $request['date_preset'] === 'last_7d');
+        Http::assertNothingSent();
+    }
+
+    public function test_automation_task_endpoint_filters_local_rows_without_meta_calls(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        $tasks = AutomationTask::with('adAccount')->take(2)->get();
+        $target = $tasks->first();
+        $other = $tasks->last();
+        $target->update(['level' => 'campaign', 'event_flow' => 'lp_to_wa']);
+        $other->update(['level' => 'adset', 'event_flow' => 'lp_to_form']);
+        Http::fake();
+
+        $rows = $this
+            ->getJson('/get-automation-task/?acc='.$target->adAccount->external_id.'&level=campaign&funnel=lp_to_wa')
+            ->assertOk()
+            ->json('data');
+
+        $this->assertCount(1, $rows);
+        $this->assertSame($target->id, $rows[0]['id']);
+        Http::assertNothingSent();
     }
 
     public function test_automation_budget_meta_status_resolves_legacy_task_by_external_campaign_id(): void
