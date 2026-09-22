@@ -468,7 +468,7 @@ function renderAutomationTable(rows, summary = null) {
     qs('#avg_ad_cpr').textContent = rupiah(averageCpr);
 
     if (!rows.length) {
-        qs('#automation_table tbody').innerHTML = '<tr><td colspan="7" class="table-empty">Tidak ada data automation.</td></tr>';
+        qs('#automation_table tbody').innerHTML = '<tr><td colspan="8" class="table-empty">Tidak ada data automation.</td></tr>';
 
         return;
     }
@@ -477,7 +477,7 @@ function renderAutomationTable(rows, summary = null) {
         const currentCpr = Number(row.current_cpr || 0);
         const cprCap = Number(row.cpr_cap || 0);
         const metricsStale = Boolean(row.metrics_stale);
-        const cprClass = (metricsStale || (cprCap > 0 && currentCpr >= cprCap)) ? 'num text-danger' : 'num';
+        const isOverLimit = metricsStale || (cprCap > 0 && currentCpr >= cprCap);
         const staleLabel = metricsStale ? '<br><small class="text-danger">stale</small>' : '';
         const metaStatus = row.meta_effective_status || row.meta_status || '-';
         const metaPaused = String(metaStatus).toUpperCase() === 'PAUSED';
@@ -491,29 +491,27 @@ function renderAutomationTable(rows, summary = null) {
                     <small>${escapeHtml(row.ad_account || '-')}</small>
                     <small>${escapeHtml(row.event_flow)} &middot; ${escapeHtml(row.conversion)}</small>
                 </td>
-                <td class="status-stack">
-                    <span><small>Automation</small><button class="badge ${automationActive ? 'active' : 'pause'}" data-toggle-task="${escapeHtml(row.id)}" data-status="${automationActive ? 'false' : 'true'}">${automationActive ? 'Active' : 'Paused'}</button></span>
-                    <span><small>Meta</small><span class="badge ${metaStatusClass}">${escapeHtml(metaStatus)}</span></span>
+                <td class="status-cell">
+                    <div class="status-row"><small>Automation</small><button class="badge ${automationActive ? 'active' : 'pause'}" data-toggle-task="${escapeHtml(row.id)}" data-status="${automationActive ? 'false' : 'true'}">${automationActive ? 'Active' : 'Paused'}</button></div>
+                    <div class="status-row"><small>Meta</small><span class="badge ${metaStatusClass}">${escapeHtml(metaStatus)}</span></div>
                 </td>
-                <td class="metric-stack num">
-                    <span><small>Budget</small><strong>${rupiah(row.current_budget)}</strong></span>
-                    <span><small>Spend</small><strong class="${metricsStale ? 'text-danger' : ''}">${rupiah(row.current_spend)}</strong></span>
+                <td class="num budget-cell"><strong>${rupiah(row.current_budget)}</strong></td>
+                <td class="num spend-cell"><strong class="${metricsStale ? 'text-danger' : ''}">${rupiah(row.current_spend)}</strong></td>
+                <td class="num hasil-cell center"><strong>${number(row.current_hasil)}</strong></td>
+                <td class="cpr-limit-cell num ${isOverLimit ? 'text-danger' : ''}">
+                    <div class="cpr-block"><small>CPR</small><strong class="${isOverLimit ? 'text-danger' : ''}">${rupiah(row.current_cpr)}${staleLabel}</strong></div>
+                    <div class="cpr-limit-row"><small>Limit</small><strong>${rupiah(row.cpr_cap)}</strong></div>
                 </td>
-                <td class="metric-stack num">
-                    <span><small>Hasil</small><strong class="${metricsStale ? 'text-danger' : ''}">${number(row.current_hasil)}</strong></span>
-                    <span><small>CPR</small><strong class="${cprClass.replace('num', '').trim()}">${rupiah(row.current_cpr)}${staleLabel}</strong></span>
-                </td>
-                <td class="${cprClass}">${rupiah(row.cpr_cap)}</td>
                 <td class="log-cell">
                     <span>${escapeHtml(row.log || '-')}</span>
                     <small>${escapeHtml(row.metrics_synced_at || row.last_update || '-')}</small>
                 </td>
-                <td class="actions-menu-cell">
+                <td class="actions-menu-cell center">
                     <button class="icon-btn" data-actions-toggle="${escapeHtml(row.id)}" type="button" aria-label="Actions">&#8942;</button>
                     <div class="actions-menu" data-actions-menu="${escapeHtml(row.id)}" hidden>
                         <button data-history="${escapeHtml(row.id)}" type="button">Lihat Log</button>
                         <button data-edit="${escapeHtml(row.id)}" type="button">Update</button>
-                        <button data-budget-down="${escapeHtml(row.id)}" type="button">Turun</button>
+                        <button data-budget-down="${escapeHtml(row.id)}" type="button">Turun / Pause</button>
                         <button class="danger-text" data-delete-task="${escapeHtml(row.id)}" data-campaign="${escapeHtml(row.campaign_name)}" type="button">Hapus</button>
                     </div>
                 </td>

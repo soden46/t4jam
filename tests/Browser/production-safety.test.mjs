@@ -72,14 +72,15 @@ test('automation table renders compact grouped metrics and action menu', async (
     assert.match(await cells.nth(0).textContent(), /Account CPR/);
     assert.match(await cells.nth(1).textContent(), /Automation\s*Paused/);
     assert.match(await cells.nth(1).textContent(), /Meta\s*PAUSED/);
-    assert.match(await cells.nth(2).textContent(), /Budget\s*Rp\. 100\.000,-/);
-    assert.match(await cells.nth(2).textContent(), /Spend\s*Rp\. 75\.919,-/);
-    assert.match(await cells.nth(3).textContent(), /Hasil\s*1/);
-    assert.match(await cells.nth(3).textContent(), /CPR\s*Rp\. 75\.919,-/);
-    assert.equal(await cells.nth(4).textContent(), 'Rp. 25.000,-');
-    assert.match(await cells.nth(4).getAttribute('class'), /text-danger/);
+    assert.match(await cells.nth(2).textContent(), /Rp\. 100\.000,-/);
+    assert.match(await cells.nth(3).textContent(), /Rp\. 75\.919,-/);
+    assert.match(await cells.nth(4).textContent(), /1/);
+    assert.match(await cells.nth(5).textContent(), /CPR/);
+    assert.match(await cells.nth(5).textContent(), /Rp\. 75\.919,-/);
+    assert.match(await cells.nth(5).textContent(), /Limit\s*Rp\. 25\.000,-/);
+    assert.match(await cells.nth(5).getAttribute('class'), /text-danger/);
     await page.locator('[data-actions-toggle]').click();
-    assert.deepEqual(await page.locator('[data-actions-menu] button').evaluateAll(buttons => buttons.map(button => button.textContent)), ['Lihat Log', 'Update', 'Turun', 'Hapus']);
+    assert.deepEqual(await page.locator('[data-actions-menu] button').evaluateAll(buttons => buttons.map(button => button.textContent)), ['Lihat Log', 'Update', 'Turun / Pause', 'Hapus']);
 });
 
 test('polling reads only local tasks, does not overlap, and preserves open edits', async () => {

@@ -43,20 +43,31 @@
     </div>
     <div class="table-wrap">
         <table class="data-table" id="automation_table">
+            <colgroup>
+                <col style="width: 200px">
+                <col style="width: 135px">
+                <col style="width: 95px">
+                <col style="width: 95px">
+                <col style="width: 60px">
+                <col style="width: 130px">
+                <col style="width: 180px">
+                <col style="width: 65px">
+            </colgroup>
             <thead>
                 <tr>
                     <th>Campaign</th>
-                    <th>Automation</th>
-                    <th class="num">Budget / Spend</th>
-                    <th class="num">Performance</th>
-                    <th class="num">Batas CPR</th>
+                    <th>Status</th>
+                    <th class="num">Budget</th>
+                    <th class="num">Spend</th>
+                    <th class="num">Hasil</th>
+                    <th class="num">CPR / Limit</th>
                     <th>Log</th>
                     <th>Options</th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
-                    <td colspan="7" class="table-empty">Memuat data automation...</td>
+                    <td colspan="8" class="table-empty">Memuat data automation...</td>
                 </tr>
             </tbody>
         </table>
