@@ -225,6 +225,13 @@ class AutomationBudgetService
                         return;
                     }
 
+                    if ($task->is_active && $this->targetPausedByMeta($target)) {
+                        $this->pauseTaskFromMetaStatus($task);
+                        $reason = 'target_not_active';
+
+                        return;
+                    }
+
                     if (! $this->isWithinAutomationWindow($task)) {
                         $reason = 'outside_automation_window';
 
@@ -676,6 +683,25 @@ class AutomationBudgetService
             'automation_task_id' => $task->id,
             'messages' => [$message],
         ]);
+    }
+
+    private function pauseTaskFromMetaStatus(AutomationTask $task): void
+    {
+        $message = 'Status dipause dari Meta Ads Manager.';
+        $task->update([
+            'is_active' => false,
+            'last_budget_action' => 'meta_sync',
+            'last_log' => $message,
+        ]);
+        AutomationLog::create([
+            'automation_task_id' => $task->id,
+            'messages' => [$message],
+        ]);
+    }
+
+    private function targetPausedByMeta(Campaign|AdSet $target): bool
+    {
+        return strtoupper((string) ($target->effective_status ?: $target->status)) === 'PAUSED';
     }
 
     private function refreshInactiveTargetStatus(

@@ -28,7 +28,12 @@
             <option value="all">Show All</option>
             <option value="lp_to_wa">Lp To Wa</option>
             <option value="lp_to_form">Lp To Form</option>
-            <option value="lwa">LWA</option>
+                <option value="lwa">LWA</option>
+        </select>
+        <select name="automation_per_page" id="automation_per_page" aria-label="Rows per page">
+            <option value="10">10 / page</option>
+            <option value="25">25 / page</option>
+            <option value="50">50 / page</option>
         </select>
     </div>
     <div class="stat-row">
@@ -41,13 +46,9 @@
             <thead>
                 <tr>
                     <th>Campaign</th>
-                    <th>Account</th>
                     <th>Automation</th>
-                    <th>Meta Status</th>
-                    <th class="num">Budget</th>
-                    <th class="num">Spend</th>
-                    <th class="num">Hasil</th>
-                    <th class="num">CPR</th>
+                    <th class="num">Budget / Spend</th>
+                    <th class="num">Performance</th>
                     <th class="num">Batas CPR</th>
                     <th>Log</th>
                     <th>Options</th>
@@ -55,11 +56,12 @@
             </thead>
             <tbody>
                 <tr>
-                    <td colspan="11" class="table-empty">Memuat data automation...</td>
+                    <td colspan="7" class="table-empty">Memuat data automation...</td>
                 </tr>
             </tbody>
         </table>
     </div>
+    <div class="pagination-bar" id="automation_pagination" hidden></div>
 </section>
 
 <div class="modal" id="history-modal" hidden>

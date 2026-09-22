@@ -307,9 +307,9 @@ class MetaAutomationEnforcementTest extends TestCase
 
         $this->artisan('t4jam:enforce-automation')->assertSuccessful();
 
-        $this->assertTrue($task->fresh()->is_active);
+        $this->assertFalse($task->fresh()->is_active);
         $this->assertSame('PAUSED', $task->campaign->fresh()->status);
-        $this->assertNotSame('pause', $task->fresh()->last_budget_action);
+        $this->assertSame('meta_sync', $task->fresh()->last_budget_action);
         Http::assertNotSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $task->campaign_external_id));
     }

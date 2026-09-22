@@ -268,19 +268,55 @@ class T4JamController extends Controller
 
     public function automationTasks(Request $request): JsonResponse
     {
-        $tasks = AutomationTask::where('user_id', Auth::id())->with(['adAccount', 'campaign', 'adSet'])
+        $perPage = in_array((int) $request->query('per_page', 10), [10, 25, 50], true)
+            ? (int) $request->query('per_page', 10)
+            : 10;
+        $page = max(1, (int) $request->query('page', 1));
+        $search = trim((string) $request->query('search', ''));
+
+        $query = AutomationTask::where('user_id', Auth::id())->with(['adAccount', 'campaign', 'adSet'])
             ->when($request->query('acc') && $request->query('acc') !== 'all', fn ($query) => $query->whereHas('adAccount', fn ($account) => $account->where('external_id', $request->query('acc'))))
             ->when($request->query('level') && $request->query('level') !== 'all', fn ($query) => $query->where('level', $request->query('level')))
             ->when($request->query('funnel') && $request->query('funnel') !== 'all', fn ($query) => $query->where('event_flow', $request->query('funnel')))
-            ->latest()
-            ->get();
+            ->when($search !== '', function ($query) use ($search): void {
+                $query->where(function ($searchQuery) use ($search): void {
+                    $searchQuery
+                        ->where('campaign_name', 'like', '%'.$search.'%')
+                        ->orWhere('ad_account_name', 'like', '%'.$search.'%')
+                        ->orWhere('event_flow', 'like', '%'.$search.'%')
+                        ->orWhere('conversion', 'like', '%'.$search.'%');
+                });
+            });
 
-        $tasks = $tasks
+        $summary = (clone $query)
+            ->selectRaw('COALESCE(SUM(current_spend), 0) as total_spend, COALESCE(SUM(current_result), 0) as total_result')
+            ->first();
+        $totalSpend = (int) ($summary->total_spend ?? 0);
+        $totalResult = (int) ($summary->total_result ?? 0);
+
+        $paginator = $query
+            ->latest()
+            ->paginate($perPage, ['*'], 'page', $page);
+
+        $tasks = $paginator->getCollection()
             ->map(fn (AutomationTask $task) => $this->taskPayload($task))
             ->values();
 
         return response()->json([
             'data' => $tasks,
+            'pagination' => [
+                'current_page' => $paginator->currentPage(),
+                'last_page' => $paginator->lastPage(),
+                'per_page' => $paginator->perPage(),
+                'total' => $paginator->total(),
+                'from' => $paginator->firstItem(),
+                'to' => $paginator->lastItem(),
+            ],
+            'summary' => [
+                'total_spend' => $totalSpend,
+                'total_result' => $totalResult,
+                'average_cpr' => $totalResult > 0 ? (int) round($totalSpend / $totalResult) : $totalSpend,
+            ],
             'meta_sync' => ['attempted' => false, 'updated' => 0, 'reason' => 'local_only'],
         ]);
     }
@@ -842,6 +878,7 @@ class T4JamController extends Controller
     private function taskPayload(AutomationTask $task): array
     {
         $target = $this->taskMetricTarget($task);
+        $automationActive = $this->syncAutomationPausedByMetaStatus($task, $target);
         $budget = (int) ($target?->daily_budget ?? $task->current_budget);
         $spend = (int) $task->current_spend;
         $result = max(0, (int) $task->current_result);
@@ -865,8 +902,8 @@ class T4JamController extends Controller
             'conversion' => $task->conversion,
             'cpr_cap' => $task->cpr_cap,
             'log' => $task->last_log,
-            'status' => $task->is_active ? 'true' : 'false',
-            'automation_status' => $task->is_active ? 'active' : 'pause',
+            'status' => $automationActive ? 'true' : 'false',
+            'automation_status' => $automationActive ? 'active' : 'pause',
             'meta_status' => $target?->status,
             'meta_effective_status' => $target?->effective_status,
             'metrics_synced_at' => $lastMetricsSyncedAt?->timezone('Asia/Jakarta')->format('d-m-Y, H:i'),
@@ -892,6 +929,35 @@ class T4JamController extends Controller
             'counter_cpr' => $task->counter_cpr,
             'use_on_off' => $task->use_on_off,
         ];
+    }
+
+    private function syncAutomationPausedByMetaStatus(AutomationTask $task, Campaign|AdSet|null $target): bool
+    {
+        if (! $target || strtoupper((string) ($target->effective_status ?: $target->status)) !== 'PAUSED') {
+            return (bool) $task->is_active;
+        }
+
+        if (! $task->is_active) {
+            return false;
+        }
+
+        $message = 'Status dipause dari Meta Ads Manager.';
+        $task->update([
+            'is_active' => false,
+            'last_budget_action' => 'meta_sync',
+            'last_log' => $message,
+        ]);
+        AutomationLog::create([
+            'automation_task_id' => $task->id,
+            'messages' => [$message],
+        ]);
+        $task->forceFill([
+            'is_active' => false,
+            'last_budget_action' => 'meta_sync',
+            'last_log' => $message,
+        ]);
+
+        return false;
     }
 
     private function taskMetricTarget(AutomationTask $task): Campaign|AdSet|null

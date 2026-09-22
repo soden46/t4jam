@@ -21,6 +21,9 @@ const safeUrl = (value) => {
 };
 let automationAccounts = [];
 let automationRequest = null;
+let automationPage = 1;
+let automationPerPage = 10;
+let automationSearchTimer = null;
 let adSetupRequest = null;
 let dashboardRequest = null;
 
@@ -379,9 +382,28 @@ function renderCampaignTable(rows) {
 
 async function initAutomation() {
     bindAutomationForm('update', () => loadAutomationTasks({ localOnly: true }));
-    bindSearch('#search_domain', '#automation_table');
     qsa('#add_account_filter, #level_filter, #event_tracking_filter').forEach((el) => {
-        el.addEventListener('change', () => loadAutomationTasks({ localOnly: true }));
+        el.addEventListener('change', () => {
+            automationPage = 1;
+            loadAutomationTasks({ localOnly: true });
+        });
+    });
+    qs('#automation_per_page')?.addEventListener('change', (event) => {
+        automationPerPage = [10, 25, 50].includes(Number(event.target.value)) ? Number(event.target.value) : 10;
+        automationPage = 1;
+        loadAutomationTasks({ localOnly: true });
+    });
+    qs('#search_domain')?.addEventListener('input', () => {
+        clearTimeout(automationSearchTimer);
+        automationSearchTimer = setTimeout(() => {
+            automationPage = 1;
+            loadAutomationTasks({ localOnly: true });
+        }, 300);
+    });
+    document.addEventListener('click', (event) => {
+        if (!event.target.closest('[data-actions-menu]') && !event.target.closest('[data-actions-toggle]')) {
+            qsa('[data-actions-menu]').forEach((menu) => menu.hidden = true);
+        }
     });
     qs('#new_automation')?.addEventListener('click', () => {
         resetAutomationForm();
@@ -421,26 +443,32 @@ async function loadAutomationTasks(options = {}) {
         const acc = qs('#add_account_filter')?.value || 'all';
         const level = qs('#level_filter')?.value || 'all';
         const funnel = qs('#event_tracking_filter')?.value || 'all';
+        const search = qs('#search_domain')?.value || '';
         const localFlag = localOnly ? '&local=1' : '';
-        const response = await request(`/get-automation-task/?acc=${encodeURIComponent(acc)}&level=${encodeURIComponent(level)}&funnel=${encodeURIComponent(funnel)}${localFlag}`);
+        qs('#automation_table')?.classList.add('is-loading');
+        const response = await request(`/get-automation-task/?acc=${encodeURIComponent(acc)}&level=${encodeURIComponent(level)}&funnel=${encodeURIComponent(funnel)}&page=${automationPage}&per_page=${automationPerPage}&search=${encodeURIComponent(search)}${localFlag}`);
         if (background === true && (document.hidden || qs('.modal:not([hidden])'))) return;
-        renderAutomationTable(response.data || []);
-        qs('#search_domain')?.dispatchEvent(new Event('input'));
+        renderAutomationTable(response.data || [], response.summary || null);
+        renderAutomationPagination(response.pagination || null);
     })();
     try { await automationRequest; }
-    finally { automationRequest = null; }
+    finally {
+        qs('#automation_table')?.classList.remove('is-loading');
+        automationRequest = null;
+    }
 
 }
 
-function renderAutomationTable(rows) {
-    const spend = rows.reduce((total, row) => total + Number(row.current_spend || 0), 0);
-    const result = rows.reduce((total, row) => total + Number(row.current_hasil || 0), 0);
+function renderAutomationTable(rows, summary = null) {
+    const spend = summary ? Number(summary.total_spend || 0) : rows.reduce((total, row) => total + Number(row.current_spend || 0), 0);
+    const result = summary ? Number(summary.total_result || 0) : rows.reduce((total, row) => total + Number(row.current_hasil || 0), 0);
+    const averageCpr = summary ? Number(summary.average_cpr || 0) : (result ? spend / result : spend);
     qs('#total_ad_spend').textContent = rupiah(spend);
     qs('#total_ad_result').textContent = number(result);
-    qs('#avg_ad_cpr').textContent = rupiah(result ? spend / result : spend);
+    qs('#avg_ad_cpr').textContent = rupiah(averageCpr);
 
     if (!rows.length) {
-        qs('#automation_table tbody').innerHTML = '<tr><td colspan="11" class="table-empty">Tidak ada data automation.</td></tr>';
+        qs('#automation_table tbody').innerHTML = '<tr><td colspan="7" class="table-empty">Tidak ada data automation.</td></tr>';
 
         return;
     }
@@ -450,34 +478,57 @@ function renderAutomationTable(rows) {
         const cprCap = Number(row.cpr_cap || 0);
         const metricsStale = Boolean(row.metrics_stale);
         const cprClass = (metricsStale || (cprCap > 0 && currentCpr >= cprCap)) ? 'num text-danger' : 'num';
-        const metricClass = metricsStale ? 'num text-danger' : 'num';
         const staleLabel = metricsStale ? '<br><small class="text-danger">stale</small>' : '';
-        const automationActive = row.automation_status ? row.automation_status === 'active' : row.status === 'true';
         const metaStatus = row.meta_effective_status || row.meta_status || '-';
+        const metaPaused = String(metaStatus).toUpperCase() === 'PAUSED';
+        const automationActive = !metaPaused && (row.automation_status ? row.automation_status === 'active' : row.status === 'true');
         const metaStatusClass = metaStatus === 'ACTIVE' ? 'active' : (metaStatus === 'PAUSED' ? 'pause' : 'draft');
 
         return `
             <tr>
-                <td><span class="campaign-name">${escapeHtml(row.campaign_name)}</span><br><small>${escapeHtml(row.event_flow)} / ${escapeHtml(row.conversion)}</small></td>
-                <td>${escapeHtml(row.ad_account)}</td>
-                <td><button class="badge ${automationActive ? 'active' : 'pause'}" data-toggle-task="${escapeHtml(row.id)}" data-status="${automationActive ? 'false' : 'true'}">${automationActive ? 'active' : 'pause'}</button></td>
-                <td><span class="badge ${metaStatusClass}">${escapeHtml(metaStatus)}</span></td>
-                <td class="num">${rupiah(row.current_budget)}</td>
-                <td class="${metricClass}">${rupiah(row.current_spend)}</td>
-                <td class="${metricClass}">${number(row.current_hasil)}</td>
-                <td class="${cprClass}">${rupiah(row.current_cpr)}${staleLabel}</td>
+                <td class="automation-campaign-cell">
+                    <span class="campaign-name">${escapeHtml(row.campaign_name)}</span>
+                    <small>${escapeHtml(row.ad_account || '-')}</small>
+                    <small>${escapeHtml(row.event_flow)} &middot; ${escapeHtml(row.conversion)}</small>
+                </td>
+                <td class="status-stack">
+                    <span><small>Automation</small><button class="badge ${automationActive ? 'active' : 'pause'}" data-toggle-task="${escapeHtml(row.id)}" data-status="${automationActive ? 'false' : 'true'}">${automationActive ? 'Active' : 'Paused'}</button></span>
+                    <span><small>Meta</small><span class="badge ${metaStatusClass}">${escapeHtml(metaStatus)}</span></span>
+                </td>
+                <td class="metric-stack num">
+                    <span><small>Budget</small><strong>${rupiah(row.current_budget)}</strong></span>
+                    <span><small>Spend</small><strong class="${metricsStale ? 'text-danger' : ''}">${rupiah(row.current_spend)}</strong></span>
+                </td>
+                <td class="metric-stack num">
+                    <span><small>Hasil</small><strong class="${metricsStale ? 'text-danger' : ''}">${number(row.current_hasil)}</strong></span>
+                    <span><small>CPR</small><strong class="${cprClass.replace('num', '').trim()}">${rupiah(row.current_cpr)}${staleLabel}</strong></span>
+                </td>
                 <td class="${cprClass}">${rupiah(row.cpr_cap)}</td>
-                <td>${escapeHtml(row.log || '-')}</td>
-                <td class="action-row">
-                    <button class="btn light" data-history="${escapeHtml(row.id)}" type="button">Log</button>
-                    <button class="btn light-primary" data-edit="${escapeHtml(row.id)}" type="button">Update</button>
-                    <button class="btn danger" data-budget-down="${escapeHtml(row.id)}" type="button">Turun</button>
-                    <button class="btn danger" data-delete-task="${escapeHtml(row.id)}" data-campaign="${escapeHtml(row.campaign_name)}" type="button">Hapus</button>
+                <td class="log-cell">
+                    <span>${escapeHtml(row.log || '-')}</span>
+                    <small>${escapeHtml(row.metrics_synced_at || row.last_update || '-')}</small>
+                </td>
+                <td class="actions-menu-cell">
+                    <button class="icon-btn" data-actions-toggle="${escapeHtml(row.id)}" type="button" aria-label="Actions">&#8942;</button>
+                    <div class="actions-menu" data-actions-menu="${escapeHtml(row.id)}" hidden>
+                        <button data-history="${escapeHtml(row.id)}" type="button">Lihat Log</button>
+                        <button data-edit="${escapeHtml(row.id)}" type="button">Update</button>
+                        <button data-budget-down="${escapeHtml(row.id)}" type="button">Turun</button>
+                        <button class="danger-text" data-delete-task="${escapeHtml(row.id)}" data-campaign="${escapeHtml(row.campaign_name)}" type="button">Hapus</button>
+                    </div>
                 </td>
             </tr>
         `;
     }).join('');
 
+    qsa('[data-actions-toggle]').forEach((button) => button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const menu = qs(`[data-actions-menu="${CSS.escape(button.dataset.actionsToggle)}"]`);
+        qsa('[data-actions-menu]').forEach((item) => {
+            if (item !== menu) item.hidden = true;
+        });
+        if (menu) menu.hidden = !menu.hidden;
+    }));
     qsa('[data-toggle-task]').forEach((button) => button.addEventListener('click', async () => {
         const originalText = button.textContent;
         button.disabled = true;
@@ -529,6 +580,37 @@ function renderAutomationTable(rows) {
             button.disabled = false;
             button.textContent = originalText;
         }
+    }));
+}
+
+function renderAutomationPagination(pagination) {
+    const container = qs('#automation_pagination');
+    if (!container || !pagination) return;
+
+    automationPage = Number(pagination.current_page || 1);
+    automationPerPage = Number(pagination.per_page || automationPerPage);
+    const total = Number(pagination.total || 0);
+    const lastPage = Math.max(1, Number(pagination.last_page || 1));
+    const currentPage = Math.min(Math.max(1, automationPage), lastPage);
+    const pages = [];
+    for (let pageNumber = Math.max(1, currentPage - 2); pageNumber <= Math.min(lastPage, currentPage + 2); pageNumber++) {
+        pages.push(pageNumber);
+    }
+
+    container.hidden = false;
+    container.innerHTML = `
+        <span class="pagination-summary">Showing ${number(pagination.from || 0)}-${number(pagination.to || 0)} of ${number(total)}</span>
+        <div class="pagination-controls">
+            <button class="btn light" data-automation-page="${currentPage - 1}" ${currentPage <= 1 ? 'disabled' : ''} type="button">Previous</button>
+            ${pages.map((pageNumber) => `<button class="page-btn ${pageNumber === currentPage ? 'active' : ''}" data-automation-page="${pageNumber}" type="button">${pageNumber}</button>`).join('')}
+            <button class="btn light" data-automation-page="${currentPage + 1}" ${currentPage >= lastPage ? 'disabled' : ''} type="button">Next</button>
+        </div>
+    `;
+    qsa('[data-automation-page]', container).forEach((button) => button.addEventListener('click', () => {
+        const pageNumber = Number(button.dataset.automationPage);
+        if (!pageNumber || pageNumber === automationPage) return;
+        automationPage = pageNumber;
+        loadAutomationTasks({ localOnly: true });
     }));
 }
 

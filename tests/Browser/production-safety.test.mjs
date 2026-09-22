@@ -36,7 +36,8 @@ test('dynamic names, attributes, logs and product links cannot inject markup or 
         await historyTask('test');
     }, attack);
     assert.equal(await page.locator('#campaign_table .campaign-name').textContent(), attack);
-    assert.equal(await page.locator('#automation_table td').nth(1).textContent(), attack);
+    assert.equal(await page.locator('#automation_table .campaign-name').textContent(), attack);
+    assert.equal(await page.locator('#automation_table .log-cell > span').textContent(), attack);
     assert.equal(await page.locator('#item-timeline li').textContent(), attack);
     assert.equal(await page.locator('#interest_table tr').getAttribute('data-topic'), attack);
     await page.locator('[data-product-detail]').click();
@@ -46,7 +47,7 @@ test('dynamic names, attributes, logs and product links cannot inject markup or 
     assert.equal(await page.evaluate(() => window.xss), undefined);
 });
 
-test('automation table renders configured cpr cap next to current cpr', async () => {
+test('automation table renders compact grouped metrics and action menu', async () => {
     await page.evaluate(() => {
         renderAutomationTable([{
             id: 'task-1',
@@ -66,12 +67,19 @@ test('automation table renders configured cpr cap next to current cpr', async ()
         }]);
     });
 
-    assert.equal(await page.locator('#automation_table tbody td').nth(2).textContent(), 'active');
-    assert.equal(await page.locator('#automation_table tbody td').nth(3).textContent(), 'PAUSED');
-    assert.equal(await page.locator('#automation_table tbody td').nth(7).textContent(), 'Rp. 75.919,-');
-    assert.equal(await page.locator('#automation_table tbody td').nth(8).textContent(), 'Rp. 25.000,-');
-    assert.match(await page.locator('#automation_table tbody td').nth(7).getAttribute('class'), /text-danger/);
-    assert.match(await page.locator('#automation_table tbody td').nth(8).getAttribute('class'), /text-danger/);
+    const cells = page.locator('#automation_table tbody td');
+    assert.match(await cells.nth(0).textContent(), /Campaign CPR/);
+    assert.match(await cells.nth(0).textContent(), /Account CPR/);
+    assert.match(await cells.nth(1).textContent(), /Automation\s*Paused/);
+    assert.match(await cells.nth(1).textContent(), /Meta\s*PAUSED/);
+    assert.match(await cells.nth(2).textContent(), /Budget\s*Rp\. 100\.000,-/);
+    assert.match(await cells.nth(2).textContent(), /Spend\s*Rp\. 75\.919,-/);
+    assert.match(await cells.nth(3).textContent(), /Hasil\s*1/);
+    assert.match(await cells.nth(3).textContent(), /CPR\s*Rp\. 75\.919,-/);
+    assert.equal(await cells.nth(4).textContent(), 'Rp. 25.000,-');
+    assert.match(await cells.nth(4).getAttribute('class'), /text-danger/);
+    await page.locator('[data-actions-toggle]').click();
+    assert.deepEqual(await page.locator('[data-actions-menu] button').evaluateAll(buttons => buttons.map(button => button.textContent)), ['Lihat Log', 'Update', 'Turun', 'Hapus']);
 });
 
 test('polling reads only local tasks, does not overlap, and preserves open edits', async () => {

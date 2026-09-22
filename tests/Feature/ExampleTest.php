@@ -474,11 +474,14 @@ class ExampleTest extends TestCase
         $this->assertSame(42074, $row['current_spend']);
         $this->assertSame(1, $row['current_hasil']);
         $this->assertSame(42074, $row['current_cpr']);
-        $this->assertSame('active', $row['automation_status']);
+        $this->assertSame('pause', $row['automation_status']);
+        $this->assertSame('false', $row['status']);
         $this->assertSame('PAUSED', $row['meta_status']);
         $this->assertSame('PAUSED', $row['meta_effective_status']);
         $this->assertTrue($row['metrics_available']);
         $this->assertFalse($row['metrics_stale']);
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame('meta_sync', $task->fresh()->last_budget_action);
     }
 
     public function test_automation_task_endpoint_exposes_configured_cpr_cap(): void
@@ -561,6 +564,113 @@ class ExampleTest extends TestCase
 
         $this->assertCount(1, $rows);
         $this->assertSame($target->id, $rows[0]['id']);
+        Http::assertNothingSent();
+    }
+
+    public function test_automation_task_endpoint_paginates_local_rows_safely(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        $campaign = Campaign::with('adAccount')->firstOrFail();
+        AutomationTask::query()->delete();
+
+        foreach (range(1, 37) as $index) {
+            AutomationTask::create([
+                'id' => (string) str()->uuid(),
+                'user_id' => $user->id,
+                'ad_account_id' => $campaign->ad_account_id,
+                'campaign_id' => $campaign->id,
+                'campaign_external_id' => $campaign->external_id,
+                'campaign_name' => 'Paged Campaign '.$index,
+                'ad_account_name' => $campaign->adAccount->name,
+                'current_spend' => 1000,
+                'current_result' => 1,
+            ]);
+        }
+        Http::fake();
+
+        $this->getJson('/get-automation-task/')
+            ->assertOk()
+            ->assertJsonCount(10, 'data')
+            ->assertJsonPath('pagination.current_page', 1)
+            ->assertJsonPath('pagination.per_page', 10)
+            ->assertJsonPath('pagination.total', 37)
+            ->assertJsonPath('pagination.last_page', 4);
+
+        $this->getJson('/get-automation-task/?per_page=25&page=2')
+            ->assertOk()
+            ->assertJsonCount(12, 'data')
+            ->assertJsonPath('pagination.current_page', 2)
+            ->assertJsonPath('pagination.per_page', 25);
+
+        $this->getJson('/get-automation-task/?per_page=50')
+            ->assertOk()
+            ->assertJsonCount(37, 'data')
+            ->assertJsonPath('pagination.per_page', 50);
+
+        $this->getJson('/get-automation-task/?per_page=999')
+            ->assertOk()
+            ->assertJsonCount(10, 'data')
+            ->assertJsonPath('pagination.per_page', 10);
+        Http::assertNothingSent();
+    }
+
+    public function test_automation_task_search_filters_and_summary_cover_all_matching_rows(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        $campaign = Campaign::with('adAccount')->firstOrFail();
+        AutomationTask::query()->delete();
+
+        foreach (range(1, 12) as $index) {
+            AutomationTask::create([
+                'id' => (string) str()->uuid(),
+                'user_id' => $user->id,
+                'ad_account_id' => $campaign->ad_account_id,
+                'campaign_id' => $campaign->id,
+                'campaign_external_id' => $campaign->external_id,
+                'campaign_name' => 'Needle Campaign '.$index,
+                'ad_account_name' => 'Search Account',
+                'level' => 'campaign',
+                'event_flow' => 'lp_to_wa',
+                'conversion' => 'purchase',
+                'current_spend' => 1000,
+                'current_result' => 1,
+                'cpr_cap' => 25000,
+                'last_metrics_synced_at' => now(),
+            ]);
+        }
+        AutomationTask::create([
+            'id' => (string) str()->uuid(),
+            'user_id' => $user->id,
+            'ad_account_id' => $campaign->ad_account_id,
+            'campaign_id' => $campaign->id,
+            'campaign_external_id' => $campaign->external_id,
+            'campaign_name' => 'Other Campaign',
+            'ad_account_name' => 'Other Account',
+            'level' => 'adset',
+            'event_flow' => 'lp_to_form',
+            'conversion' => 'initiate_checkout',
+            'current_spend' => 50000,
+            'current_result' => 10,
+        ]);
+        Http::fake();
+
+        $response = $this
+            ->getJson('/get-automation-task/?search=Needle&level=campaign&funnel=lp_to_wa&per_page=10')
+            ->assertOk()
+            ->assertJsonCount(10, 'data')
+            ->assertJsonPath('pagination.total', 12)
+            ->assertJsonPath('summary.total_spend', 12000)
+            ->assertJsonPath('summary.total_result', 12)
+            ->assertJsonPath('summary.average_cpr', 1000);
+
+        $row = $response->json('data.0');
+        foreach (['automation_status', 'meta_status', 'meta_effective_status', 'current_budget', 'current_spend', 'current_hasil', 'current_cpr', 'cpr_cap', 'metrics_synced_at', 'metrics_stale', 'metrics_available', 'log', 'event_flow', 'conversion'] as $field) {
+            $this->assertArrayHasKey($field, $row);
+        }
         Http::assertNothingSent();
     }
 
