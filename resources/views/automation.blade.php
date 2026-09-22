@@ -42,7 +42,8 @@
                 <tr>
                     <th>Campaign</th>
                     <th>Account</th>
-                    <th>Status</th>
+                    <th>Automation</th>
+                    <th>Meta Status</th>
                     <th class="num">Budget</th>
                     <th class="num">Spend</th>
                     <th class="num">Hasil</th>

@@ -230,6 +230,84 @@ class MetaAutomationEnforcementTest extends TestCase
         $this->assertNotSame('pause', $task->fresh()->last_budget_action);
     }
 
+    public function test_insight_unavailable_does_not_pause_based_on_stale_metrics(): void
+    {
+        [, $task] = $this->automationFixture();
+        $syncedAt = now()->subHour()->startOfSecond();
+        $checkedAt = now()->subMinutes(11)->startOfSecond();
+        $task->update([
+            'current_spend' => 75000,
+            'current_result' => 1,
+            'last_metrics_synced_at' => $syncedAt,
+            'metrics_unavailable_at' => null,
+            'last_checked_at' => $checkedAt,
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [
+                    ['campaign_id' => 'cmp_other_1', 'spend' => '1000', 'actions' => []],
+                    ['campaign_id' => 'cmp_other_2', 'spend' => '2000', 'actions' => []],
+                ],
+            ]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        $this->assertTrue($fresh->last_metrics_synced_at->equalTo($syncedAt));
+        $this->assertTrue($fresh->last_checked_at->equalTo($checkedAt));
+        $this->assertNotNull($fresh->metrics_unavailable_at);
+        $this->assertSame(75000, $fresh->current_spend);
+        $this->assertSame(1, $fresh->current_result);
+        $this->actingAs(User::firstOrFail());
+        $row = collect($this
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all&local=1')
+            ->assertOk()
+            ->json('data'))
+            ->firstWhere('id', $task->id);
+        $this->assertTrue($row['metrics_stale']);
+        $this->assertFalse($row['metrics_available']);
+        $this->assertNotNull($row['metrics_synced_at']);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign_external_id));
+    }
+
+    public function test_already_paused_meta_target_does_not_issue_duplicate_pause(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '75000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/campaigns?*' => Http::response([
+                'data' => [[
+                    'id' => $task->campaign_external_id,
+                    'name' => $task->campaign->name,
+                    'status' => 'PAUSED',
+                    'effective_status' => 'PAUSED',
+                    'daily_budget' => '100000',
+                ]],
+            ]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $this->assertTrue($task->fresh()->is_active);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        $this->assertNotSame('pause', $task->fresh()->last_budget_action);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign_external_id));
+    }
+
     private function automationFixture(bool $writesEnabled = true, string $level = 'campaign'): array
     {
         Cache::flush();

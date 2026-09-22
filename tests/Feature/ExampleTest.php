@@ -439,32 +439,46 @@ class ExampleTest extends TestCase
         $this->assertSame(250000, collect($rows)->firstWhere('campaign_id', $task->campaign->external_id)['budget']);
     }
 
-    public function test_automation_budget_metrics_use_campaign_target_metrics(): void
+    public function test_automation_budget_metrics_use_task_snapshot_metrics_and_separate_meta_status(): void
     {
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $this->actingAs($user);
 
         $task = AutomationTask::with(['adAccount', 'campaign'])->firstOrFail();
-        $metrics = app(AutomationBudgetService::class)->metricSnapshot(['spend' => 35372, 'actions' => [
+        $campaignMetrics = app(AutomationBudgetService::class)->metricSnapshot(['spend' => 35372, 'actions' => [
             ['action_type' => 'purchase', 'value' => 1],
             ['action_type' => 'initiate_checkout', 'value' => 3],
         ]]);
         $task->campaign->update([
             'daily_budget' => 55000,
-        ] + app(AutomationBudgetService::class)->insightPayload($metrics));
-        $task->update(['conversion' => 'initiate_checkout', 'current_budget' => 55000, 'current_spend' => 0, 'current_result' => 0]);
+            'status' => 'PAUSED',
+            'effective_status' => 'PAUSED',
+        ] + app(AutomationBudgetService::class)->insightPayload($campaignMetrics));
+        $task->update([
+            'conversion' => 'initiate_checkout',
+            'is_active' => true,
+            'current_budget' => 55000,
+            'current_spend' => 42074,
+            'current_result' => 1,
+            'last_metrics_synced_at' => now(),
+        ]);
 
         $row = collect($this
-            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all')
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all&local=1')
             ->assertOk()
             ->json('data'))
             ->firstWhere('id', $task->id);
 
         $this->assertSame(55000, $row['current_budget']);
-        $this->assertSame(35372, $row['current_spend']);
-        $this->assertSame(3, $row['current_hasil']);
-        $this->assertSame(11791, $row['current_cpr']);
+        $this->assertSame(42074, $row['current_spend']);
+        $this->assertSame(1, $row['current_hasil']);
+        $this->assertSame(42074, $row['current_cpr']);
+        $this->assertSame('active', $row['automation_status']);
+        $this->assertSame('PAUSED', $row['meta_status']);
+        $this->assertSame('PAUSED', $row['meta_effective_status']);
+        $this->assertTrue($row['metrics_available']);
+        $this->assertFalse($row['metrics_stale']);
     }
 
     public function test_automation_task_endpoint_exposes_configured_cpr_cap(): void
@@ -489,6 +503,7 @@ class ExampleTest extends TestCase
     {
         $this->seed(TestDataSeeder::class);
         Cache::flush();
+        config(['services.meta.automation_insights_date_preset' => 'last_7d']);
         $user = User::firstOrFail();
         $this->actingAs($user);
         T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
@@ -528,15 +543,17 @@ class ExampleTest extends TestCase
         $this->assertSame(42000, $row['current_spend']);
         $this->assertSame(2, $row['current_hasil']);
         $this->assertSame(21000, $row['current_cpr']);
+        $this->assertTrue($row['metrics_available']);
+        $this->assertFalse($row['metrics_stale']);
         $this->assertSame(42000, $task->fresh()->current_spend);
         $this->assertSame(2, $task->fresh()->current_result);
         Http::assertSentCount(1);
         Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign->adAccount->external_id.'/insights')
             && $request['level'] === 'campaign'
-            && $request['date_preset'] === 'today');
+            && $request['date_preset'] === 'last_7d');
     }
 
-    public function test_automation_budget_metrics_resolve_legacy_task_by_external_campaign_id(): void
+    public function test_automation_budget_meta_status_resolves_legacy_task_by_external_campaign_id(): void
     {
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
@@ -545,6 +562,8 @@ class ExampleTest extends TestCase
         $task = AutomationTask::with('campaign')->firstOrFail();
         $task->campaign->update([
             'daily_budget' => 55000,
+            'status' => 'PAUSED',
+            'effective_status' => 'PAUSED',
             'spend' => 35372,
             'result' => 1,
         ]);
@@ -552,20 +571,21 @@ class ExampleTest extends TestCase
             'campaign_id' => null,
             'conversion' => 'purchase',
             'current_budget' => 55000,
-            'current_spend' => 0,
-            'current_result' => 0,
+            'current_spend' => 24000,
+            'current_result' => 2,
         ]);
 
         $row = collect($this
-            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all')
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all&local=1')
             ->assertOk()
             ->json('data'))
             ->firstWhere('id', $task->id);
 
         $this->assertSame(55000, $row['current_budget']);
-        $this->assertSame(35372, $row['current_spend']);
-        $this->assertSame(1, $row['current_hasil']);
-        $this->assertSame(35372, $row['current_cpr']);
+        $this->assertSame(24000, $row['current_spend']);
+        $this->assertSame(2, $row['current_hasil']);
+        $this->assertSame(12000, $row['current_cpr']);
+        $this->assertSame('PAUSED', $row['meta_status']);
     }
 
     public function test_update_automation_task_pushes_budget_to_meta_adset(): void
@@ -1315,7 +1335,10 @@ class ExampleTest extends TestCase
     public function test_automation_enforcement_bulk_fetches_campaign_insights_once_per_account(): void
     {
         $this->seed(TestDataSeeder::class);
-        config(['services.meta.enable_writes' => false]);
+        config([
+            'services.meta.enable_writes' => false,
+            'services.meta.automation_insights_date_preset' => 'last_7d',
+        ]);
         $user = User::firstOrFail();
         T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
         $tasks = AutomationTask::with('campaign.adAccount')->take(2)->get();
@@ -1346,7 +1369,7 @@ class ExampleTest extends TestCase
         Http::assertSentCount(1);
         Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$account->external_id.'/insights')
             && $request['level'] === 'campaign'
-            && $request['date_preset'] === 'today');
+            && $request['date_preset'] === 'last_7d');
         $tasks->each(fn (AutomationTask $task) => $this->assertSame(3, $task->fresh()->current_result));
     }
 

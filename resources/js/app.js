@@ -439,17 +439,24 @@ function renderAutomationTable(rows) {
     qs('#automation_table tbody').innerHTML = rows.map((row) => {
         const currentCpr = Number(row.current_cpr || 0);
         const cprCap = Number(row.cpr_cap || 0);
-        const cprClass = cprCap > 0 && currentCpr >= cprCap ? 'num text-danger' : 'num';
+        const metricsStale = Boolean(row.metrics_stale);
+        const cprClass = (metricsStale || (cprCap > 0 && currentCpr >= cprCap)) ? 'num text-danger' : 'num';
+        const metricClass = metricsStale ? 'num text-danger' : 'num';
+        const staleLabel = metricsStale ? '<br><small class="text-danger">stale</small>' : '';
+        const automationActive = row.automation_status ? row.automation_status === 'active' : row.status === 'true';
+        const metaStatus = row.meta_effective_status || row.meta_status || '-';
+        const metaStatusClass = metaStatus === 'ACTIVE' ? 'active' : (metaStatus === 'PAUSED' ? 'pause' : 'draft');
 
         return `
             <tr>
                 <td><span class="campaign-name">${escapeHtml(row.campaign_name)}</span><br><small>${escapeHtml(row.event_flow)} / ${escapeHtml(row.conversion)}</small></td>
                 <td>${escapeHtml(row.ad_account)}</td>
-                <td><button class="badge ${row.status === 'true' ? 'active' : 'pause'}" data-toggle-task="${escapeHtml(row.id)}" data-status="${row.status === 'true' ? 'false' : 'true'}">${row.status === 'true' ? 'active' : 'pause'}</button></td>
+                <td><button class="badge ${automationActive ? 'active' : 'pause'}" data-toggle-task="${escapeHtml(row.id)}" data-status="${automationActive ? 'false' : 'true'}">${automationActive ? 'active' : 'pause'}</button></td>
+                <td><span class="badge ${metaStatusClass}">${escapeHtml(metaStatus)}</span></td>
                 <td class="num">${rupiah(row.current_budget)}</td>
-                <td class="num">${rupiah(row.current_spend)}</td>
-                <td class="num">${number(row.current_hasil)}</td>
-                <td class="${cprClass}">${rupiah(row.current_cpr)}</td>
+                <td class="${metricClass}">${rupiah(row.current_spend)}</td>
+                <td class="${metricClass}">${number(row.current_hasil)}</td>
+                <td class="${cprClass}">${rupiah(row.current_cpr)}${staleLabel}</td>
                 <td class="${cprClass}">${rupiah(row.cpr_cap)}</td>
                 <td>${escapeHtml(row.log || '-')}</td>
                 <td class="action-row">

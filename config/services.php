@@ -36,8 +36,10 @@ return [
         'retry_times' => (int) env('META_GRAPH_RETRY_TIMES', 3),
         'retry_sleep_ms' => (int) env('META_GRAPH_RETRY_SLEEP_MS', 500),
         'insights_date_preset' => env('META_GRAPH_INSIGHTS_DATE_PRESET', 'last_30d'),
-        'automation_display_insights_date_preset' => env('META_GRAPH_AUTOMATION_DISPLAY_INSIGHTS_DATE_PRESET', 'today'),
-        'automation_enforcement_insights_date_preset' => env('META_GRAPH_AUTOMATION_ENFORCEMENT_INSIGHTS_DATE_PRESET', env('META_GRAPH_AUTOMATION_DISPLAY_INSIGHTS_DATE_PRESET', 'today')),
+        'automation_insights_date_preset' => env(
+            'META_GRAPH_AUTOMATION_INSIGHTS_DATE_PRESET',
+            env('META_GRAPH_AUTOMATION_DISPLAY_INSIGHTS_DATE_PRESET', env('META_GRAPH_AUTOMATION_ENFORCEMENT_INSIGHTS_DATE_PRESET', 'today'))
+        ),
         'webhook_verify_token' => env('META_WEBHOOK_VERIFY_TOKEN'),
         'webhook_app_secret' => env('META_WEBHOOK_APP_SECRET'),
         'webhook_callback_url' => env('META_WEBHOOK_CALLBACK_URL', rtrim((string) env('APP_URL'), '/').'/meta/webhook/'),

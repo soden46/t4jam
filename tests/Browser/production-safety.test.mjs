@@ -55,6 +55,9 @@ test('automation table renders configured cpr cap next to current cpr', async ()
             event_flow: 'lp_to_wa',
             conversion: 'purchase',
             status: 'true',
+            automation_status: 'active',
+            meta_status: 'PAUSED',
+            meta_effective_status: 'PAUSED',
             current_budget: 100000,
             current_spend: 75919,
             current_hasil: 1,
@@ -63,10 +66,12 @@ test('automation table renders configured cpr cap next to current cpr', async ()
         }]);
     });
 
-    assert.equal(await page.locator('#automation_table tbody td').nth(6).textContent(), 'Rp. 75.919,-');
-    assert.equal(await page.locator('#automation_table tbody td').nth(7).textContent(), 'Rp. 25.000,-');
-    assert.match(await page.locator('#automation_table tbody td').nth(6).getAttribute('class'), /text-danger/);
+    assert.equal(await page.locator('#automation_table tbody td').nth(2).textContent(), 'active');
+    assert.equal(await page.locator('#automation_table tbody td').nth(3).textContent(), 'PAUSED');
+    assert.equal(await page.locator('#automation_table tbody td').nth(7).textContent(), 'Rp. 75.919,-');
+    assert.equal(await page.locator('#automation_table tbody td').nth(8).textContent(), 'Rp. 25.000,-');
     assert.match(await page.locator('#automation_table tbody td').nth(7).getAttribute('class'), /text-danger/);
+    assert.match(await page.locator('#automation_table tbody td').nth(8).getAttribute('class'), /text-danger/);
 });
 
 test('polling reads only local tasks, does not overlap, and preserves open edits', async () => {

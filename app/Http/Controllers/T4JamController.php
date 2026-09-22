@@ -848,11 +848,13 @@ class T4JamController extends Controller
     {
         $target = $this->taskMetricTarget($task);
         $budget = (int) ($target?->daily_budget ?? $task->current_budget);
-        $spend = (int) ($target?->spend ?? $task->current_spend);
-        $targetResults = $target?->conversion_results ?? [];
-        $result = $target
-            ? max(0, (int) ($targetResults[$task->conversion] ?? ($task->conversion === 'purchase' ? $target->result : 0)))
-            : max(0, (int) $task->current_result);
+        $spend = (int) $task->current_spend;
+        $result = max(0, (int) $task->current_result);
+        $metricsUnavailableAt = $task->metrics_unavailable_at;
+        $lastMetricsSyncedAt = $task->last_metrics_synced_at;
+        $metricsStale = $metricsUnavailableAt !== null
+            && ($lastMetricsSyncedAt === null || $metricsUnavailableAt->gte($lastMetricsSyncedAt));
+        $metricsAvailable = $lastMetricsSyncedAt !== null && ! $metricsStale;
 
         return [
             'id' => $task->id,
@@ -869,6 +871,12 @@ class T4JamController extends Controller
             'cpr_cap' => $task->cpr_cap,
             'log' => $task->last_log,
             'status' => $task->is_active ? 'true' : 'false',
+            'automation_status' => $task->is_active ? 'active' : 'pause',
+            'meta_status' => $target?->status,
+            'meta_effective_status' => $target?->effective_status,
+            'metrics_synced_at' => $lastMetricsSyncedAt?->timezone('Asia/Jakarta')->format('d-m-Y, H:i'),
+            'metrics_stale' => $metricsStale,
+            'metrics_available' => $metricsAvailable,
             'ad_id' => $task->adAccount?->external_id,
             'ad_account' => $task->ad_account_name,
             'campaign_name' => $task->campaign_name,

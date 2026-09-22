@@ -86,7 +86,7 @@ class AutomationBudgetService
         }
 
         return Cache::lock('automation-display-sync:'.$profile->id, 30)->get(function () use ($profile, $client, $tasks): int {
-            $datePreset = config('services.meta.automation_display_insights_date_preset', 'today');
+            $datePreset = config('services.meta.automation_insights_date_preset', 'today');
             $freshTargets = $this->refreshMetrics($tasks, $client, $profile, $datePreset);
             $updated = 0;
 
@@ -100,6 +100,8 @@ class AutomationBudgetService
                 $metrics = $freshTargets[$this->targetKey($task, $target)] ?? null;
 
                 if ($metrics === null) {
+                    $task->update(['metrics_unavailable_at' => now()]);
+
                     return;
                 }
 
@@ -108,6 +110,7 @@ class AutomationBudgetService
                     'current_result' => max(0, (int) ($metrics['results'][$task->conversion] ?? 0)),
                     'current_budget' => (int) $target->daily_budget,
                     'last_metrics_synced_at' => $metrics['insights_synced_at'] ?? now(),
+                    'metrics_unavailable_at' => null,
                 ]);
                 $updated++;
             });
@@ -205,7 +208,7 @@ class AutomationBudgetService
                 ->values();
         }
 
-        $datePreset = config('services.meta.automation_enforcement_insights_date_preset', 'today');
+        $datePreset = config('services.meta.automation_insights_date_preset', 'today');
         $freshTargets = $refreshMetrics ? $this->refreshMetrics($tasks, $client, $profile, $datePreset) : $syncedTargets;
 
         $tasks
@@ -232,6 +235,7 @@ class AutomationBudgetService
 
                     if ($freshTargets !== null && ! isset($freshTargets[$targetKey])) {
                         $reason = 'insight_unavailable';
+                        $task->update(['metrics_unavailable_at' => now()]);
 
                         return;
                     }
@@ -248,6 +252,7 @@ class AutomationBudgetService
                         'current_result' => $result,
                         'current_budget' => $target->daily_budget,
                         'last_metrics_synced_at' => $metrics['insights_synced_at'] ?? now(),
+                        'metrics_unavailable_at' => null,
                         'last_checked_at' => now(),
                     ]);
 

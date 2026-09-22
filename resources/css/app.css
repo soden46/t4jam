@@ -215,7 +215,7 @@ label small { color: var(--muted); font-weight: 500; }
 
 .table-wrap { width: 100%; max-width: 100%; overflow-x: auto; min-width: 0; }
 .data-table { width: 100%; border-collapse: collapse; min-width: 900px; }
-#automation_table { min-width: 1040px; }
+#automation_table { min-width: 1160px; }
 .data-table th, .data-table td { padding: .95rem .75rem; border-bottom: 1px dashed #dbdfe9; vertical-align: middle; }
 .data-table th { text-align: left; color: #99a1b7; font-size: .78rem; text-transform: uppercase; letter-spacing: 0; }
 .data-table .num { text-align: right; white-space: nowrap; }
