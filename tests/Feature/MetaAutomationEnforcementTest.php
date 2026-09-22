@@ -314,6 +314,174 @@ class MetaAutomationEnforcementTest extends TestCase
             && str_contains($request->url(), $task->campaign_external_id));
     }
 
+    public function test_schedule_pause_ignores_period_and_resumes_within_window(): void
+    {
+        Cache::flush();
+        config(['services.meta.enable_writes' => true]);
+        [$profile, $task] = $this->automationFixture();
+
+        $task->update([
+            'use_on_off' => true,
+            'on_time' => '00:00',
+            'off_time' => '23:59',
+            'period' => 10,
+            'is_active' => false,
+            'last_budget_action' => 'schedule_pause',
+            'last_checked_at' => now()->subMinutes(4),
+            'counter_cpr' => false,
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '1000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame('ACTIVE', $fresh->campaign->fresh()->status);
+        $this->assertSame('schedule_resume', $fresh->last_budget_action);
+    }
+
+    public function test_manual_pause_resumes_at_on_time_ignoring_period(): void
+    {
+        Cache::flush();
+        config(['services.meta.enable_writes' => true]);
+        [$profile, $task] = $this->automationFixture();
+
+        $task->update([
+            'use_on_off' => true,
+            'on_time' => '00:00',
+            'off_time' => '23:59',
+            'period' => 10,
+            'is_active' => false,
+            'last_budget_action' => 'manual_pause',
+            'last_checked_at' => now()->subMinutes(4),
+            'counter_cpr' => false,
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '1000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame('ACTIVE', $fresh->campaign->fresh()->status);
+        $this->assertSame('schedule_resume', $fresh->last_budget_action);
+    }
+
+    public function test_schedule_pause_ignores_period_when_outside_window(): void
+    {
+        Cache::flush();
+        config(['services.meta.enable_writes' => true]);
+        [$profile, $task] = $this->automationFixture();
+
+        $task->update([
+            'use_on_off' => true,
+            'on_time' => '23:00',
+            'off_time' => '23:01',
+            'period' => 10,
+            'is_active' => true,
+            'last_budget_action' => null,
+            'last_checked_at' => now()->subMinutes(4),
+            'counter_cpr' => false,
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '1000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame('PAUSED', $fresh->campaign->fresh()->status);
+        $this->assertSame('schedule_pause', $fresh->last_budget_action);
+    }
+
+    public function test_cpr_evaluation_respects_period(): void
+    {
+        Cache::flush();
+        config(['services.meta.enable_writes' => true]);
+        [$profile, $task] = $this->automationFixture();
+
+        $task->update([
+            'use_on_off' => false,
+            'period' => 10,
+            'is_active' => true,
+            'last_checked_at' => now()->subMinutes(4),
+            'last_budget_action' => null,
+        ]);
+
+        app(AutomationBudgetService::class)->pauseTasksOverCprCap($profile, app(MetaAdsSyncService::class)->client($profile), true);
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame(now()->subMinutes(4)->startOfSecond()->format('Y-m-d H:i:s'), $fresh->last_checked_at->format('Y-m-d H:i:s'));
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_cpr_paused_task_not_resumed_by_schedule(): void
+    {
+        Cache::flush();
+        config(['services.meta.enable_writes' => true]);
+        [$profile, $task] = $this->automationFixture();
+
+        $task->update([
+            'use_on_off' => true,
+            'on_time' => '00:00',
+            'off_time' => '23:59',
+            'period' => 10,
+            'is_active' => false,
+            'last_budget_action' => 'pause',
+            'counter_cpr' => true,
+            'last_checked_at' => now()->subMinutes(15),
+            'pause_cpr_cap' => 50000,
+        ]);
+
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '1000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame('pause', $fresh->last_budget_action);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
     private function automationFixture(bool $writesEnabled = true, string $level = 'campaign'): array
     {
         Cache::flush();

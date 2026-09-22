@@ -199,13 +199,13 @@ class AutomationBudgetService
         if ($refreshMetrics) {
             $tasks = $tasks
                 ->filter(function (AutomationTask $task) use ($profile, $client, $forceDue, $source): bool {
-                    if (! $forceDue && ! $this->isDue($task)) {
-                        $this->logEvaluation($profile, $task, 'none', 'not_due', $source);
+                    $scheduleContinued = $this->applyScheduledStatusIfNeeded($task, $client, $profile, $source);
 
+                    if (! $forceDue && ! $this->isDue($task)) {
                         return false;
                     }
 
-                    return $this->applyScheduledStatusIfNeeded($task, $client, $profile, $source);
+                    return $scheduleContinued;
                 })
                 ->values();
         }
