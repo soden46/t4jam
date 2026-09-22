@@ -26,13 +26,16 @@ class SyncMetaAdsAccount implements ShouldBeUnique, ShouldQueue
     public function __construct(
         public readonly int $profileId,
         public readonly string $adAccountExternalId,
+        public readonly array $campaignIds = [],
+        public readonly array $adSetIds = [],
+        public readonly array $fields = [],
     ) {
         $this->onQueue('meta');
     }
 
     public function uniqueId(): string
     {
-        return $this->profileId.':'.$this->adAccountExternalId;
+        return $this->profileId.':'.$this->adAccountExternalId.':'.md5(json_encode([$this->campaignIds, $this->adSetIds]) ?: '');
     }
 
     public function backoff(): array
@@ -54,7 +57,7 @@ class SyncMetaAdsAccount implements ShouldBeUnique, ShouldQueue
         }
 
         try {
-            $metaSync->syncAccountFromWebhook($profile, $this->adAccountExternalId);
+            $metaSync->syncAccountFromWebhook($profile, $this->adAccountExternalId, $this->campaignIds, $this->adSetIds);
         } catch (MetaAdsException $exception) {
             $profile->update(['last_meta_error' => $exception->getMessage()]);
             MetaFlowLog::warning('webhook account sync failed with meta error', [

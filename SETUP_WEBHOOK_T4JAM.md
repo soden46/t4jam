@@ -2,7 +2,7 @@
 
 Dokumen ini menjelaskan cara mengaktifkan webhook Meta Ads untuk T4Jam agar perubahan dari Meta Ads Manager bisa masuk otomatis ke database Laravel.
 
-Webhook ini bersifat event-driven: Meta mengirim notifikasi perubahan ad account, lalu aplikasi T4Jam menjalankan job queue untuk mengambil snapshot terbaru dari Meta Graph API. Jadi ini bukan payload data lengkap dari Meta, tetapi trigger sync otomatis.
+Webhook ini bersifat event-driven: Meta mengirim notifikasi perubahan ad account, lalu aplikasi T4Jam menjalankan job queue untuk mengambil snapshot terbaru dari Meta Graph API dan mengevaluasi automation CPR untuk target terkait. Jadi ini bukan payload data lengkap dari Meta, dan webhook tidak membawa CPR terbaru; payload dipakai sebagai trigger untuk fetch Insights terbaru.
 
 ## 1. Prasyarat
 
@@ -217,6 +217,8 @@ Meta Ads Manager CRUD
 -> Laravel dispatch SyncMetaAdsAccount ke queue meta
 -> Worker mengambil data terbaru dari Meta Graph API
 -> Database lokal diperbarui
+-> Automation CPR target terkait dievaluasi
+-> Jika CPR >= cap dan write mode aktif, campaign/ad set dipause di Meta
 -> Dashboard/Automation membaca DB lokal
 ```
 
@@ -229,6 +231,8 @@ Data yang disync dari webhook account:
 - Ad set insight
 - Rekonsiliasi automation task terhadap status/budget terbaru dari Meta
 
+Webhook field `campaigns`, `adsets`, dan `ads` dipakai sebagai trigger. Jika payload menyertakan campaign/ad set ID, worker mengevaluasi task yang sesuai target itu saja. Jika Meta tidak menyertakan ID target, worker fallback ke task pada ad account tersebut. Insights tetap diambil dari Graph API karena webhook tidak mengirim spend/result/CPR.
+
 ## 8. Cara Kerja dari T4Jam ke Meta
 
 Beberapa aksi dari T4Jam sudah langsung mengirim request ke Meta Graph API:
@@ -239,6 +243,8 @@ Beberapa aksi dari T4Jam sudah langsung mengirim request ke Meta Graph API:
 - Turun budget manual: push budget ke Meta.
 - Setup iklan publish: create campaign, ad set, creative, dan ad lewat queue.
 - Enforcement automation: pause/resume target saat aturan CPR atau jadwal terpenuhi.
+
+Webhook dan scheduler memakai service evaluasi automation yang sama. Webhook memberi reaksi lebih cepat saat ada event Meta, sedangkan scheduler `t4jam:enforce-automation` setiap 5 menit tetap menjadi fallback/reconciliation jika webhook terlambat, gagal, atau queue sempat tertahan.
 
 Untuk write action, pastikan:
 
@@ -280,6 +286,7 @@ Log yang perlu dicari:
 meta webhook account sync queued
 webhook account sync started
 webhook account sync finished
+automation evaluation
 meta webhook rejected invalid signature
 ```
 
@@ -289,7 +296,7 @@ Tes dari sisi Meta:
 2. Tunggu webhook masuk dan worker memproses job.
 3. Cek data di T4Jam.
 4. Cek `last_meta_sync_at` di profile.
-5. Cek log `[T4JAM_META_FLOW]`.
+5. Cek log `[T4JAM_META_FLOW]` untuk `automation evaluation` dengan `source=webhook`, `reason`, `cpr`, `cpr_cap`, dan `action`.
 
 ## 10. Troubleshooting
 
@@ -344,6 +351,7 @@ Yang sudah didukung:
 
 - Event webhook ad account.
 - Sync campaign, ad set, dan insight setelah event.
+- Evaluasi automation CPR target terkait setelah event.
 - Rekonsiliasi status/budget automation task dari data Meta.
 - Push beberapa aksi T4Jam ke Meta, terutama budget/status automation dan publish setup iklan.
 

@@ -62,6 +62,7 @@ class MetaAdsSyncService
             $profile,
             $client,
             syncedTargets: $this->freshInsightTargets,
+            source: 'sync',
         );
 
         if ($this->warnings !== []) {
@@ -338,11 +339,16 @@ class MetaAdsSyncService
         return $counts;
     }
 
-    public function syncAccountFromWebhook(T4JamProfile $profile, string $adAccountExternalId): array
-    {
+    public function syncAccountFromWebhook(
+        T4JamProfile $profile,
+        string $adAccountExternalId,
+        array $campaignIds = [],
+        array $adSetIds = [],
+    ): array {
         $this->warnings = [];
         $adAccountExternalId = $this->normalizeAdAccountId($adAccountExternalId);
         $client = $this->client($profile);
+        $freshInsightTargets = [];
 
         MetaFlowLog::info('webhook account sync started', [
             'profile_id' => $profile->id,
@@ -370,6 +376,7 @@ class MetaAdsSyncService
             $adSets,
             $campaignInsights,
             $adSetInsights,
+            &$freshInsightTargets,
         ): array {
             $account = $this->upsertAccount($accountData, $profile);
             $campaignModels = [];
@@ -383,7 +390,9 @@ class MetaAdsSyncService
                 $campaignIds[] = $campaign->id;
 
                 if ($insights = $campaignInsights->get($campaign->external_id)) {
-                    $campaign->update($this->insightPayload($insights));
+                    $metrics = app(AutomationBudgetService::class)->metricSnapshot($insights);
+                    $campaign->update(app(AutomationBudgetService::class)->insightPayload($metrics));
+                    $freshInsightTargets['campaign:'.$campaign->external_id] = $metrics;
                     $insightCount++;
                 }
             }
@@ -402,7 +411,9 @@ class MetaAdsSyncService
                 $adSetIds[] = $adSet->id;
 
                 if ($insights = $adSetInsights->get($adSet->external_id)) {
-                    $adSet->update($this->insightPayload($insights));
+                    $metrics = app(AutomationBudgetService::class)->metricSnapshot($insights);
+                    $adSet->update(app(AutomationBudgetService::class)->insightPayload($metrics));
+                    $freshInsightTargets['adset:'.$adSet->external_id] = $metrics;
                     $insightCount++;
                 }
             }
@@ -423,12 +434,22 @@ class MetaAdsSyncService
             'last_meta_error' => $this->warnings === [] ? null : end($this->warnings),
         ]);
 
+        $counts['automation_paused'] = app(AutomationBudgetService::class)->pauseWebhookTasksOverCprCap(
+            $profile,
+            $client,
+            $adAccountExternalId,
+            $campaignIds,
+            $adSetIds,
+            $freshInsightTargets,
+        );
+
         MetaFlowLog::info('webhook account sync finished', [
             'profile_id' => $profile->id,
             'ad_account_id' => $adAccountExternalId,
             'campaigns' => $counts['campaigns'],
             'adsets' => $counts['adsets'],
             'insights' => $counts['insights'],
+            'automation_paused' => $counts['automation_paused'],
         ]);
 
         return $counts;

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\MetaAdsException;
+use App\Models\AdAccount;
 use App\Models\AdSet;
 use App\Models\AutomationLog;
 use App\Models\AutomationTask;
@@ -16,6 +17,8 @@ use Illuminate\Support\Facades\DB;
 class AutomationBudgetService
 {
     private const BUDGET_INCREASE_RATIO = 0.15;
+
+    private array $statusCache = [];
 
     private const CONVERSION_ACTION_TYPES = [
         'purchase' => ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase', 'onsite_conversion.purchase'],
@@ -42,10 +45,37 @@ class AutomationBudgetService
         };
     }
 
-    public function pauseTasksOverCprCap(T4JamProfile $profile, MetaAdsClient $client, bool $refreshMetrics = false, ?array $syncedTargets = null): int
+    public function pauseTasksOverCprCap(T4JamProfile $profile, MetaAdsClient $client, bool $refreshMetrics = false, ?array $syncedTargets = null, string $source = 'scheduler'): int
     {
         return Cache::lock('automation-profile:'.$profile->id, 900)->get(
-            fn () => $this->evaluateTasks($profile, $client, $refreshMetrics, $syncedTargets)
+            fn () => $this->evaluateTasks($profile, $client, $refreshMetrics, $syncedTargets, $source)
+        ) ?: 0;
+    }
+
+    public function pauseWebhookTasksOverCprCap(
+        T4JamProfile $profile,
+        MetaAdsClient $client,
+        string $adAccountExternalId,
+        array $campaignIds = [],
+        array $adSetIds = [],
+        ?array $syncedTargets = null,
+    ): int {
+        $campaignIds = $this->normalizeIds($campaignIds);
+        $adSetIds = $this->normalizeIds($adSetIds);
+        $lockKey = 'automation-webhook:'.$profile->id.':'.md5($adAccountExternalId.'|'.implode(',', $campaignIds).'|'.implode(',', $adSetIds));
+
+        return Cache::lock($lockKey, 60)->get(
+            fn () => $this->evaluateTasks(
+                $profile,
+                $client,
+                $syncedTargets === null,
+                $syncedTargets,
+                'webhook',
+                true,
+                $adAccountExternalId,
+                $campaignIds,
+                $adSetIds,
+            )
         ) ?: 0;
     }
 
@@ -77,7 +107,7 @@ class AutomationBudgetService
                     'current_spend' => (int) $metrics['spend'],
                     'current_result' => max(0, (int) ($metrics['results'][$task->conversion] ?? 0)),
                     'current_budget' => (int) $target->daily_budget,
-                    'last_checked_at' => now(),
+                    'last_metrics_synced_at' => $metrics['insights_synced_at'] ?? now(),
                 ]);
                 $updated++;
             });
@@ -98,11 +128,46 @@ class AutomationBudgetService
         MetaAdsClient $client,
         bool $refreshMetrics = false,
         ?array $syncedTargets = null,
+        string $source = 'scheduler',
+        bool $forceDue = false,
+        ?string $adAccountExternalId = null,
+        array $campaignIds = [],
+        array $adSetIds = [],
     ): int {
+        $this->statusCache = [];
         $paused = 0;
+        $account = $adAccountExternalId
+            ? AdAccount::query()->where('external_id', $adAccountExternalId)->first()
+            : null;
         $tasks = AutomationTask::query()
             ->with(['campaign', 'adSet'])
             ->where('user_id', $profile->user_id)
+            ->when($adAccountExternalId, function ($query) use ($account): void {
+                if ($account) {
+                    $query->where('ad_account_id', $account->id);
+
+                    return;
+                }
+
+                $query->whereRaw('1 = 0');
+            })
+            ->when($campaignIds !== [] || $adSetIds !== [], function ($query) use ($campaignIds, $adSetIds): void {
+                $query->where(function ($targetQuery) use ($campaignIds, $adSetIds): void {
+                    if ($campaignIds !== []) {
+                        $targetQuery->orWhere(function ($campaignQuery) use ($campaignIds): void {
+                            $campaignQuery->where('level', 'campaign')
+                                ->whereIn('campaign_external_id', $campaignIds);
+                        });
+                    }
+
+                    if ($adSetIds !== []) {
+                        $targetQuery->orWhere(function ($adSetQuery) use ($adSetIds): void {
+                            $adSetQuery->where('level', 'adset')
+                                ->whereIn('ad_set_external_id', $adSetIds);
+                        });
+                    }
+                });
+            })
             ->where(function ($query): void {
                 $query->where('is_active', true)
                     ->orWhere(function ($pausedQuery): void {
@@ -128,14 +193,14 @@ class AutomationBudgetService
 
         if ($refreshMetrics) {
             $tasks = $tasks
-                ->filter(function (AutomationTask $task) use ($profile, $client): bool {
-                    if (! $this->isDue($task)) {
-                        $this->logEvaluation($profile, $task, 'none', 'not_due');
+                ->filter(function (AutomationTask $task) use ($profile, $client, $forceDue, $source): bool {
+                    if (! $forceDue && ! $this->isDue($task)) {
+                        $this->logEvaluation($profile, $task, 'none', 'not_due', $source);
 
                         return false;
                     }
 
-                    return $this->applyScheduledStatusIfNeeded($task, $client, $profile);
+                    return $this->applyScheduledStatusIfNeeded($task, $client, $profile, $source);
                 })
                 ->values();
         }
@@ -144,7 +209,7 @@ class AutomationBudgetService
         $freshTargets = $refreshMetrics ? $this->refreshMetrics($tasks, $client, $profile, $datePreset) : $syncedTargets;
 
         $tasks
-            ->each(function (AutomationTask $task) use ($profile, $client, $freshTargets, &$paused): void {
+            ->each(function (AutomationTask $task) use ($profile, $client, $freshTargets, &$paused, $source): void {
                 $beforeAction = $task->last_budget_action;
                 $beforeLog = $task->last_log;
                 $reason = 'rules_not_met';
@@ -182,6 +247,7 @@ class AutomationBudgetService
                         'current_spend' => $spend,
                         'current_result' => $result,
                         'current_budget' => $target->daily_budget,
+                        'last_metrics_synced_at' => $metrics['insights_synced_at'] ?? now(),
                         'last_checked_at' => now(),
                     ]);
 
@@ -195,16 +261,13 @@ class AutomationBudgetService
                     }
 
                     if ((int) $task->cpr_cap <= 0) {
-                        return;
-                    }
-
-                    if (! config('services.meta.enable_writes')) {
-                        $reason = 'writes_disabled';
+                        $reason = 'missing_cpr_cap';
 
                         return;
                     }
 
                     if ($cpr < (int) $task->cpr_cap) {
+                        $reason = 'cpr_below_cap';
                         $this->increaseBudgetIfEligible($task, $target, $client, $profile, $result, $cpr);
 
                         return;
@@ -215,11 +278,24 @@ class AutomationBudgetService
 
                         return;
                     }
+
+                    if ($target->status !== 'ACTIVE') {
+                        $target = $this->refreshInactiveTargetStatus($task, $target, $client, $profile);
+                    }
+
                     if ($target->status !== 'ACTIVE') {
                         $reason = 'target_not_active';
 
                         return;
                     }
+
+                    if (! config('services.meta.enable_writes')) {
+                        $reason = 'writes_disabled';
+                        $this->recordSkippedPause($task, 'Automation melewati pause karena META_ADS_ENABLE_WRITES=false.');
+
+                        return;
+                    }
+
                     $targetId = $target->external_id;
 
                     try {
@@ -287,7 +363,7 @@ class AutomationBudgetService
                     $paused++;
                 } finally {
                     $action = ($task->last_budget_action !== $beforeAction || ($task->last_budget_action === 'increase' && $beforeLog !== $task->last_log)) && in_array($task->last_budget_action, ['pause', 'resume', 'increase', 'schedule_pause', 'schedule_resume'], true) ? $task->last_budget_action : 'none';
-                    $this->logEvaluation($profile, $task, $action, $action === 'none' ? $reason : null);
+                    $this->logEvaluation($profile, $task, $action, $action === 'none' ? $reason : null, $source);
                 }
             });
 
@@ -298,6 +374,7 @@ class AutomationBudgetService
         AutomationTask $task,
         MetaAdsClient $client,
         T4JamProfile $profile,
+        string $source,
     ): bool {
         if (! $task->use_on_off) {
             return true;
@@ -306,23 +383,23 @@ class AutomationBudgetService
         $target = $this->target($task);
 
         if (! $target) {
-            $this->logEvaluation($profile, $task, 'none', 'target_missing');
+            $this->logEvaluation($profile, $task, 'none', 'target_missing', $source);
 
             return false;
         }
 
         if (! $this->isWithinAutomationWindow($task)) {
             if ($task->is_active) {
-                $this->setScheduledStatus($task, $target, $client, $profile, false);
+                $this->setScheduledStatus($task, $target, $client, $profile, false, $source);
             } else {
-                $this->logEvaluation($profile, $task, 'none', 'outside_automation_window');
+                $this->logEvaluation($profile, $task, 'none', 'outside_automation_window', $source);
             }
 
             return false;
         }
 
         if (! $task->is_active && $task->last_budget_action === 'schedule_pause') {
-            return $this->setScheduledStatus($task, $target, $client, $profile, true);
+            return $this->setScheduledStatus($task, $target, $client, $profile, true, $source);
         }
 
         return true;
@@ -334,9 +411,10 @@ class AutomationBudgetService
         MetaAdsClient $client,
         T4JamProfile $profile,
         bool $active,
+        string $source = 'scheduler',
     ): bool {
         if (! config('services.meta.enable_writes')) {
-            $this->logEvaluation($profile, $task, 'none', 'writes_disabled');
+            $this->logEvaluation($profile, $task, 'none', 'writes_disabled', $source);
 
             return false;
         }
@@ -357,7 +435,7 @@ class AutomationBudgetService
                 'meta_code' => $exception->metaCode,
             ]);
 
-            $this->logEvaluation($profile, $task, 'none', 'schedule_status_update_failed');
+            $this->logEvaluation($profile, $task, 'none', 'schedule_status_update_failed', $source);
 
             return false;
         }
@@ -392,7 +470,7 @@ class AutomationBudgetService
             ]);
         });
 
-        $this->logEvaluation($profile, $task->fresh(), $action, null);
+        $this->logEvaluation($profile, $task->fresh(), $action, null, $source);
 
         return $active;
     }
@@ -565,21 +643,84 @@ class AutomationBudgetService
         return $freshInsights;
     }
 
-    private function logEvaluation(T4JamProfile $profile, AutomationTask $task, string $action, ?string $reason): void
+    private function logEvaluation(T4JamProfile $profile, AutomationTask $task, string $action, ?string $reason, string $source): void
     {
         $result = (int) $task->current_result;
+        $target = $this->target($task);
         MetaFlowLog::info('automation evaluation', [
             'profile_id' => $profile->id,
             'automation_task_id' => $task->id,
+            'level' => $task->level,
             'target_id' => $task->level === 'adset' ? $task->ad_set_external_id : $task->campaign_external_id,
             'conversion' => $task->conversion,
             'spend' => $task->current_spend,
             'result' => $result,
             'cpr' => $result > 0 ? (int) round($task->current_spend / $result) : $task->current_spend,
             'cpr_cap' => $task->cpr_cap,
+            'target_status' => $target?->status,
             'action' => $action,
             'reason' => $reason,
+            'source' => $source,
         ]);
+    }
+
+    private function recordSkippedPause(AutomationTask $task, string $message): void
+    {
+        $task->update(['last_log' => $message]);
+        AutomationLog::create([
+            'automation_task_id' => $task->id,
+            'messages' => [$message],
+        ]);
+    }
+
+    private function refreshInactiveTargetStatus(
+        AutomationTask $task,
+        Campaign|AdSet $target,
+        MetaAdsClient $client,
+        T4JamProfile $profile,
+    ): Campaign|AdSet {
+        $adAccountId = $target->adAccount?->external_id;
+
+        if (! $adAccountId) {
+            return $target;
+        }
+
+        $cacheKey = $task->level.':'.$adAccountId;
+        if (! array_key_exists($cacheKey, $this->statusCache)) {
+            try {
+                $rows = $task->level === 'adset'
+                    ? $client->accountAdSets($adAccountId)
+                    : $client->campaigns($adAccountId);
+            } catch (MetaAdsException $exception) {
+                MetaFlowLog::warning('automation target status refresh failed', [
+                    'profile_id' => $profile->id,
+                    'automation_task_id' => $task->id,
+                    'ad_account_id' => $adAccountId,
+                    'level' => $task->level,
+                    'http_status' => $exception->httpStatus,
+                    'meta_code' => $exception->metaCode,
+                ]);
+
+                $this->statusCache[$cacheKey] = collect();
+
+                return $target;
+            }
+
+            $this->statusCache[$cacheKey] = collect($rows)->keyBy('id');
+        }
+
+        $fresh = $this->statusCache[$cacheKey]->get($target->external_id);
+        if (! is_array($fresh)) {
+            return $target;
+        }
+
+        $target->update([
+            'status' => $fresh['status'] ?? $fresh['effective_status'] ?? $target->status,
+            'effective_status' => $fresh['effective_status'] ?? $target->effective_status,
+            'daily_budget' => (int) ($fresh['daily_budget'] ?? $target->daily_budget),
+        ]);
+
+        return $target->fresh();
     }
 
     private function isDue(AutomationTask $task): bool
@@ -696,6 +837,16 @@ class AutomationBudgetService
     private function targetKey(AutomationTask $task, Campaign|AdSet $target): string
     {
         return $task->level.':'.$target->external_id;
+    }
+
+    private function normalizeIds(array $ids): array
+    {
+        return collect($ids)
+            ->filter(fn ($id) => is_scalar($id) && trim((string) $id) !== '')
+            ->map(fn ($id) => (string) $id)
+            ->unique()
+            ->values()
+            ->all();
     }
 
     public function metricSnapshot(array $insights): array

@@ -14,6 +14,8 @@ use Illuminate\Support\Collection;
 
 class MetaAdsWebhookController extends Controller
 {
+    private const AUTOMATION_FIELDS = ['campaigns', 'adsets', 'ads'];
+
     public function verify(Request $request): Response
     {
         $mode = $request->query('hub.mode', $request->query('hub_mode'));
@@ -45,19 +47,58 @@ class MetaAdsWebhookController extends Controller
 
         $queued = collect($payload['entry'] ?? [])
             ->filter(fn ($entry) => is_array($entry) && filled($entry['id'] ?? null))
-            ->map(fn (array $entry) => [
-                'account' => $this->normalizeAdAccountId((string) $entry['id']),
-                'fields' => collect($entry['changes'] ?? [])->pluck('field')->filter()->unique()->values()->all(),
-            ])
-            ->unique('account')
+            ->map(function (array $entry): array {
+                $changes = collect($entry['changes'] ?? [])->filter(fn ($change) => is_array($change));
+                $targets = $this->extractAutomationTargets($changes->all());
+
+                return [
+                    'account' => $this->normalizeAdAccountId((string) $entry['id']),
+                    'fields' => $changes->pluck('field')->filter()->unique()->values()->all(),
+                    'campaign_ids' => $targets['campaign_ids'],
+                    'ad_set_ids' => $targets['ad_set_ids'],
+                ];
+            })
+            ->filter(function (array $entry): bool {
+                $relevant = collect($entry['fields'])->contains(fn ($field) => in_array($field, self::AUTOMATION_FIELDS, true));
+
+                if (! $relevant) {
+                    MetaFlowLog::info('automation evaluation', [
+                        'profile_id' => null,
+                        'automation_task_id' => null,
+                        'level' => null,
+                        'target_id' => null,
+                        'conversion' => null,
+                        'spend' => null,
+                        'result' => null,
+                        'cpr' => null,
+                        'cpr_cap' => null,
+                        'target_status' => null,
+                        'action' => 'none',
+                        'reason' => 'webhook_irrelevant',
+                        'source' => 'webhook',
+                        'fields' => $entry['fields'],
+                    ]);
+                }
+
+                return $relevant;
+            })
+            ->unique(fn (array $entry) => $entry['account'].':'.implode(',', $entry['campaign_ids']).':'.implode(',', $entry['ad_set_ids']))
             ->flatMap(function (array $entry): array {
                 return $this->profileIdsForAccount($entry['account'])
                     ->map(function (int $profileId) use ($entry): array {
-                        SyncMetaAdsAccount::dispatch($profileId, $entry['account']);
+                        SyncMetaAdsAccount::dispatch(
+                            $profileId,
+                            $entry['account'],
+                            $entry['campaign_ids'],
+                            $entry['ad_set_ids'],
+                            $entry['fields'],
+                        );
                         MetaFlowLog::info('meta webhook account sync queued', [
                             'profile_id' => $profileId,
                             'ad_account_id' => $entry['account'],
                             'fields' => $entry['fields'],
+                            'campaign_ids' => $entry['campaign_ids'],
+                            'ad_set_ids' => $entry['ad_set_ids'],
                         ]);
 
                         return [$profileId.':'.$entry['account']];
@@ -124,6 +165,59 @@ class MetaAdsWebhookController extends Controller
         }
 
         return $profileIds->map(fn ($id) => (int) $id)->unique()->values();
+    }
+
+    private function extractAutomationTargets(array $changes): array
+    {
+        $campaignIds = [];
+        $adSetIds = [];
+
+        foreach ($changes as $change) {
+            $field = $change['field'] ?? null;
+            $value = $change['value'] ?? [];
+
+            if ($field === 'campaigns') {
+                $campaignIds = array_merge($campaignIds, $this->collectIds($value, ['id', 'campaign_id']));
+            }
+
+            if ($field === 'adsets') {
+                $adSetIds = array_merge($adSetIds, $this->collectIds($value, ['id', 'adset_id', 'ad_set_id']));
+            }
+
+            if ($field === 'ads') {
+                $adIds = $this->collectIds($value, ['adset_id', 'ad_set_id']);
+                $adSetIds = array_merge($adSetIds, $adIds);
+
+                if ($adIds === []) {
+                    $campaignIds = array_merge($campaignIds, $this->collectIds($value, ['campaign_id']));
+                }
+            }
+        }
+
+        return [
+            'campaign_ids' => collect($campaignIds)->filter()->unique()->values()->all(),
+            'ad_set_ids' => collect($adSetIds)->filter()->unique()->values()->all(),
+        ];
+    }
+
+    private function collectIds(mixed $value, array $keys): array
+    {
+        if (! is_array($value)) {
+            return [];
+        }
+
+        $ids = [];
+        foreach ($value as $key => $item) {
+            if (in_array($key, $keys, true) && is_scalar($item) && filled((string) $item)) {
+                $ids[] = (string) $item;
+            }
+
+            if (is_array($item)) {
+                $ids = array_merge($ids, $this->collectIds($item, $keys));
+            }
+        }
+
+        return $ids;
     }
 
     private function normalizeAdAccountId(string $id): string

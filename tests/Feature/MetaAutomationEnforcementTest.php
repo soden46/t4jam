@@ -1,0 +1,366 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Jobs\SyncMetaAdsAccount;
+use App\Models\AutomationTask;
+use App\Models\Campaign;
+use App\Models\T4JamProfile;
+use App\Models\User;
+use App\Services\AutomationBudgetService;
+use App\Services\MetaAdsSyncService;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
+use Tests\TestCase;
+
+class MetaAutomationEnforcementTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_cpr_equal_to_cap_pauses_campaign(): void
+    {
+        [, $task] = $this->automationFixture();
+
+        $this->fakeEnforcementInsights($task, 30000, 1);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign_external_id)
+            && $request['status'] === 'PAUSED');
+    }
+
+    public function test_writes_disabled_logs_skip_without_meta_status_write(): void
+    {
+        [, $task] = $this->automationFixture(writesEnabled: false);
+
+        $this->fakeEnforcementInsights($task, 75000, 1, includeStatusPost: false);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        $this->assertStringContainsString('META_ADS_ENABLE_WRITES=false', $fresh->last_log);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_display_metric_refresh_does_not_advance_last_checked_at(): void
+    {
+        Cache::flush();
+        [$profile, $task] = $this->automationFixture();
+        $this->actingAs(User::firstOrFail());
+        $checkedAt = now()->subMinutes(3)->startOfSecond();
+        $task->update(['last_checked_at' => $checkedAt, 'last_metrics_synced_at' => null]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '60000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '2']],
+                ]],
+            ]),
+        ]);
+
+        $this->getJson('/get-automation-task/?acc=all&level=all&funnel=all')
+            ->assertOk()
+            ->assertJsonPath('meta_sync.updated', 1);
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->last_checked_at->equalTo($checkedAt));
+        $this->assertNotNull($fresh->last_metrics_synced_at);
+        $this->assertSame($profile->id, T4JamProfile::where('user_id', User::firstOrFail()->id)->value('id'));
+    }
+
+    public function test_relevant_campaign_webhook_sync_enforces_cpr_pause_immediately(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->update(['last_checked_at' => now()]);
+        $this->fakeWebhookAccountSync($task, webhookSpend: 75000, webhookResult: 1);
+
+        $body = $this->signedWebhookBody($profile, $task->campaign->adAccount->external_id, [
+            ['field' => 'campaigns', 'value' => ['id' => $task->campaign_external_id]],
+        ]);
+
+        $this->call('POST', '/meta/webhook/', [], [], [], $body['server'], $body['content'])
+            ->assertOk()
+            ->assertJsonPath('queued', 1);
+
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign_external_id)
+            && $request['status'] === 'PAUSED');
+    }
+
+    public function test_unrelated_campaign_webhook_does_not_pause_other_task(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $unrelated = Campaign::create([
+            'ad_account_id' => $task->campaign->ad_account_id,
+            'external_id' => 'cmp_unrelated',
+            'name' => 'Unrelated Campaign',
+            'status' => 'ACTIVE',
+            'effective_status' => 'ACTIVE',
+            'daily_budget' => 100000,
+        ]);
+        $this->fakeWebhookAccountSync($task, webhookSpend: 75000, webhookResult: 1, extraCampaign: $unrelated);
+
+        $body = $this->signedWebhookBody($profile, $task->campaign->adAccount->external_id, [
+            ['field' => 'campaigns', 'value' => ['id' => $unrelated->external_id]],
+        ]);
+
+        $this->call('POST', '/meta/webhook/', [], [], [], $body['server'], $body['content'])
+            ->assertOk()
+            ->assertJsonPath('queued', 1);
+
+        $this->assertTrue($task->fresh()->is_active);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign_external_id));
+    }
+
+    public function test_adset_level_task_pauses_adset_not_campaign(): void
+    {
+        [, $task] = $this->automationFixture(level: 'adset');
+        $adSet = $task->adSet;
+
+        Http::fake([
+            'graph.facebook.com/*/'.$adSet->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'adset_id' => $adSet->external_id,
+                    'spend' => '75000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$adSet->external_id => Http::response(['success' => true]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame('PAUSED', $adSet->fresh()->status);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $adSet->external_id)
+            && $request['status'] === 'PAUSED');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST'
+            && str_ends_with($request->url(), '/'.$task->campaign_external_id));
+    }
+
+    public function test_adset_webhook_payload_does_not_target_parent_campaign_task(): void
+    {
+        Queue::fake();
+        [$profile, $task] = $this->automationFixture(level: 'adset');
+        $adSet = $task->adSet;
+
+        $body = $this->signedWebhookBody($profile, $task->campaign->adAccount->external_id, [
+            ['field' => 'adsets', 'value' => [
+                'id' => $adSet->external_id,
+                'campaign_id' => $task->campaign_external_id,
+            ]],
+        ]);
+
+        $this->call('POST', '/meta/webhook/', [], [], [], $body['server'], $body['content'])
+            ->assertOk()
+            ->assertJsonPath('queued', 1);
+
+        Queue::assertPushed(SyncMetaAdsAccount::class, fn (SyncMetaAdsAccount $job) => $job->campaignIds === []
+            && $job->adSetIds === [$adSet->external_id]);
+    }
+
+    public function test_duplicate_webhook_enforcement_does_not_repeat_pause_write_after_local_pause(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $client = app(MetaAdsSyncService::class)->client($profile);
+        $metrics = app(AutomationBudgetService::class)->metricSnapshot([
+            'spend' => '75000',
+            'actions' => [['action_type' => 'purchase', 'value' => '1']],
+        ]);
+
+        Http::fake(['graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true])]);
+
+        app(AutomationBudgetService::class)->pauseWebhookTasksOverCprCap(
+            $profile,
+            $client,
+            $task->campaign->adAccount->external_id,
+            [$task->campaign_external_id],
+            [],
+            ['campaign:'.$task->campaign_external_id => $metrics],
+        );
+        app(AutomationBudgetService::class)->pauseWebhookTasksOverCprCap(
+            $profile,
+            $client,
+            $task->campaign->adAccount->external_id,
+            [$task->campaign_external_id],
+            [],
+            ['campaign:'.$task->campaign_external_id => $metrics],
+        );
+
+        Http::assertSentCount(1);
+        $this->assertFalse($task->fresh()->is_active);
+    }
+
+    public function test_failed_meta_pause_does_not_mark_local_target_paused(): void
+    {
+        [, $task] = $this->automationFixture();
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '75000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign_external_id => Http::response([
+                'error' => ['message' => 'Permission denied', 'code' => 200],
+            ], 403),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $this->assertTrue($task->fresh()->is_active);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        $this->assertNotSame('pause', $task->fresh()->last_budget_action);
+    }
+
+    private function automationFixture(bool $writesEnabled = true, string $level = 'campaign'): array
+    {
+        Cache::flush();
+        $this->seed(TestDataSeeder::class);
+        config(['services.meta.enable_writes' => $writesEnabled]);
+
+        $user = User::firstOrFail();
+        $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], [
+            'access_token' => 'token',
+            'app_secret' => 'webhook-secret',
+        ]);
+        $task = AutomationTask::with(['campaign.adAccount', 'campaign.adSets'])->where('user_id', $user->id)->firstOrFail();
+        AutomationTask::whereKeyNot($task->id)->delete();
+        $adSet = $task->campaign->adSets()->first();
+
+        $task->campaign->update(['status' => 'ACTIVE', 'effective_status' => 'ACTIVE', 'daily_budget' => 100000]);
+        $task->update([
+            'level' => $level,
+            'ad_set_id' => $level === 'adset' ? $adSet?->id : null,
+            'ad_set_external_id' => $level === 'adset' ? $adSet?->external_id : null,
+            'conversion' => 'purchase',
+            'cpr_cap' => 30000,
+            'maximum_budget' => 100000,
+            'pause_when_cpr_loss' => true,
+            'counter_cpr' => false,
+            'is_active' => true,
+            'last_checked_at' => now()->subMinutes(11),
+            'last_budget_action' => null,
+        ]);
+        $profile->adAccounts()->syncWithoutDetaching([$task->campaign->adAccount->id]);
+
+        return [$profile, $task->fresh(['campaign.adAccount', 'adSet'])];
+    }
+
+    private function fakeEnforcementInsights(AutomationTask $task, int $spend, int $result, bool $includeStatusPost = true): void
+    {
+        $fakes = [
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => (string) $spend,
+                    'actions' => [['action_type' => 'purchase', 'value' => (string) $result]],
+                ]],
+            ]),
+        ];
+
+        if ($includeStatusPost) {
+            $fakes['graph.facebook.com/*/'.$task->campaign_external_id] = Http::response(['success' => true]);
+        }
+
+        Http::fake($fakes);
+    }
+
+    private function fakeWebhookAccountSync(
+        AutomationTask $task,
+        int $webhookSpend,
+        int $webhookResult,
+        ?Campaign $extraCampaign = null,
+    ): void {
+        $account = $task->campaign->adAccount;
+        $campaigns = [[
+            'id' => $task->campaign_external_id,
+            'name' => $task->campaign->name,
+            'status' => 'ACTIVE',
+            'effective_status' => 'ACTIVE',
+            'daily_budget' => '100000',
+        ]];
+
+        if ($extraCampaign) {
+            $campaigns[] = [
+                'id' => $extraCampaign->external_id,
+                'name' => $extraCampaign->name,
+                'status' => 'ACTIVE',
+                'effective_status' => 'ACTIVE',
+                'daily_budget' => '100000',
+            ];
+        }
+
+        Http::fake(function ($request) use ($account, $task, $campaigns, $webhookSpend, $webhookResult) {
+            $url = $request->url();
+
+            if ($request->method() === 'POST' && str_contains($url, '/'.$task->campaign_external_id)) {
+                return Http::response(['success' => true]);
+            }
+
+            if (str_contains($url, '/'.$account->external_id.'/campaigns')) {
+                return Http::response(['data' => $campaigns]);
+            }
+
+            if (str_contains($url, '/'.$account->external_id.'/adsets')) {
+                return Http::response(['data' => []]);
+            }
+
+            if (str_contains($url, '/'.$account->external_id.'/insights')) {
+                return Http::response(['data' => $request['level'] === 'campaign' ? [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => (string) $webhookSpend,
+                    'actions' => [['action_type' => 'purchase', 'value' => (string) $webhookResult]],
+                ]] : []]);
+            }
+
+            if (str_contains($url, '/'.$account->external_id)) {
+                return Http::response([
+                    'account_id' => $account->account_id,
+                    'id' => $account->external_id,
+                    'name' => $account->name,
+                    'currency' => $account->currency,
+                    'account_status' => 1,
+                ]);
+            }
+
+            return Http::response([], 404);
+        });
+    }
+
+    private function signedWebhookBody(T4JamProfile $profile, string $accountId, array $changes): array
+    {
+        $content = json_encode([
+            'object' => 'ad_account',
+            'entry' => [[
+                'id' => str_replace('act_', '', $accountId),
+                'changes' => $changes,
+            ]],
+        ], JSON_THROW_ON_ERROR);
+
+        return [
+            'content' => $content,
+            'server' => [
+                'CONTENT_TYPE' => 'application/json',
+                'HTTP_X_HUB_SIGNATURE_256' => 'sha256='.hash_hmac('sha256', $content, (string) $profile->app_secret),
+            ],
+        ];
+    }
+}

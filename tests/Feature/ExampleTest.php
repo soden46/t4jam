@@ -1478,7 +1478,7 @@ class ExampleTest extends TestCase
         $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $task->campaign->external_id)
-            && $request['status'] === 'ACTIVE');
+            && ($request->data()['status'] ?? null) === 'ACTIVE');
     }
 
     public function test_on_off_window_pauses_and_resumes_campaign_on_schedule(): void
@@ -1534,7 +1534,7 @@ class ExampleTest extends TestCase
         $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $task->campaign->external_id)
-            && $request['status'] === 'ACTIVE');
+            && ($request->data()['status'] ?? null) === 'ACTIVE');
     }
 
     public function test_meta_conversion_metric_is_synced_even_when_pause_action_is_off(): void

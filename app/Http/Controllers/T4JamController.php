@@ -874,7 +874,7 @@ class T4JamController extends Controller
             'campaign_name' => $task->campaign_name,
             'level' => $task->level,
             'mode' => $task->mode,
-            'last_update' => optional($task->last_checked_at ?? $task->updated_at)->timezone('Asia/Jakarta')->format('d-m-Y, H:i'),
+            'last_update' => optional($task->last_metrics_synced_at ?? $task->last_checked_at ?? $task->updated_at)->timezone('Asia/Jakarta')->format('d-m-Y, H:i'),
             'act_bermasalah' => false,
             'is_reach_limit' => false,
             'limit_time' => false,
