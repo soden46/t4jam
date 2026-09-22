@@ -44,30 +44,36 @@
     <div class="table-wrap">
         <table class="data-table" id="automation_table">
             <colgroup>
-                <col style="width: auto">
-                <col style="width: auto">
-                <col style="width: auto">
-                <col style="width: auto">
-                <col style="width: auto">
-                <col style="width: auto">
-                <col style="width: auto">
+                <col style="width: 200px">
+                <col style="width: 140px">
+                <col style="width: 90px">
+                <col style="width: 90px">
+                <col style="width: 90px">
+                <col style="width: 90px">
+                <col style="width: 75px">
+                <col style="width: 90px">
+                <col style="width: 90px">
+                <col style="width: 200px">
                 <col style="width: 44px">
             </colgroup>
             <thead>
                 <tr>
                     <th>Campaign</th>
-                    <th>Status</th>
+                    <th>Account</th>
+                    <th>Automation Status</th>
+                    <th>Meta Status</th>
                     <th class="num">Budget</th>
                     <th class="num">Spend</th>
                     <th class="num">Hasil</th>
-                    <th class="num">CPR / Limit</th>
+                    <th class="num">CPR</th>
+                    <th class="num">Batas CPR</th>
                     <th>Log</th>
                     <th>Options</th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
-                    <td colspan="8" class="table-empty">Memuat data automation...</td>
+                    <td colspan="11" class="table-empty">Memuat data automation...</td>
                 </tr>
             </tbody>
         </table>

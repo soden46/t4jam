@@ -468,7 +468,7 @@ function renderAutomationTable(rows, summary = null) {
     qs('#avg_ad_cpr').textContent = rupiah(averageCpr);
 
     if (!rows.length) {
-        qs('#automation_table tbody').innerHTML = '<tr><td colspan="8" class="table-empty">Tidak ada data automation.</td></tr>';
+        qs('#automation_table tbody').innerHTML = '<tr><td colspan="11" class="table-empty">Tidak ada data automation.</td></tr>';
 
         return;
     }
@@ -486,25 +486,21 @@ function renderAutomationTable(rows, summary = null) {
 
         return `
             <tr>
-                <td class="automation-campaign-cell">
+                <td>
                     <span class="campaign-name">${escapeHtml(row.campaign_name)}</span>
-                    <small>${escapeHtml(row.ad_account || '-')}</small>
-                    <small>${escapeHtml(row.event_flow)} &middot; ${escapeHtml(row.conversion)}</small>
+                    <span class="campaign-sub">${escapeHtml(row.event_flow)} / ${escapeHtml(row.conversion)}</span>
                 </td>
-                <td class="status-cell">
-                    <div class="status-row"><small>Automation</small><button class="badge ${automationActive ? 'active' : 'pause'}" data-toggle-task="${escapeHtml(row.id)}" data-status="${automationActive ? 'false' : 'true'}">${automationActive ? 'Active' : 'Paused'}</button></div>
-                    <div class="status-row"><small>Meta</small><span class="badge ${metaStatusClass}">${escapeHtml(metaStatus)}</span></div>
-                </td>
-                <td class="num budget-cell"><strong>${rupiah(row.current_budget)}</strong></td>
-                <td class="num spend-cell"><strong class="${metricsStale ? 'text-danger' : ''}">${rupiah(row.current_spend)}</strong></td>
-                <td class="num hasil-cell center"><strong>${number(row.current_hasil)}</strong></td>
-                <td class="cpr-limit-cell num ${isOverLimit ? 'text-danger' : ''}">
-                    <div class="cpr-block"><small>CPR</small><strong class="${isOverLimit ? 'text-danger' : ''}">${rupiah(row.current_cpr)}${staleLabel}</strong></div>
-                    <div class="cpr-limit-row"><small>Limit</small><strong>${rupiah(row.cpr_cap)}</strong></div>
-                </td>
+                <td><span class="account-name">${escapeHtml(row.ad_account || '-')}</span></td>
+                <td><button class="badge ${automationActive ? 'active' : 'pause'}" data-toggle-task="${escapeHtml(row.id)}" data-status="${automationActive ? 'false' : 'true'}">${automationActive ? 'Active' : 'Paused'}</button></td>
+                <td><span class="badge ${metaStatusClass}">${escapeHtml(metaStatus)}</span></td>
+                <td class="num"><strong>${rupiah(row.current_budget)}</strong></td>
+                <td class="num"><strong class="${metricsStale ? 'text-danger' : ''}">${rupiah(row.current_spend)}</strong></td>
+                <td class="num center"><strong>${number(row.current_hasil)}</strong></td>
+                <td class="num ${isOverLimit ? 'text-danger' : ''}"><strong>${rupiah(row.current_cpr)}${staleLabel}</strong></td>
+                <td class="num"><strong>${rupiah(row.cpr_cap)}</strong></td>
                 <td class="log-cell">
-                    <span>${escapeHtml(row.log || '-')}</span>
-                    <small>${escapeHtml(row.metrics_synced_at || row.last_update || '-')}</small>
+                    <span class="log-text">${escapeHtml(row.log || '-')}</span>
+                    <span class="log-time">${escapeHtml(row.metrics_synced_at || row.last_update || '-')}</span>
                 </td>
                 <td class="actions-menu-cell center">
                     <button class="icon-btn" data-actions-toggle="${escapeHtml(row.id)}" type="button" aria-label="Actions">&#8942;</button>
