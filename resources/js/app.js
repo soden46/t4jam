@@ -436,24 +436,31 @@ function renderAutomationTable(rows) {
     qs('#total_ad_result').textContent = number(result);
     qs('#avg_ad_cpr').textContent = rupiah(result ? spend / result : spend);
 
-    qs('#automation_table tbody').innerHTML = rows.map((row) => `
-        <tr>
-            <td><span class="campaign-name">${escapeHtml(row.campaign_name)}</span><br><small>${escapeHtml(row.event_flow)} / ${escapeHtml(row.conversion)}</small></td>
-            <td>${escapeHtml(row.ad_account)}</td>
-            <td><button class="badge ${row.status === 'true' ? 'active' : 'pause'}" data-toggle-task="${escapeHtml(row.id)}" data-status="${row.status === 'true' ? 'false' : 'true'}">${row.status === 'true' ? 'active' : 'pause'}</button></td>
-            <td class="num">${rupiah(row.current_budget)}</td>
-            <td class="num">${rupiah(row.current_spend)}</td>
-            <td class="num">${number(row.current_hasil)}</td>
-            <td class="num">${rupiah(row.current_cpr)}</td>
-            <td>${escapeHtml(row.log || '-')}</td>
-            <td class="action-row">
-                <button class="btn light" data-history="${escapeHtml(row.id)}" type="button">Log</button>
-                <button class="btn light-primary" data-edit="${escapeHtml(row.id)}" type="button">Update</button>
-                <button class="btn danger" data-budget-down="${escapeHtml(row.id)}" type="button">Turun</button>
-                <button class="btn danger" data-delete-task="${escapeHtml(row.id)}" data-campaign="${escapeHtml(row.campaign_name)}" type="button">Hapus</button>
-            </td>
-        </tr>
-    `).join('');
+    qs('#automation_table tbody').innerHTML = rows.map((row) => {
+        const currentCpr = Number(row.current_cpr || 0);
+        const cprCap = Number(row.cpr_cap || 0);
+        const cprClass = cprCap > 0 && currentCpr >= cprCap ? 'num text-danger' : 'num';
+
+        return `
+            <tr>
+                <td><span class="campaign-name">${escapeHtml(row.campaign_name)}</span><br><small>${escapeHtml(row.event_flow)} / ${escapeHtml(row.conversion)}</small></td>
+                <td>${escapeHtml(row.ad_account)}</td>
+                <td><button class="badge ${row.status === 'true' ? 'active' : 'pause'}" data-toggle-task="${escapeHtml(row.id)}" data-status="${row.status === 'true' ? 'false' : 'true'}">${row.status === 'true' ? 'active' : 'pause'}</button></td>
+                <td class="num">${rupiah(row.current_budget)}</td>
+                <td class="num">${rupiah(row.current_spend)}</td>
+                <td class="num">${number(row.current_hasil)}</td>
+                <td class="${cprClass}">${rupiah(row.current_cpr)}</td>
+                <td class="${cprClass}">${rupiah(row.cpr_cap)}</td>
+                <td>${escapeHtml(row.log || '-')}</td>
+                <td class="action-row">
+                    <button class="btn light" data-history="${escapeHtml(row.id)}" type="button">Log</button>
+                    <button class="btn light-primary" data-edit="${escapeHtml(row.id)}" type="button">Update</button>
+                    <button class="btn danger" data-budget-down="${escapeHtml(row.id)}" type="button">Turun</button>
+                    <button class="btn danger" data-delete-task="${escapeHtml(row.id)}" data-campaign="${escapeHtml(row.campaign_name)}" type="button">Hapus</button>
+                </td>
+            </tr>
+        `;
+    }).join('');
 
     qsa('[data-toggle-task]').forEach((button) => button.addEventListener('click', async () => {
         const originalText = button.textContent;

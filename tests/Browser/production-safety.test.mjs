@@ -46,6 +46,29 @@ test('dynamic names, attributes, logs and product links cannot inject markup or 
     assert.equal(await page.evaluate(() => window.xss), undefined);
 });
 
+test('automation table renders configured cpr cap next to current cpr', async () => {
+    await page.evaluate(() => {
+        renderAutomationTable([{
+            id: 'task-1',
+            campaign_name: 'Campaign CPR',
+            ad_account: 'Account CPR',
+            event_flow: 'lp_to_wa',
+            conversion: 'purchase',
+            status: 'true',
+            current_budget: 100000,
+            current_spend: 75919,
+            current_hasil: 1,
+            current_cpr: 75919,
+            cpr_cap: 25000,
+        }]);
+    });
+
+    assert.equal(await page.locator('#automation_table tbody td').nth(6).textContent(), 'Rp. 75.919,-');
+    assert.equal(await page.locator('#automation_table tbody td').nth(7).textContent(), 'Rp. 25.000,-');
+    assert.match(await page.locator('#automation_table tbody td').nth(6).getAttribute('class'), /text-danger/);
+    assert.match(await page.locator('#automation_table tbody td').nth(7).getAttribute('class'), /text-danger/);
+});
+
 test('polling reads only local tasks, does not overlap, and preserves open edits', async () => {
     await page.evaluate(() => {
         window.timers = [];

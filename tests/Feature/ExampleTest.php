@@ -467,6 +467,24 @@ class ExampleTest extends TestCase
         $this->assertSame(11791, $row['current_cpr']);
     }
 
+    public function test_automation_task_endpoint_exposes_configured_cpr_cap(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        $task = AutomationTask::firstOrFail();
+        $task->update(['cpr_cap' => 25000]);
+
+        $row = collect($this
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all&local=1')
+            ->assertOk()
+            ->json('data'))
+            ->firstWhere('id', $task->id);
+
+        $this->assertSame(25000, $row['cpr_cap']);
+    }
+
     public function test_automation_task_endpoint_refreshes_display_metrics_from_meta(): void
     {
         $this->seed(TestDataSeeder::class);

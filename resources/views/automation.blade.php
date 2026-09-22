@@ -47,6 +47,7 @@
                     <th class="num">Spend</th>
                     <th class="num">Hasil</th>
                     <th class="num">CPR</th>
+                    <th class="num">Batas CPR</th>
                     <th>Log</th>
                     <th>Options</th>
                 </tr>
