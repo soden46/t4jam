@@ -400,11 +400,6 @@ async function initAutomation() {
             loadAutomationTasks({ localOnly: true });
         }, 300);
     });
-    document.addEventListener('click', (event) => {
-        if (!event.target.closest('[data-actions-menu]') && !event.target.closest('[data-actions-toggle]')) {
-            qsa('[data-actions-menu]').forEach((menu) => menu.hidden = true);
-        }
-    });
     qs('#new_automation')?.addEventListener('click', () => {
         resetAutomationForm();
         showAutomationTargetFields();
@@ -491,7 +486,7 @@ function renderAutomationTable(rows, summary = null) {
                     <span class="campaign-sub">${escapeHtml(row.event_flow)} / ${escapeHtml(row.conversion)}</span>
                 </td>
                 <td><span class="account-name">${escapeHtml(row.ad_account || '-')}</span></td>
-                <td><button class="badge ${automationActive ? 'active' : 'pause'}" data-toggle-task="${escapeHtml(row.id)}" data-status="${automationActive ? 'false' : 'true'}">${automationActive ? 'Active' : 'Paused'}</button></td>
+                <td><span class="badge ${automationActive ? 'active' : 'pause'}">${automationActive ? 'Active' : 'Paused'}</span></td>
                 <td><span class="badge ${metaStatusClass}">${escapeHtml(metaStatus)}</span></td>
                 <td class="num"><strong>${rupiah(row.current_budget)}</strong></td>
                 <td class="num"><strong class="${metricsStale ? 'text-danger' : ''}">${rupiah(row.current_spend)}</strong></td>
@@ -502,27 +497,17 @@ function renderAutomationTable(rows, summary = null) {
                     <span class="log-text">${escapeHtml(row.log || '-')}</span>
                     <span class="log-time">${escapeHtml(row.metrics_synced_at || row.last_update || '-')}</span>
                 </td>
-                <td class="actions-menu-cell center">
-                    <button class="icon-btn" data-actions-toggle="${escapeHtml(row.id)}" type="button" aria-label="Actions">&#8942;</button>
-                    <div class="actions-menu" data-actions-menu="${escapeHtml(row.id)}" hidden>
-                        <button data-history="${escapeHtml(row.id)}" type="button">Lihat Log</button>
-                        <button data-edit="${escapeHtml(row.id)}" type="button">Update</button>
-                        <button data-budget-down="${escapeHtml(row.id)}" type="button">Turun / Pause</button>
-                        <button class="danger-text" data-delete-task="${escapeHtml(row.id)}" data-campaign="${escapeHtml(row.campaign_name)}" type="button">Hapus</button>
-                    </div>
+                <td class="actions-cell">
+                    <button class="action-btn action-btn-log" data-history="${escapeHtml(row.id)}" type="button">Log</button>
+                    <button class="action-btn action-btn-update" data-edit="${escapeHtml(row.id)}" type="button">Update</button>
+                    <button class="action-btn action-btn-budget" data-budget-down="${escapeHtml(row.id)}" type="button">Turun Budget</button>
+                    <button class="action-btn action-btn-pause ${automationActive ? 'active' : ''}" data-toggle-task="${escapeHtml(row.id)}" data-status="${automationActive ? 'false' : 'true'}" type="button">${automationActive ? 'Pause' : 'Aktifkan'}</button>
+                    <button class="action-btn action-btn-delete" data-delete-task="${escapeHtml(row.id)}" data-campaign="${escapeHtml(row.campaign_name)}" type="button">Hapus</button>
                 </td>
             </tr>
         `;
     }).join('');
 
-    qsa('[data-actions-toggle]').forEach((button) => button.addEventListener('click', (event) => {
-        event.stopPropagation();
-        const menu = qs(`[data-actions-menu="${CSS.escape(button.dataset.actionsToggle)}"]`);
-        qsa('[data-actions-menu]').forEach((item) => {
-            if (item !== menu) item.hidden = true;
-        });
-        if (menu) menu.hidden = !menu.hidden;
-    }));
     qsa('[data-toggle-task]').forEach((button) => button.addEventListener('click', async () => {
         const originalText = button.textContent;
         button.disabled = true;

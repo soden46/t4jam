@@ -244,14 +244,28 @@ label small { color: var(--muted); font-weight: 500; }
 #automation_table .center { text-align: center; }
 
 
-.actions-menu-cell { position: relative; text-align: center; }
-.icon-btn { align-items: center; background: #f8fafc; border: 1px solid var(--line); border-radius: 999px; color: #4b5675; cursor: pointer; display: inline-flex; font-size: 1rem; font-weight: 900; height: 32px; justify-content: center; width: 32px; }
-.icon-btn:hover { background: #eef2ff; color: var(--primary); }
-.actions-menu { background: white; border: 1px solid var(--line); border-radius: .65rem; box-shadow: var(--shadow); display: grid; min-width: 136px; padding: .35rem; position: absolute; right: .5rem; top: 2.6rem; z-index: 20; }
-.actions-menu[hidden] { display: none; }
-.actions-menu button { background: transparent; border: 0; border-radius: .45rem; color: #4b5675; cursor: pointer; font-weight: 700; padding: .55rem .65rem; text-align: left; }
-.actions-menu button:hover { background: #f8fafc; }
-.actions-menu .danger-text { color: var(--danger); }
+#automation_table .action-btn {
+    font-size: 11px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    font-weight: 600;
+    border: 1px solid var(--line);
+    background: white;
+    color: var(--ink);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+#automation_table .action-btn:hover { opacity: .85; }
+#automation_table .action-btn-log { background: #f1f5f9; color: #4b5675; }
+#automation_table .action-btn-update { background: rgba(114, 57, 234, .1); color: var(--primary); border-color: rgba(114, 57, 234, .25); }
+#automation_table .action-btn-pause { background: rgba(241, 65, 108, .1); color: var(--danger); border-color: rgba(241, 65, 108, .25); }
+#automation_table .action-btn-pause.active { background: rgba(80, 205, 137, .1); color: #17a766; border-color: rgba(80, 205, 137, .25); }
+#automation_table .action-btn-budget { background: rgba(44, 154, 255, .1); color: var(--primary-2); border-color: rgba(44, 154, 255, .25); }
+#automation_table .action-btn-delete { background: rgba(241, 65, 108, .1); color: var(--danger); border-color: rgba(241, 65, 108, .25); }
+#automation_table .actions-cell { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: center; }
 
 @media (max-width: 1100px) {
     #automation_table { min-width: 0; }

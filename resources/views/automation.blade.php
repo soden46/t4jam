@@ -54,7 +54,7 @@
                 <col style="width: 90px">
                 <col style="width: 90px">
                 <col style="width: 200px">
-                <col style="width: 44px">
+                <col style="width: 260px">
             </colgroup>
             <thead>
                 <tr>
