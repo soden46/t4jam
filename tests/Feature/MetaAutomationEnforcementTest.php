@@ -386,6 +386,58 @@ class MetaAutomationEnforcementTest extends TestCase
         $this->assertSame('schedule_resume', $fresh->last_budget_action);
     }
 
+    public function test_inactive_manual_pause_keeps_action_after_manual_budget_decrease(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->update([
+            'is_active' => false,
+            'last_budget_action' => 'manual_pause',
+        ]);
+
+        $this->postManualBudgetDecrease($task)->assertOk();
+
+        $this->assertSame('manual_pause', $task->fresh()->last_budget_action);
+    }
+
+    public function test_inactive_schedule_pause_keeps_action_after_manual_budget_decrease(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->update([
+            'is_active' => false,
+            'last_budget_action' => 'schedule_pause',
+        ]);
+
+        $this->postManualBudgetDecrease($task)->assertOk();
+
+        $this->assertSame('schedule_pause', $task->fresh()->last_budget_action);
+    }
+
+    public function test_inactive_cpr_pause_keeps_action_after_manual_budget_decrease(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->update([
+            'is_active' => false,
+            'last_budget_action' => 'pause',
+        ]);
+
+        $this->postManualBudgetDecrease($task)->assertOk();
+
+        $this->assertSame('pause', $task->fresh()->last_budget_action);
+    }
+
+    public function test_active_task_marks_manual_budget_decrease_after_manual_budget_decrease(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->update([
+            'is_active' => true,
+            'last_budget_action' => 'manual',
+        ]);
+
+        $this->postManualBudgetDecrease($task)->assertOk();
+
+        $this->assertSame('manual_budget_decrease', $task->fresh()->last_budget_action);
+    }
+
     public function test_schedule_pause_ignores_period_when_outside_window(): void
     {
         Cache::flush();
@@ -514,6 +566,19 @@ class MetaAutomationEnforcementTest extends TestCase
         $profile->adAccounts()->syncWithoutDetaching([$task->campaign->adAccount->id]);
 
         return [$profile, $task->fresh(['campaign.adAccount', 'adSet'])];
+    }
+
+    private function postManualBudgetDecrease(AutomationTask $task)
+    {
+        $this->actingAs(User::firstOrFail());
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true]),
+        ]);
+
+        return $this->postJson('/turun-budget-manual/', [
+            'automation_id' => $task->id,
+        ]);
     }
 
     private function fakeEnforcementInsights(AutomationTask $task, int $spend, int $result, bool $includeStatusPost = true): void

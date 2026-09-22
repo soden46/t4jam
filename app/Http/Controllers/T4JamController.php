@@ -598,14 +598,19 @@ class T4JamController extends Controller
         DB::transaction(function () use ($target, $budget, $task, $successMessage): void {
             $this->persistLocalBudget($target, $budget, $task->level);
 
-            $task->update([
+            $updates = [
                 'current_budget' => $task->starting_budget,
                 'last_log' => $successMessage,
                 'last_checked_at' => now(),
                 'last_budget_changed_at' => now(),
                 'last_budget_before' => $task->current_budget,
-                'last_budget_action' => 'manual_budget_decrease',
-            ]);
+            ];
+
+            if ($task->is_active) {
+                $updates['last_budget_action'] = 'manual_budget_decrease';
+            }
+
+            $task->update($updates);
             AutomationLog::create([
                 'automation_task_id' => $task->id,
                 'messages' => [$successMessage],
