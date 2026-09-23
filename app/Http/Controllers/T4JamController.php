@@ -444,7 +444,7 @@ class T4JamController extends Controller
             $metaResult = $this->pushMetaStatus($task, $requestedActive, $metaSync);
             if (! $metaResult['ok']) {
                 if ($budgetChanged && $metaBudgetPushed) {
-                    DB::transaction(function () use ($task, $target, $budget): void {
+                    DB::transaction(function () use ($task, $target, $budget, $manualAction): void {
                         $this->persistLocalBudget($target, $budget, $task->level);
                         $task->update([
                             'starting_budget' => $budget,
@@ -466,7 +466,7 @@ class T4JamController extends Controller
         $metaPushed = $metaBudgetPushed || $metaStatusPushed;
         $logMessage = $metaPushed ? $baseMessage.'; Meta berhasil diupdate.' : $baseMessage;
 
-        DB::transaction(function () use ($request, $task, $target, $logMessage, $budgetChanged, $budget, $requestedActive, $statusChanged): void {
+        DB::transaction(function () use ($request, $task, $target, $logMessage, $budgetChanged, $budget, $requestedActive, $statusChanged, $manualAction): void {
             if ($budgetChanged) {
                 $this->persistLocalBudget($target, $budget, $task->level);
             }
