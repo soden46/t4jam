@@ -1065,6 +1065,7 @@ class ExampleTest extends TestCase
     public function test_signed_meta_webhook_queues_account_sync_for_linked_profile(): void
     {
         Queue::fake();
+        config(['services.meta.webhook_sync_mode' => 'queue']);
         $this->seed(TestDataSeeder::class);
         $user = User::firstOrFail();
         $profile = T4JamProfile::updateOrCreate(['user_id' => $user->id], [

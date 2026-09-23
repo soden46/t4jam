@@ -44,6 +44,7 @@ return [
         'webhook_app_secret' => env('META_WEBHOOK_APP_SECRET'),
         'webhook_callback_url' => env('META_WEBHOOK_CALLBACK_URL', rtrim((string) env('APP_URL'), '/').'/meta/webhook/'),
         'webhook_fields' => array_values(array_filter(array_map('trim', explode(',', env('META_WEBHOOK_FIELDS', 'campaigns,adsets,ads'))))),
+        'webhook_sync_mode' => env('META_WEBHOOK_SYNC_MODE', 'after_response'),
     ],
 
     'ses' => [

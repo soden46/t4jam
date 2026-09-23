@@ -85,6 +85,10 @@ class MetaAutomationEnforcementTest extends TestCase
 
     public function test_relevant_campaign_webhook_sync_enforces_cpr_pause_immediately(): void
     {
+        config([
+            'queue.default' => 'database',
+            'services.meta.webhook_sync_mode' => 'after_response',
+        ]);
         [$profile, $task] = $this->automationFixture();
         $task->update(['last_checked_at' => now()]);
         $this->fakeWebhookAccountSync($task, webhookSpend: 75000, webhookResult: 1);
@@ -162,6 +166,7 @@ class MetaAutomationEnforcementTest extends TestCase
     public function test_adset_webhook_payload_does_not_target_parent_campaign_task(): void
     {
         Queue::fake();
+        config(['services.meta.webhook_sync_mode' => 'queue']);
         [$profile, $task] = $this->automationFixture(level: 'adset');
         $adSet = $task->adSet;
 

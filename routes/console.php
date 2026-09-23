@@ -125,6 +125,31 @@ Artisan::command('t4jam:enforce-automation', function (AutomationBudgetService $
     return 0;
 })->purpose('Pause active automation targets that reached their CPR cap');
 
+Artisan::command('t4jam:post-deploy-sync {--profile_id=} {--configure-webhook}', function (): int {
+    $profileId = $this->option('profile_id');
+    $options = $profileId ? ['--profile_id' => $profileId] : [];
+
+    if ($this->option('configure-webhook')) {
+        $this->info('Configuring Meta webhook subscriptions...');
+        $webhookStatus = $this->call('t4jam:configure-meta-webhook', $options);
+
+        if ($webhookStatus !== 0) {
+            return $webhookStatus;
+        }
+    }
+
+    $this->info('Running immediate Meta sync...');
+    $syncStatus = $this->call('t4jam:sync-meta-ads', $options);
+
+    if ($syncStatus !== 0) {
+        return $syncStatus;
+    }
+
+    $this->info('Running immediate automation enforcement...');
+
+    return $this->call('t4jam:enforce-automation');
+})->purpose('Run the safe post-deploy Meta sync flow immediately');
+
 Schedule::command('t4jam:sync-meta-ads')
     ->cron('0 0-23/5 * * *')
     ->timezone('Asia/Jakarta')

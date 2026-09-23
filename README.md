@@ -84,7 +84,7 @@ Flow sync dibagi menjadi dua jenis:
 
 Quick reload sengaja dipisahkan dari full sync untuk mengurangi jumlah request ke Meta Graph API dan menghindari rate limit ketika user hanya membutuhkan daftar campaign terbaru.
 
-Perubahan dari Ads Manager masuk lewat webhook `ad_account`. Endpoint memverifikasi `X-Hub-Signature-256`, lalu queue `meta` mengambil snapshot account/campaign/ad set dan insights untuk account yang berubah. Dashboard dan Automation mem-poll database lokal setiap 5 detik, sehingga tab aktif ikut berubah tanpa refresh dan tanpa menambah request Graph API dari browser.
+Perubahan dari Ads Manager masuk lewat webhook `ad_account`. Endpoint memverifikasi `X-Hub-Signature-256`, lalu menjalankan sync account setelah response (`META_WEBHOOK_SYNC_MODE=after_response`) agar snapshot account/campaign/ad set dan insights tetap ter-update meskipun worker queue belum aktif. Set `META_WEBHOOK_SYNC_MODE=queue` kalau server sudah punya worker `meta` yang stabil. Dashboard dan Automation mem-poll database lokal setiap 5 detik, sehingga tab aktif ikut berubah tanpa refresh dan tanpa menambah request Graph API dari browser.
 
 Setelah deploy, daftar callback app dan subscribe seluruh ad account yang bisa diakses profile:
 
@@ -92,7 +92,7 @@ Setelah deploy, daftar callback app dan subscribe seluruh ad account yang bisa d
 php artisan t4jam:configure-meta-webhook --profile_id=1
 ```
 
-Callback harus HTTPS publik. Worker queue `meta` wajib aktif. Jalankan ulang command saat app Meta atau kumpulan ad account berubah.
+Callback harus HTTPS publik. Jalankan ulang command saat app Meta atau kumpulan ad account berubah.
 
 ### Auto Sync
 
@@ -172,7 +172,14 @@ Setelah deploy perubahan kode:
 
 ```bash
 php artisan optimize:clear
+php artisan t4jam:post-deploy-sync --profile_id=1
 php artisan queue:restart
+```
+
+Tambahkan `--configure-webhook` jika callback/app/ad account Meta juga perlu diregister ulang setelah deploy:
+
+```bash
+php artisan t4jam:post-deploy-sync --profile_id=1 --configure-webhook
 ```
 
 Worker harus tetap hidup di server untuk action yang masih berjalan di background, seperti publish setup iklan atau sync yang dipicu saat token disimpan. Untuk production/dev server yang long-running, gunakan Supervisor atau process manager lain.

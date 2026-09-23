@@ -86,7 +86,7 @@ class MetaAdsWebhookController extends Controller
             ->flatMap(function (array $entry): array {
                 return $this->profileIdsForAccount($entry['account'])
                     ->map(function (int $profileId) use ($entry): array {
-                        SyncMetaAdsAccount::dispatch(
+                        $mode = $this->dispatchAccountSync(
                             $profileId,
                             $entry['account'],
                             $entry['campaign_ids'],
@@ -99,6 +99,7 @@ class MetaAdsWebhookController extends Controller
                             'fields' => $entry['fields'],
                             'campaign_ids' => $entry['campaign_ids'],
                             'ad_set_ids' => $entry['ad_set_ids'],
+                            'mode' => $mode,
                         ]);
 
                         return [$profileId.':'.$entry['account']];
@@ -109,6 +110,32 @@ class MetaAdsWebhookController extends Controller
             ->count();
 
         return response()->json(['status' => 'received', 'queued' => $queued]);
+    }
+
+    private function dispatchAccountSync(
+        int $profileId,
+        string $adAccountExternalId,
+        array $campaignIds,
+        array $adSetIds,
+        array $fields,
+    ): string {
+        $mode = strtolower((string) config('services.meta.webhook_sync_mode', 'after_response'));
+
+        if ($mode === 'queue') {
+            SyncMetaAdsAccount::dispatch($profileId, $adAccountExternalId, $campaignIds, $adSetIds, $fields);
+
+            return 'queue';
+        }
+
+        if ($mode === 'sync') {
+            dispatch_sync(new SyncMetaAdsAccount($profileId, $adAccountExternalId, $campaignIds, $adSetIds, $fields));
+
+            return 'sync';
+        }
+
+        SyncMetaAdsAccount::dispatchAfterResponse($profileId, $adAccountExternalId, $campaignIds, $adSetIds, $fields);
+
+        return 'after_response';
     }
 
     private function hasValidSignature(string $body, string $signature): bool
