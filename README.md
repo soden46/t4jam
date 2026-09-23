@@ -176,6 +176,14 @@ php artisan t4jam:post-deploy-sync --profile_id=1
 php artisan queue:restart
 ```
 
+Pada server `APP_ENV=production`, app juga punya fallback otomatis: request web pertama setelah release berubah akan menjalankan `t4jam:post-deploy-sync` sekali setelah response. Ini menjaga server baru tetap sinkron walaupun post-deploy hook belum dipasang. Gunakan env berikut bila ingin mengatur perilakunya:
+
+```bash
+META_AUTO_POST_DEPLOY_SYNC=true
+META_AUTO_POST_DEPLOY_PROFILE_ID=1
+META_AUTO_POST_DEPLOY_CONFIGURE_WEBHOOK=false
+```
+
 Tambahkan `--configure-webhook` jika callback/app/ad account Meta juga perlu diregister ulang setelah deploy:
 
 ```bash

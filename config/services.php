@@ -45,6 +45,9 @@ return [
         'webhook_callback_url' => env('META_WEBHOOK_CALLBACK_URL', rtrim((string) env('APP_URL'), '/').'/meta/webhook/'),
         'webhook_fields' => array_values(array_filter(array_map('trim', explode(',', env('META_WEBHOOK_FIELDS', 'campaigns,adsets,ads'))))),
         'webhook_sync_mode' => env('META_WEBHOOK_SYNC_MODE', 'after_response'),
+        'auto_post_deploy_sync' => env('META_AUTO_POST_DEPLOY_SYNC', env('APP_ENV') === 'production'),
+        'auto_post_deploy_profile_id' => env('META_AUTO_POST_DEPLOY_PROFILE_ID'),
+        'auto_post_deploy_configure_webhook' => env('META_AUTO_POST_DEPLOY_CONFIGURE_WEBHOOK', false),
     ],
 
     'ses' => [
