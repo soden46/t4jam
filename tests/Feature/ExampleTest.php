@@ -709,6 +709,32 @@ class ExampleTest extends TestCase
         $this->assertSame('PAUSED', $row['meta_status']);
     }
 
+    public function test_deleted_meta_target_forces_automation_status_paused(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+
+        $task = AutomationTask::with('campaign')->firstOrFail();
+        $task->campaign->update([
+            'status' => 'DELETED',
+            'effective_status' => 'DELETED',
+        ]);
+        $task->update(['is_active' => true]);
+
+        $row = collect($this
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all&local=1')
+            ->assertOk()
+            ->json('data'))
+            ->firstWhere('id', $task->id);
+
+        $this->assertSame('pause', $row['automation_status']);
+        $this->assertSame('false', $row['status']);
+        $this->assertSame('DELETED', $row['meta_status']);
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame('meta_sync', $task->fresh()->last_budget_action);
+    }
+
     public function test_update_automation_task_pushes_budget_to_meta_adset(): void
     {
         $this->seed(TestDataSeeder::class);

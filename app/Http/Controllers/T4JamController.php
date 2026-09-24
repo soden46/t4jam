@@ -941,7 +941,7 @@ class T4JamController extends Controller
 
     private function syncAutomationPausedByMetaStatus(AutomationTask $task, Campaign|AdSet|null $target): bool
     {
-        if (! $target || strtoupper((string) ($target->effective_status ?: $target->status)) !== 'PAUSED') {
+        if (! $target || $this->activeMetaTarget($target)) {
             return (bool) $task->is_active;
         }
 
@@ -949,7 +949,10 @@ class T4JamController extends Controller
             return false;
         }
 
-        $message = 'Status dipause dari Meta Ads Manager.';
+        $metaStatus = strtoupper((string) ($target->effective_status ?: $target->status));
+        $message = $metaStatus === 'PAUSED'
+            ? 'Status dipause dari Meta Ads Manager.'
+            : 'Target sudah '.$metaStatus.' di Meta Ads Manager.';
         $task->update([
             'is_active' => false,
             'last_budget_action' => 'meta_sync',
@@ -966,6 +969,11 @@ class T4JamController extends Controller
         ]);
 
         return false;
+    }
+
+    private function activeMetaTarget(Campaign|AdSet $target): bool
+    {
+        return ! in_array(strtoupper((string) ($target->effective_status ?: $target->status)), ['PAUSED', ...self::NON_EDITABLE_META_STATUSES], true);
     }
 
     private function taskMetricTarget(AutomationTask $task): Campaign|AdSet|null

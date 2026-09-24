@@ -475,8 +475,8 @@ function renderAutomationTable(rows, summary = null) {
         const isOverLimit = metricsStale || (cprCap > 0 && currentCpr >= cprCap);
         const staleLabel = metricsStale ? '<small class="text-danger"> stale</small>' : '';
         const metaStatus = row.meta_effective_status || row.meta_status || '-';
-        const metaPaused = String(metaStatus).toUpperCase() === 'PAUSED';
-        const automationActive = !metaPaused && (row.automation_status ? row.automation_status === 'active' : row.status === 'true');
+        const metaInactive = ['PAUSED', 'DELETED', 'ARCHIVED'].includes(String(metaStatus).toUpperCase());
+        const automationActive = !metaInactive && (row.automation_status ? row.automation_status === 'active' : row.status === 'true');
         const metaStatusClass = metaStatus === 'ACTIVE' ? 'active' : (metaStatus === 'PAUSED' ? 'pause' : 'draft');
 
         return `
