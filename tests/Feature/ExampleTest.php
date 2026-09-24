@@ -528,7 +528,7 @@ class ExampleTest extends TestCase
         Http::fake(['*' => Http::response(['error' => ['message' => 'Meta unavailable']], 500)]);
 
         $response = $this
-            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all')
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all&local=1')
             ->assertOk();
 
         $row = collect($response->json('data'))->firstWhere('id', $task->id);
@@ -545,6 +545,174 @@ class ExampleTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_automation_task_endpoint_refreshes_metrics_when_not_local(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        Cache::flush();
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $task = AutomationTask::with(['campaign.adAccount'])->where('user_id', $user->id)->firstOrFail();
+        AutomationTask::whereKeyNot($task->id)->delete();
+        $task->update([
+            'level' => 'campaign',
+            'conversion' => 'purchase',
+            'current_spend' => 75919,
+            'current_result' => 1,
+            'last_metrics_synced_at' => now()->subHour(),
+            'metrics_unavailable_at' => null,
+        ]);
+        $account = $task->campaign->adAccount;
+        $campaign = $task->campaign;
+
+        Http::fake([
+            'graph.facebook.com/*/'.$account->external_id.'/insights*' => Http::response(['data' => [[
+                'campaign_id' => $campaign->external_id,
+                'spend' => '37210',
+                'reach' => '1000',
+                'inline_link_clicks' => '20',
+                'actions' => [['action_type' => 'purchase', 'value' => '1']],
+            ]]]),
+        ]);
+
+        $response = $this
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all&local=0')
+            ->assertOk()
+            ->assertJsonPath('meta_sync.attempted', true)
+            ->assertJsonPath('meta_sync.updated', 1)
+            ->assertJsonPath('meta_sync.reason', 'refreshed')
+            ->assertJsonPath('summary.total_spend', 37210);
+
+        $row = collect($response->json('data'))->firstWhere('id', $task->id);
+
+        $this->assertSame(37210, $row['current_spend']);
+        $this->assertSame(1, $row['current_hasil']);
+        $this->assertSame(37210, $row['current_cpr']);
+        $this->assertTrue($row['metrics_available']);
+        $this->assertFalse($row['metrics_stale']);
+        $this->assertSame(37210, $task->fresh()->current_spend);
+        $this->assertSame(1, $task->fresh()->current_result);
+        $this->assertNull($task->fresh()->metrics_unavailable_at);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$account->external_id.'/insights')
+            && $request['level'] === 'campaign');
+    }
+
+    public function test_automation_task_endpoint_marks_metrics_stale_when_fresh_refresh_fails(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        Cache::flush();
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $task = AutomationTask::with(['campaign.adAccount'])->where('user_id', $user->id)->firstOrFail();
+        AutomationTask::whereKeyNot($task->id)->delete();
+        $task->update([
+            'level' => 'campaign',
+            'conversion' => 'purchase',
+            'current_spend' => 75919,
+            'current_result' => 1,
+            'last_metrics_synced_at' => now()->subHour(),
+            'metrics_unavailable_at' => null,
+        ]);
+
+        Http::fake(['*' => Http::response(['error' => ['code' => 17, 'message' => 'Rate limit']], 500)]);
+
+        $response = $this
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all')
+            ->assertOk()
+            ->assertJsonPath('meta_sync.attempted', true)
+            ->assertJsonPath('meta_sync.updated', 0)
+            ->assertJsonPath('meta_sync.reason', 'meta_error');
+
+        $row = collect($response->json('data'))->firstWhere('id', $task->id);
+
+        $this->assertSame(75919, $row['current_spend']);
+        $this->assertSame(1, $row['current_hasil']);
+        $this->assertTrue($row['metrics_stale']);
+        $this->assertFalse($row['metrics_available']);
+        $this->assertSame(75919, $task->fresh()->current_spend);
+        $this->assertNotNull($task->fresh()->metrics_unavailable_at);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign->adAccount->external_id.'/insights'));
+    }
+
+    public function test_automation_task_fresh_refresh_is_scoped_to_authenticated_user(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        Cache::flush();
+        $user = User::firstOrFail();
+        $otherUser = User::factory()->create();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+        T4JamProfile::updateOrCreate(['user_id' => $otherUser->id], ['access_token' => 'other-token']);
+
+        $task = AutomationTask::with(['campaign.adAccount'])->where('user_id', $user->id)->firstOrFail();
+        $task->update([
+            'level' => 'campaign',
+            'conversion' => 'purchase',
+            'current_spend' => 75919,
+            'current_result' => 1,
+            'last_metrics_synced_at' => now()->subHour(),
+            'metrics_unavailable_at' => null,
+        ]);
+
+        $otherAccount = AdAccount::create([
+            'account_id' => '999',
+            'external_id' => 'act_999',
+            'name' => 'Other Account',
+            'currency' => 'IDR',
+        ]);
+        $otherCampaign = Campaign::create([
+            'ad_account_id' => $otherAccount->id,
+            'external_id' => 'cmp_other_user',
+            'name' => 'Other User Campaign',
+            'status' => 'ACTIVE',
+            'effective_status' => 'ACTIVE',
+            'daily_budget' => 50000,
+        ]);
+        $otherTask = AutomationTask::create([
+            'id' => (string) str()->uuid(),
+            'user_id' => $otherUser->id,
+            'ad_account_id' => $otherAccount->id,
+            'campaign_id' => $otherCampaign->id,
+            'campaign_external_id' => $otherCampaign->external_id,
+            'campaign_name' => $otherCampaign->name,
+            'ad_account_name' => $otherAccount->name,
+            'level' => 'campaign',
+            'conversion' => 'purchase',
+            'current_spend' => 88888,
+            'current_result' => 2,
+            'last_metrics_synced_at' => now()->subHour(),
+            'metrics_unavailable_at' => null,
+        ]);
+        $account = $task->campaign->adAccount;
+
+        Http::fake(function ($request) use ($account, $task) {
+            if (str_contains($request->url(), '/'.$account->external_id.'/insights')) {
+                return Http::response(['data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '37210',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]]]);
+            }
+
+            return Http::response(['error' => ['message' => 'Unexpected request']], 500);
+        });
+
+        $rows = $this
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all')
+            ->assertOk()
+            ->json('data');
+
+        $this->assertNotNull(collect($rows)->firstWhere('id', $task->id));
+        $this->assertNull(collect($rows)->firstWhere('id', $otherTask->id));
+        $this->assertSame(37210, $task->fresh()->current_spend);
+        $this->assertSame(88888, $otherTask->fresh()->current_spend);
+        $this->assertNull($otherTask->fresh()->metrics_unavailable_at);
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/'.$otherAccount->external_id.'/insights'));
+    }
+
     public function test_automation_task_endpoint_filters_local_rows_without_meta_calls(): void
     {
         $this->seed(TestDataSeeder::class);
@@ -558,7 +726,7 @@ class ExampleTest extends TestCase
         Http::fake();
 
         $rows = $this
-            ->getJson('/get-automation-task/?acc='.$target->adAccount->external_id.'&level=campaign&funnel=lp_to_wa')
+            ->getJson('/get-automation-task/?acc='.$target->adAccount->external_id.'&level=campaign&funnel=lp_to_wa&local=1')
             ->assertOk()
             ->json('data');
 
@@ -590,7 +758,7 @@ class ExampleTest extends TestCase
         }
         Http::fake();
 
-        $this->getJson('/get-automation-task/')
+        $this->getJson('/get-automation-task/?local=1')
             ->assertOk()
             ->assertJsonCount(10, 'data')
             ->assertJsonPath('pagination.current_page', 1)
@@ -598,18 +766,18 @@ class ExampleTest extends TestCase
             ->assertJsonPath('pagination.total', 37)
             ->assertJsonPath('pagination.last_page', 4);
 
-        $this->getJson('/get-automation-task/?per_page=25&page=2')
+        $this->getJson('/get-automation-task/?per_page=25&page=2&local=1')
             ->assertOk()
             ->assertJsonCount(12, 'data')
             ->assertJsonPath('pagination.current_page', 2)
             ->assertJsonPath('pagination.per_page', 25);
 
-        $this->getJson('/get-automation-task/?per_page=50')
+        $this->getJson('/get-automation-task/?per_page=50&local=1')
             ->assertOk()
             ->assertJsonCount(37, 'data')
             ->assertJsonPath('pagination.per_page', 50);
 
-        $this->getJson('/get-automation-task/?per_page=999')
+        $this->getJson('/get-automation-task/?per_page=999&local=1')
             ->assertOk()
             ->assertJsonCount(10, 'data')
             ->assertJsonPath('pagination.per_page', 10);
@@ -659,7 +827,7 @@ class ExampleTest extends TestCase
         Http::fake();
 
         $response = $this
-            ->getJson('/get-automation-task/?search=Needle&level=campaign&funnel=lp_to_wa&per_page=10')
+            ->getJson('/get-automation-task/?search=Needle&level=campaign&funnel=lp_to_wa&per_page=10&local=1')
             ->assertOk()
             ->assertJsonCount(10, 'data')
             ->assertJsonPath('pagination.total', 12)

@@ -17,6 +17,7 @@ use App\Services\AutomationBudgetService;
 use App\Services\MetaAdsClient;
 use App\Services\MetaAdsSyncService;
 use App\Support\MetaFlowLog;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -266,27 +267,26 @@ class T4JamController extends Controller
         return response()->json(['status' => 200, 'text' => 'Data Valid', 'max_account' => 30, 'jumlah_akun_dipilih' => AdAccount::count()]);
     }
 
-    public function automationTasks(Request $request): JsonResponse
+    public function automationTasks(
+        Request $request,
+        AutomationBudgetService $automationBudget,
+        MetaAdsSyncService $metaSync,
+    ): JsonResponse
     {
         $perPage = in_array((int) $request->query('per_page', 10), [10, 25, 50], true)
             ? (int) $request->query('per_page', 10)
             : 10;
         $page = max(1, (int) $request->query('page', 1));
         $search = trim((string) $request->query('search', ''));
+        $localOnly = $request->boolean('local', false);
 
-        $query = AutomationTask::where('user_id', Auth::id())->with(['adAccount', 'campaign', 'adSet'])
-            ->when($request->query('acc') && $request->query('acc') !== 'all', fn ($query) => $query->whereHas('adAccount', fn ($account) => $account->where('external_id', $request->query('acc'))))
-            ->when($request->query('level') && $request->query('level') !== 'all', fn ($query) => $query->where('level', $request->query('level')))
-            ->when($request->query('funnel') && $request->query('funnel') !== 'all', fn ($query) => $query->where('event_flow', $request->query('funnel')))
-            ->when($search !== '', function ($query) use ($search): void {
-                $query->where(function ($searchQuery) use ($search): void {
-                    $searchQuery
-                        ->where('campaign_name', 'like', '%'.$search.'%')
-                        ->orWhere('ad_account_name', 'like', '%'.$search.'%')
-                        ->orWhere('event_flow', 'like', '%'.$search.'%')
-                        ->orWhere('conversion', 'like', '%'.$search.'%');
-                });
-            });
+        $metaSyncStatus = ['attempted' => false, 'updated' => 0, 'reason' => 'local_only'];
+
+        if (! $localOnly) {
+            $metaSyncStatus = $this->refreshAutomationMetricsForDisplay($request, $search, $automationBudget, $metaSync);
+        }
+
+        $query = $this->automationTasksQuery($request, $search);
 
         $summary = (clone $query)
             ->selectRaw('COALESCE(SUM(current_spend), 0) as total_spend, COALESCE(SUM(current_result), 0) as total_result')
@@ -317,8 +317,97 @@ class T4JamController extends Controller
                 'total_result' => $totalResult,
                 'average_cpr' => $totalResult > 0 ? (int) round($totalSpend / $totalResult) : $totalSpend,
             ],
-            'meta_sync' => ['attempted' => false, 'updated' => 0, 'reason' => 'local_only'],
-        ]);
+            'meta_sync' => $metaSyncStatus,
+        ])->header('Cache-Control', 'no-store');
+    }
+
+    private function automationTasksQuery(Request $request, string $search): Builder
+    {
+        return AutomationTask::query()
+            ->where('user_id', Auth::id())
+            ->with(['adAccount', 'campaign', 'adSet'])
+            ->when($request->query('acc') && $request->query('acc') !== 'all', fn ($query) => $query->whereHas('adAccount', fn ($account) => $account->where('external_id', $request->query('acc'))))
+            ->when($request->query('level') && $request->query('level') !== 'all', fn ($query) => $query->where('level', $request->query('level')))
+            ->when($request->query('funnel') && $request->query('funnel') !== 'all', fn ($query) => $query->where('event_flow', $request->query('funnel')))
+            ->when($search !== '', function ($query) use ($search): void {
+                $query->where(function ($searchQuery) use ($search): void {
+                    $searchQuery
+                        ->where('campaign_name', 'like', '%'.$search.'%')
+                        ->orWhere('ad_account_name', 'like', '%'.$search.'%')
+                        ->orWhere('event_flow', 'like', '%'.$search.'%')
+                        ->orWhere('conversion', 'like', '%'.$search.'%');
+                });
+            });
+    }
+
+    private function refreshAutomationMetricsForDisplay(
+        Request $request,
+        string $search,
+        AutomationBudgetService $automationBudget,
+        MetaAdsSyncService $metaSync,
+    ): array {
+        $tasks = $this->automationTasksQuery($request, $search)
+            ->with(['campaign.adAccount', 'adSet.adAccount'])
+            ->get();
+
+        $profile = T4JamProfile::where('user_id', Auth::id())->first();
+        if (! $profile || ! $profile->hasAccessToken()) {
+            return ['attempted' => true, 'updated' => 0, 'reason' => 'missing_token'];
+        }
+
+        try {
+            $updated = $automationBudget->refreshTaskMetricsForDisplay($profile, $metaSync->client($profile), $tasks);
+        } catch (MetaAdsException $exception) {
+            $this->markAutomationMetricsUnavailable($tasks);
+            MetaFlowLog::warning('automation display metrics refresh failed with meta error', [
+                'profile_id' => $profile->id,
+                'http_status' => $exception->httpStatus,
+                'meta_code' => $exception->metaCode,
+                'meta_type' => $exception->metaType,
+            ]);
+
+            return ['attempted' => true, 'updated' => 0, 'reason' => 'meta_error'];
+        } catch (Throwable $exception) {
+            $this->markAutomationMetricsUnavailable($tasks);
+            MetaFlowLog::warning('automation display metrics refresh failed', [
+                'profile_id' => $profile->id,
+                'exception' => $exception::class,
+            ]);
+
+            return ['attempted' => true, 'updated' => 0, 'reason' => 'meta_error'];
+        }
+
+        if ($updated === 0 && $this->hasUnavailableAutomationMetrics($tasks)) {
+            return ['attempted' => true, 'updated' => 0, 'reason' => 'meta_error'];
+        }
+
+        return ['attempted' => true, 'updated' => $updated, 'reason' => 'refreshed'];
+    }
+
+    private function markAutomationMetricsUnavailable(iterable $tasks): void
+    {
+        collect($tasks)
+            ->pluck('id')
+            ->filter()
+            ->whenNotEmpty(fn ($ids) => AutomationTask::query()
+                ->where('user_id', Auth::id())
+                ->whereIn('id', $ids)
+                ->update(['metrics_unavailable_at' => now()]));
+    }
+
+    private function hasUnavailableAutomationMetrics(iterable $tasks): bool
+    {
+        $taskIds = collect($tasks)->pluck('id')->filter();
+
+        if ($taskIds->isEmpty()) {
+            return false;
+        }
+
+        return AutomationTask::query()
+            ->where('user_id', Auth::id())
+            ->whereIn('id', $taskIds)
+            ->whereNotNull('metrics_unavailable_at')
+            ->exists();
     }
 
     public function createAutomationTask(Request $request, MetaAdsSyncService $metaSync): JsonResponse

@@ -407,7 +407,7 @@ async function initAutomation() {
         qs('#automation-submit-label').textContent = 'Create';
         openModal('#automation-modal');
     });
-    await loadAutomationTasks({ localOnly: true });
+    await loadAutomationTasks({ localOnly: false });
     loadAutomationTargetAccounts().catch(() => {});
     startAutomationPolling();
 }
