@@ -256,11 +256,8 @@ class MetaAutomationEnforcementTest extends TestCase
 
         Http::fake([
             'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
-                'data' => [
-                    ['campaign_id' => 'cmp_other_1', 'spend' => '1000', 'actions' => []],
-                    ['campaign_id' => 'cmp_other_2', 'spend' => '2000', 'actions' => []],
-                ],
-            ]),
+                'error' => ['code' => 17, 'message' => 'Rate limit'],
+            ], 500),
         ]);
 
         $this->artisan('t4jam:enforce-automation')->assertSuccessful();

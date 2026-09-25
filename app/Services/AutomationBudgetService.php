@@ -643,19 +643,10 @@ class AutomationBudgetService
                         $insights = $rows[0];
                     }
 
-                    if ($insights !== []) {
-                        $freshInsights[$targetKey] = $insights;
-                    } else {
-                        MetaFlowLog::warning('automation insight target missing', [
-                            'profile_id' => $profile->id,
-                            'automation_task_id' => $targetData['tasks'][0]->id,
-                            'ad_account_id' => $adAccountId,
-                            'level' => $level,
-                            'target_id' => $target->external_id,
-                            'date_preset' => $datePreset ?? config('services.meta.insights_date_preset', 'last_30d'),
-                            'available_target_ids' => collect($rows)->pluck($idField)->filter()->values()->all(),
-                        ]);
-                    }
+                    // A successful Insights response omits targets with no delivery in
+                    // the requested period. That is a valid zero, not a failed refresh.
+                    // Only request failures above leave a target unavailable/stale.
+                    $freshInsights[$targetKey] = $insights;
                 }
             }
         }

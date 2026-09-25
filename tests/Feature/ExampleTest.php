@@ -637,6 +637,49 @@ class ExampleTest extends TestCase
         Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign->adAccount->external_id.'/insights'));
     }
 
+    public function test_automation_task_endpoint_treats_empty_successful_insights_as_zero_metrics(): void
+    {
+        $this->seed(TestDataSeeder::class);
+        Cache::flush();
+        $user = User::firstOrFail();
+        $this->actingAs($user);
+        T4JamProfile::updateOrCreate(['user_id' => $user->id], ['access_token' => 'token']);
+
+        $task = AutomationTask::with(['campaign.adAccount'])->where('user_id', $user->id)->firstOrFail();
+        AutomationTask::whereKeyNot($task->id)->delete();
+        $task->update([
+            'level' => 'campaign',
+            'conversion' => 'purchase',
+            'current_spend' => 75919,
+            'current_result' => 1,
+            'last_metrics_synced_at' => now()->subHour(),
+            'metrics_unavailable_at' => null,
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights*' => Http::response(['data' => []]),
+        ]);
+
+        $response = $this
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all&local=0')
+            ->assertOk()
+            ->assertJsonPath('meta_sync.attempted', true)
+            ->assertJsonPath('meta_sync.updated', 1)
+            ->assertJsonPath('meta_sync.reason', 'refreshed')
+            ->assertJsonPath('summary.total_spend', 0);
+
+        $row = collect($response->json('data'))->firstWhere('id', $task->id);
+
+        $this->assertSame(0, $row['current_spend']);
+        $this->assertSame(0, $row['current_hasil']);
+        $this->assertSame(0, $row['current_cpr']);
+        $this->assertTrue($row['metrics_available']);
+        $this->assertFalse($row['metrics_stale']);
+        $this->assertSame(0, $task->fresh()->current_spend);
+        $this->assertSame(0, $task->fresh()->current_result);
+        $this->assertNull($task->fresh()->metrics_unavailable_at);
+    }
+
     public function test_automation_task_fresh_refresh_is_scoped_to_authenticated_user(): void
     {
         $this->seed(TestDataSeeder::class);
