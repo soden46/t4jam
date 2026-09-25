@@ -373,6 +373,7 @@ class AutomationBudgetService
                             $client->updateCampaignStatus($targetId, false);
                         }
                     } catch (MetaAdsException $exception) {
+                        $reason = 'cpr_pause_status_update_failed';
                         $message = 'CPR cap terlewati, tetapi campaign gagal dipause di Meta.';
 
                         MetaFlowLog::warning('automation cpr cap status update failed', [

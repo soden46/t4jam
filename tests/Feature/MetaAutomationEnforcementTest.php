@@ -81,6 +81,102 @@ class MetaAutomationEnforcementTest extends TestCase
             && $request['status'] === 'PAUSED');
     }
 
+    public function test_spend_above_starting_budget_with_healthy_cpr_stays_active_and_increases_budget(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->campaign->update(['daily_budget' => 50000]);
+        $task->update([
+            'starting_budget' => 50000,
+            'current_budget' => 50000,
+            'maximum_budget' => 100000,
+            'cpr_cap' => 25000,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+
+        $this->fakeEnforcementInsights($task, 100000, 10);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        $this->assertSame(58000, $fresh->current_budget);
+        $this->assertSame(58000, $task->campaign->fresh()->daily_budget);
+        $this->assertSame('increase', $fresh->last_budget_action);
+        $this->assertStringContainsString('CPR Rp. 10.000 berada di bawah batas Rp. 25.000', $fresh->last_log);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign_external_id)
+            && (int) $request['daily_budget'] === 58000);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST'
+            && ($request->data()['status'] ?? null) === 'PAUSED');
+    }
+
+    public function test_high_spend_pauses_for_cpr_not_for_budget(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->campaign->update(['daily_budget' => 50000]);
+        $task->update([
+            'starting_budget' => 50000,
+            'current_budget' => 50000,
+            'cpr_cap' => 25000,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+
+        $this->fakeEnforcementInsights($task, 100000, 2);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        $this->assertSame('pause', $fresh->last_budget_action);
+        $this->assertSame('Campaign otomatis dipause karena CPR Rp. 50.000 mencapai batas Rp. 25.000.', $fresh->last_log);
+    }
+
+    public function test_maximum_budget_stops_increase_without_pausing_a_healthy_campaign(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->campaign->update(['daily_budget' => 100000]);
+        $task->update([
+            'current_budget' => 100000,
+            'maximum_budget' => 100000,
+            'cpr_cap' => 25000,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+
+        $this->fakeEnforcementInsights($task, 200000, 20, includeStatusPost: false);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        $this->assertSame(100000, $fresh->current_budget);
+        $this->assertSame(100000, $task->campaign->fresh()->daily_budget);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_cpr_over_cap_pauses_even_when_spend_is_below_starting_budget(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->campaign->update(['daily_budget' => 50000]);
+        $task->update([
+            'starting_budget' => 50000,
+            'current_budget' => 50000,
+            'cpr_cap' => 25000,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+
+        $this->fakeEnforcementInsights($task, 30000, 1);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        $this->assertSame('Campaign otomatis dipause karena CPR Rp. 30.000 mencapai batas Rp. 25.000.', $fresh->last_log);
+    }
+
     public function test_manual_activation_immediately_pauses_when_fresh_cpr_is_over_cap(): void
     {
         [, $task] = $this->automationFixture();
@@ -122,6 +218,26 @@ class MetaAutomationEnforcementTest extends TestCase
 
         $this->assertTrue($task->fresh()->is_active);
         $this->assertSame('manual_resume', $task->fresh()->last_budget_action);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST'
+            && ($request->data()['status'] ?? null) === 'PAUSED');
+    }
+
+    public function test_manual_activation_stays_active_with_high_spend_when_cpr_is_healthy(): void
+    {
+        [, $task] = $this->automationFixture();
+        $this->prepareManualActivation($task);
+        $this->fakeManualActivationInsights($task, 500000, 50);
+
+        $this->activateTask($task)
+            ->assertOk()
+            ->assertJsonPath('data.automation_status', 'active')
+            ->assertJsonPath('data.meta_status', 'ACTIVE')
+            ->assertJsonPath('data.current_spend', 500000)
+            ->assertJsonPath('data.current_hasil', 50)
+            ->assertJsonPath('data.current_cpr', 10000);
+
+        $this->assertTrue($task->fresh()->is_active);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
         Http::assertNotSent(fn ($request) => $request->method() === 'POST'
             && ($request->data()['status'] ?? null) === 'PAUSED');
     }
