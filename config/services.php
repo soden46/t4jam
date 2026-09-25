@@ -38,7 +38,7 @@ return [
         'insights_date_preset' => env('META_GRAPH_INSIGHTS_DATE_PRESET', 'last_30d'),
         'automation_insights_date_preset' => env(
             'META_GRAPH_AUTOMATION_INSIGHTS_DATE_PRESET',
-            env('META_GRAPH_AUTOMATION_DISPLAY_INSIGHTS_DATE_PRESET', env('META_GRAPH_AUTOMATION_ENFORCEMENT_INSIGHTS_DATE_PRESET', 'today'))
+            env('META_GRAPH_INSIGHTS_DATE_PRESET', 'last_30d'),
         ),
         'webhook_verify_token' => env('META_WEBHOOK_VERIFY_TOKEN'),
         'webhook_app_secret' => env('META_WEBHOOK_APP_SECRET'),

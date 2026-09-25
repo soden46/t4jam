@@ -57,8 +57,10 @@ class MetaAdsSyncService
             }
         });
 
-        $counts['insights'] = $this->syncInsights($client, $campaignIds, $adSetIds);
-        $counts['automation_paused'] = app(AutomationBudgetService::class)->pauseTasksOverCprCap(
+        $automation = app(AutomationBudgetService::class);
+        $datePreset = $automation->automationInsightsDatePreset();
+        $counts['insights'] = $this->syncInsights($client, $campaignIds, $adSetIds, $datePreset);
+        $counts['automation_paused'] = $automation->pauseTasksOverCprCap(
             $profile,
             $client,
             syncedTargets: $this->freshInsightTargets,
@@ -127,7 +129,7 @@ class MetaAdsSyncService
             ->all();
     }
 
-    private function syncInsights(MetaAdsClient $client, array $campaignIds, array $adSetIds): int
+    private function syncInsights(MetaAdsClient $client, array $campaignIds, array $adSetIds, string $datePreset): int
     {
         $count = 0;
 
@@ -136,13 +138,13 @@ class MetaAdsSyncService
             ->whereIn('id', $campaignIds)
             ->get()
             ->groupBy(fn (Campaign $campaign) => $campaign->adAccount?->external_id)
-            ->each(function ($campaigns, ?string $adAccountId) use ($client, &$count): void {
+            ->each(function ($campaigns, ?string $adAccountId) use ($client, $datePreset, &$count): void {
                 if (! $adAccountId) {
                     return;
                 }
 
                 $insightsByCampaign = collect($this->optionalMetaRequest(
-                    fn () => $client->accountCampaignInsights($adAccountId),
+                    fn () => $client->accountCampaignInsights($adAccountId, $datePreset),
                     'Meta campaign insights skipped',
                     ['ad_account_id' => $adAccountId],
                 ))->keyBy('campaign_id');
@@ -163,13 +165,13 @@ class MetaAdsSyncService
             ->whereIn('id', $adSetIds)
             ->get()
             ->groupBy(fn (AdSet $adSet) => $adSet->adAccount?->external_id)
-            ->each(function ($adSets, ?string $adAccountId) use ($client, &$count): void {
+            ->each(function ($adSets, ?string $adAccountId) use ($client, $datePreset, &$count): void {
                 if (! $adAccountId) {
                     return;
                 }
 
                 $insightsByAdSet = collect($this->optionalMetaRequest(
-                    fn () => $client->accountAdSetInsights($adAccountId),
+                    fn () => $client->accountAdSetInsights($adAccountId, $datePreset),
                     'Meta ad set insights skipped',
                     ['ad_account_id' => $adAccountId],
                 ))->keyBy('adset_id');
@@ -349,6 +351,7 @@ class MetaAdsSyncService
         $adAccountExternalId = $this->normalizeAdAccountId($adAccountExternalId);
         $client = $this->client($profile);
         $freshInsightTargets = [];
+        $datePreset = app(AutomationBudgetService::class)->automationInsightsDatePreset();
 
         MetaFlowLog::info('webhook account sync started', [
             'profile_id' => $profile->id,
@@ -359,12 +362,12 @@ class MetaAdsSyncService
         $campaigns = $client->campaigns($adAccountExternalId);
         $adSets = $client->accountAdSets($adAccountExternalId);
         $campaignInsights = collect($this->optionalMetaRequest(
-            fn () => $client->accountCampaignInsights($adAccountExternalId),
+            fn () => $client->accountCampaignInsights($adAccountExternalId, $datePreset),
             'Meta webhook campaign insights skipped',
             ['ad_account_id' => $adAccountExternalId],
         ))->keyBy('campaign_id');
         $adSetInsights = collect($this->optionalMetaRequest(
-            fn () => $client->accountAdSetInsights($adAccountExternalId),
+            fn () => $client->accountAdSetInsights($adAccountExternalId, $datePreset),
             'Meta webhook ad set insights skipped',
             ['ad_account_id' => $adAccountExternalId],
         ))->keyBy('adset_id');

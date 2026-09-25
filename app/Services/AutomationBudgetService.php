@@ -45,6 +45,13 @@ class AutomationBudgetService
         };
     }
 
+    public function automationInsightsDatePreset(): string
+    {
+        $datePreset = trim((string) config('services.meta.automation_insights_date_preset', 'last_30d'));
+
+        return $datePreset !== '' ? $datePreset : 'last_30d';
+    }
+
     public function pauseTasksOverCprCap(T4JamProfile $profile, MetaAdsClient $client, bool $refreshMetrics = false, ?array $syncedTargets = null, string $source = 'scheduler'): int
     {
         return Cache::lock('automation-profile:'.$profile->id, 900)->get(
@@ -86,7 +93,7 @@ class AutomationBudgetService
         }
 
         return Cache::lock('automation-display-sync:'.$profile->id, 30)->get(function () use ($profile, $client, $tasks): int {
-            $datePreset = config('services.meta.automation_insights_date_preset', 'today');
+            $datePreset = $this->automationInsightsDatePreset();
             $freshTargets = $this->refreshMetrics($tasks, $client, $profile, $datePreset);
             $updated = 0;
 
@@ -210,8 +217,22 @@ class AutomationBudgetService
                 ->values();
         }
 
-        $datePreset = config('services.meta.automation_insights_date_preset', 'today');
+        $datePreset = $this->automationInsightsDatePreset();
         $freshTargets = $refreshMetrics ? $this->refreshMetrics($tasks, $client, $profile, $datePreset) : $syncedTargets;
+
+        if (! $refreshMetrics && $freshTargets !== null) {
+            $missingTasks = $tasks
+                ->filter(function (AutomationTask $task) use ($freshTargets): bool {
+                    $target = $this->target($task);
+
+                    return $target !== null && ! array_key_exists($this->targetKey($task, $target), $freshTargets);
+                })
+                ->values();
+
+            if ($missingTasks->isNotEmpty()) {
+                $freshTargets += $this->refreshMetrics($missingTasks, $client, $profile, $datePreset);
+            }
+        }
 
         $tasks
             ->each(function (AutomationTask $task) use ($profile, $client, $freshTargets, &$paused, $source): void {
@@ -639,13 +660,29 @@ class AutomationBudgetService
                     $target = $targetData['target'];
                     $insights = $rowsByTarget->get($target->external_id, []);
 
-                    if ($insights === [] && count($targetGroup) === 1 && count($rows) === 1) {
-                        $insights = $rows[0];
+                    if ($insights === []) {
+                        try {
+                            $insights = $level === 'adset'
+                                ? $client->adSetInsights($target->external_id, $datePreset)
+                                : $client->campaignInsights($target->external_id, $datePreset);
+                        } catch (MetaAdsException $exception) {
+                            MetaFlowLog::warning('automation target insights fallback failed', [
+                                'profile_id' => $profile->id,
+                                'automation_task_id' => $targetData['tasks'][0]->id,
+                                'ad_account_id' => $adAccountId,
+                                'level' => $level,
+                                'target_id' => $target->external_id,
+                                'date_preset' => $datePreset,
+                                'http_status' => $exception->httpStatus,
+                                'meta_code' => $exception->metaCode,
+                            ]);
+
+                            continue;
+                        }
                     }
 
-                    // A successful Insights response omits targets with no delivery in
-                    // the requested period. That is a valid zero, not a failed refresh.
-                    // Only request failures above leave a target unavailable/stale.
+                    // A direct successful response with no rows means the target has no
+                    // delivery in this period. Provider failures above remain unavailable.
                     $freshInsights[$targetKey] = $insights;
                 }
             }

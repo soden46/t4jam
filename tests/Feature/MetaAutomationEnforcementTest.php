@@ -34,6 +34,52 @@ class MetaAutomationEnforcementTest extends TestCase
             && $request['status'] === 'PAUSED');
     }
 
+    public function test_scheduler_falls_back_to_direct_campaign_insights_and_pauses_over_cap(): void
+    {
+        config(['services.meta.automation_insights_date_preset' => 'last_30d']);
+        [$profile, $task] = $this->automationFixture();
+        $task->update([
+            'current_spend' => 75919,
+            'current_result' => 1,
+            'cpr_cap' => 25000,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+        $account = $task->campaign->adAccount;
+
+        Http::fake([
+            'graph.facebook.com/*/'.$account->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => 'campaign_not_requested',
+                    'spend' => '1000',
+                    'actions' => [],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign_external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'spend' => '75919',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertSame(75919, $fresh->current_spend);
+        $this->assertSame(1, $fresh->current_result);
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame('pause', $fresh->last_budget_action);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$account->external_id.'/insights')
+            && $request['date_preset'] === 'last_30d');
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign_external_id.'/insights')
+            && $request['date_preset'] === 'last_30d');
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign_external_id)
+            && $request['status'] === 'PAUSED');
+    }
+
     public function test_writes_disabled_logs_skip_without_meta_status_write(): void
     {
         [, $task] = $this->automationFixture(writesEnabled: false);
@@ -83,11 +129,49 @@ class MetaAutomationEnforcementTest extends TestCase
             && $request['date_preset'] === 'last_7d');
     }
 
+    public function test_display_and_scheduler_use_the_same_automation_insights_date_preset(): void
+    {
+        Cache::flush();
+        config([
+            'services.meta.enable_writes' => false,
+            'services.meta.insights_date_preset' => 'last_30d',
+            'services.meta.automation_insights_date_preset' => 'last_7d',
+        ]);
+        [$profile, $task] = $this->automationFixture(writesEnabled: false);
+        $task->update(['last_checked_at' => now()->subMinutes(11)]);
+        $account = $task->campaign->adAccount;
+
+        Http::fake([
+            'graph.facebook.com/*/'.$account->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '1000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+        ]);
+
+        app(AutomationBudgetService::class)->refreshTaskMetricsForDisplay(
+            $profile,
+            app(MetaAdsSyncService::class)->client($profile),
+            collect([$task]),
+        );
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $insightRequests = Http::recorded(fn ($request) => str_contains($request->url(), '/'.$account->external_id.'/insights'));
+
+        $this->assertCount(2, $insightRequests);
+        $this->assertTrue($insightRequests->every(
+            fn (array $record) => $record[0]['date_preset'] === 'last_7d',
+        ));
+    }
+
     public function test_relevant_campaign_webhook_sync_enforces_cpr_pause_immediately(): void
     {
         config([
             'queue.default' => 'database',
             'services.meta.webhook_sync_mode' => 'after_response',
+            'services.meta.automation_insights_date_preset' => 'last_7d',
         ]);
         [$profile, $task] = $this->automationFixture();
         $task->update(['last_checked_at' => now()]);
@@ -106,6 +190,9 @@ class MetaAutomationEnforcementTest extends TestCase
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $task->campaign_external_id)
             && $request['status'] === 'PAUSED');
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign->adAccount->external_id.'/insights')
+            && $request['level'] === 'campaign'
+            && $request['date_preset'] === 'last_7d');
     }
 
     public function test_unrelated_campaign_webhook_does_not_pause_other_task(): void
@@ -256,6 +343,9 @@ class MetaAutomationEnforcementTest extends TestCase
 
         Http::fake([
             'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [['campaign_id' => 'campaign_not_requested', 'spend' => '1000', 'actions' => []]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign_external_id.'/insights?*' => Http::response([
                 'error' => ['code' => 17, 'message' => 'Rate limit'],
             ], 500),
         ]);

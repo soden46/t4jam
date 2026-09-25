@@ -658,6 +658,7 @@ class ExampleTest extends TestCase
 
         Http::fake([
             'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/'.$task->campaign_external_id.'/insights*' => Http::response(['data' => []]),
         ]);
 
         $response = $this
@@ -1190,6 +1191,7 @@ class ExampleTest extends TestCase
     {
         Queue::fake();
         $this->seed(TestDataSeeder::class);
+        config(['services.meta.automation_insights_date_preset' => 'last_7d']);
         $user = User::firstOrFail();
         $this->actingAs($user);
 
@@ -1220,6 +1222,7 @@ class ExampleTest extends TestCase
                     ],
                 ]],
             ]),
+            'graph.facebook.com/*/insights?*' => Http::response(['data' => []]),
         ]);
 
         $this->get('/profile/')->assertOk();
@@ -1245,7 +1248,7 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('t4jam_profiles', ['user_id' => $user->id, 'meta_user_name' => 'Meta Tester', 'last_meta_error' => null]);
         Http::assertSent(fn ($request) => str_contains($request->url(), '/act_123/insights')
             && $request['level'] === 'campaign'
-            && $request['date_preset'] === 'last_30d');
+            && $request['date_preset'] === 'last_7d');
     }
 
     public function test_manual_meta_ads_sync_is_queued_and_persists_data_in_job(): void
