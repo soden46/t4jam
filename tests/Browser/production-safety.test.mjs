@@ -37,7 +37,7 @@ test('dynamic names, attributes, logs and product links cannot inject markup or 
     }, attack);
     assert.equal(await page.locator('#campaign_table .campaign-name').textContent(), attack);
     assert.equal(await page.locator('#automation_table .campaign-name').textContent(), attack);
-    assert.equal(await page.locator('#automation_table .log-cell > span').textContent(), attack);
+    assert.equal(await page.locator('#automation_table .log-cell .log-text').textContent(), attack);
     assert.equal(await page.locator('#item-timeline li').textContent(), attack);
     assert.equal(await page.locator('#interest_table tr').getAttribute('data-topic'), attack);
     await page.locator('[data-product-detail]').click();
@@ -64,23 +64,24 @@ test('automation table renders compact grouped metrics and action menu', async (
             current_hasil: 1,
             current_cpr: 75919,
             cpr_cap: 25000,
+            metrics_stale: true,
         }]);
     });
 
     const cells = page.locator('#automation_table tbody td');
     assert.match(await cells.nth(0).textContent(), /Campaign CPR/);
-    assert.match(await cells.nth(0).textContent(), /Account CPR/);
-    assert.match(await cells.nth(1).textContent(), /Automation\s*Paused/);
-    assert.match(await cells.nth(1).textContent(), /Meta\s*PAUSED/);
-    assert.match(await cells.nth(2).textContent(), /Rp\. 100\.000,-/);
-    assert.match(await cells.nth(3).textContent(), /Rp\. 75\.919,-/);
-    assert.match(await cells.nth(4).textContent(), /1/);
-    assert.match(await cells.nth(5).textContent(), /CPR/);
+    assert.match(await cells.nth(1).textContent(), /Account CPR/);
+    assert.match(await cells.nth(2).textContent(), /Paused/);
+    assert.match(await cells.nth(3).textContent(), /PAUSED/);
+    assert.match(await cells.nth(4).textContent(), /Rp\. 100\.000,-/);
     assert.match(await cells.nth(5).textContent(), /Rp\. 75\.919,-/);
-    assert.match(await cells.nth(5).textContent(), /Limit\s*Rp\. 25\.000,-/);
-    assert.match(await cells.nth(5).getAttribute('class'), /text-danger/);
-    await page.locator('[data-actions-toggle]').click();
-    assert.deepEqual(await page.locator('[data-actions-menu] button').evaluateAll(buttons => buttons.map(button => button.textContent)), ['Lihat Log', 'Update', 'Turun / Pause', 'Hapus']);
+    assert.match(await cells.nth(6).textContent(), /1/);
+    assert.match(await cells.nth(7).textContent(), /Rp\. 75\.919,-/);
+    assert.doesNotMatch(await cells.nth(7).textContent(), /stale/i);
+    assert.equal(await cells.nth(7).locator('strong').getAttribute('title'), 'Metrik Meta belum diperbarui; menampilkan data terakhir.');
+    assert.match(await cells.nth(7).getAttribute('class'), /text-danger/);
+    assert.match(await cells.nth(8).textContent(), /Rp\. 25\.000,-/);
+    assert.deepEqual(await page.locator('.actions-cell button').evaluateAll(buttons => buttons.map(button => button.textContent)), ['Log', 'Update', 'Turun Budget', 'Aktifkan', 'Hapus']);
 });
 
 test('polling reads only local tasks, does not overlap, and preserves open edits', async () => {

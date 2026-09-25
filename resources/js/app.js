@@ -472,8 +472,10 @@ function renderAutomationTable(rows, summary = null) {
         const currentCpr = Number(row.current_cpr || 0);
         const cprCap = Number(row.cpr_cap || 0);
         const metricsStale = Boolean(row.metrics_stale);
-        const isOverLimit = metricsStale || (cprCap > 0 && currentCpr >= cprCap);
-        const staleLabel = metricsStale ? '<small class="text-danger"> stale</small>' : '';
+        const isOverLimit = cprCap > 0 && currentCpr >= cprCap;
+        const staleMetricTitle = metricsStale
+            ? ' title="Metrik Meta belum diperbarui; menampilkan data terakhir."'
+            : '';
         const metaStatus = row.meta_effective_status || row.meta_status || '-';
         const metaInactive = ['PAUSED', 'DELETED', 'ARCHIVED'].includes(String(metaStatus).toUpperCase());
         const automationActive = !metaInactive && (row.automation_status ? row.automation_status === 'active' : row.status === 'true');
@@ -489,9 +491,9 @@ function renderAutomationTable(rows, summary = null) {
                 <td><span class="badge ${automationActive ? 'active' : 'pause'}">${automationActive ? 'Active' : 'Paused'}</span></td>
                 <td><span class="badge ${metaStatusClass}">${escapeHtml(metaStatus)}</span></td>
                 <td class="num"><strong>${rupiah(row.current_budget)}</strong></td>
-                <td class="num"><strong class="${metricsStale ? 'text-danger' : ''}">${rupiah(row.current_spend)}</strong></td>
+                <td class="num"><strong${staleMetricTitle}>${rupiah(row.current_spend)}</strong></td>
                 <td class="num center"><strong>${number(row.current_hasil)}</strong></td>
-                <td class="num ${isOverLimit ? 'text-danger' : ''}"><strong>${rupiah(row.current_cpr)}${staleLabel}</strong></td>
+                <td class="num ${isOverLimit ? 'text-danger' : ''}"><strong${staleMetricTitle}>${rupiah(row.current_cpr)}</strong></td>
                 <td class="num"><strong>${rupiah(row.cpr_cap)}</strong></td>
                 <td class="log-cell">
                     <span class="log-text">${escapeHtml(row.log || '-')}</span>
