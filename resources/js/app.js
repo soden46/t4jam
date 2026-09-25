@@ -416,19 +416,19 @@ function startAutomationPolling() {
     const poll = async () => {
         try {
             if (!document.hidden && !qs('.modal:not([hidden])') && !qs('#automation_table button:disabled')) {
-                await loadAutomationTasks({ background: true, localOnly: true });
+                await loadAutomationTasks({ background: true });
             }
         } catch { /* A later poll retries without repeated toasts. */ }
         finally { setTimeout(poll, 5000); }
     };
     setTimeout(poll, 5000);
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && !qs('.modal:not([hidden])')) loadAutomationTasks({ background: true, localOnly: true }).catch(() => {});
+        if (!document.hidden && !qs('.modal:not([hidden])')) loadAutomationTasks({ background: true }).catch(() => {});
     });
 }
 
 async function loadAutomationTasks(options = {}) {
-    const { background = false, localOnly = true } = options || {};
+    const { background = false } = options || {};
     if (automationRequest) {
         if (background === true) return automationRequest;
         await automationRequest.catch(() => {});
@@ -439,9 +439,8 @@ async function loadAutomationTasks(options = {}) {
         const level = qs('#level_filter')?.value || 'all';
         const funnel = qs('#event_tracking_filter')?.value || 'all';
         const search = qs('#search_domain')?.value || '';
-        const localFlag = localOnly ? '&local=1' : '';
         qs('#automation_table')?.classList.add('is-loading');
-        const response = await request(`/get-automation-task/?acc=${encodeURIComponent(acc)}&level=${encodeURIComponent(level)}&funnel=${encodeURIComponent(funnel)}&page=${automationPage}&per_page=${automationPerPage}&search=${encodeURIComponent(search)}${localFlag}`);
+        const response = await request(`/get-automation-task/?acc=${encodeURIComponent(acc)}&level=${encodeURIComponent(level)}&funnel=${encodeURIComponent(funnel)}&page=${automationPage}&per_page=${automationPerPage}&search=${encodeURIComponent(search)}`);
         if (background === true && (document.hidden || qs('.modal:not([hidden])'))) return;
         renderAutomationTable(response.data || [], response.summary || null);
         renderAutomationPagination(response.pagination || null);

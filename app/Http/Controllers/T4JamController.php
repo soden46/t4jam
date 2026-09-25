@@ -267,24 +267,13 @@ class T4JamController extends Controller
         return response()->json(['status' => 200, 'text' => 'Data Valid', 'max_account' => 30, 'jumlah_akun_dipilih' => AdAccount::count()]);
     }
 
-    public function automationTasks(
-        Request $request,
-        AutomationBudgetService $automationBudget,
-        MetaAdsSyncService $metaSync,
-    ): JsonResponse
+    public function automationTasks(Request $request): JsonResponse
     {
         $perPage = in_array((int) $request->query('per_page', 10), [10, 25, 50], true)
             ? (int) $request->query('per_page', 10)
             : 10;
         $page = max(1, (int) $request->query('page', 1));
         $search = trim((string) $request->query('search', ''));
-        $localOnly = $request->boolean('local', false);
-
-        $metaSyncStatus = ['attempted' => false, 'updated' => 0, 'reason' => 'local_only'];
-
-        if (! $localOnly) {
-            $metaSyncStatus = $this->refreshAutomationMetricsForDisplay($request, $search, $automationBudget, $metaSync);
-        }
 
         $query = $this->automationTasksQuery($request, $search);
 
@@ -317,7 +306,7 @@ class T4JamController extends Controller
                 'total_result' => $totalResult,
                 'average_cpr' => $totalResult > 0 ? (int) round($totalSpend / $totalResult) : $totalSpend,
             ],
-            'meta_sync' => $metaSyncStatus,
+            'meta_sync' => ['attempted' => false, 'updated' => 0, 'reason' => 'db_only'],
         ])->header('Cache-Control', 'no-store');
     }
 

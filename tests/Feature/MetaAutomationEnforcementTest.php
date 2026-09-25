@@ -859,6 +859,64 @@ class MetaAutomationEnforcementTest extends TestCase
         Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
+    public function test_initial_list_load_does_not_call_meta(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->update([
+            'current_spend' => 31980,
+            'current_result' => 1,
+            'current_budget' => 75000,
+            'last_metrics_synced_at' => now()->subMinutes(10),
+            'metrics_unavailable_at' => null,
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*' => Http::response(['error' => ['message' => 'should not be called']]),
+        ]);
+
+        $response = $this->actingAs(User::firstOrFail())
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all&page=1&per_page=10');
+
+        $response->assertOk()
+            ->assertJsonPath('meta_sync.reason', 'db_only')
+            ->assertJsonPath('meta_sync.attempted', false);
+
+        $row = collect($response->json('data'))->firstWhere('id', $task->id);
+        $this->assertNotNull($row);
+        $this->assertSame(31980, $row['current_spend']);
+        $this->assertSame(1, $row['current_hasil']);
+        $this->assertSame(100000, $row['current_budget']);
+        $this->assertTrue($row['metrics_available']);
+        $this->assertFalse($row['metrics_stale']);
+
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), 'graph.facebook.com'));
+    }
+
+    public function test_pagination_does_not_refresh_all_tasks(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->update([
+            'current_spend' => 10000,
+            'current_result' => 1,
+            'current_budget' => 50000,
+            'last_metrics_synced_at' => now()->subMinutes(10),
+            'metrics_unavailable_at' => null,
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*' => Http::response(['error' => ['message' => 'should not be called']]),
+        ]);
+
+        $response = $this->actingAs(User::firstOrFail())
+            ->getJson('/get-automation-task/?acc=all&level=all&funnel=all&page=1&per_page=10');
+
+        $response->assertOk();
+        $this->assertSame(10, $response->json('pagination.per_page'));
+        $this->assertNotNull(collect($response->json('data'))->firstWhere('id', $task->id));
+
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), 'graph.facebook.com'));
+    }
+
     private function automationFixture(bool $writesEnabled = true, string $level = 'campaign'): array
     {
         Cache::flush();
