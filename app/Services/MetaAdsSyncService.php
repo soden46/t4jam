@@ -469,7 +469,10 @@ class MetaAdsSyncService
                     return;
                 }
 
-                $active = strtoupper((string) $target->status) === 'ACTIVE';
+                // Meta can keep the object status ACTIVE while its effective status is
+                // PAUSED by a parent campaign or ad account. Automation must follow the
+                // state Meta is actually serving, not merely the requested object state.
+                $active = strtoupper((string) ($target->effective_status ?: $target->status)) === 'ACTIVE';
                 $budgetChanged = (int) $task->current_budget !== (int) $target->daily_budget;
                 $statusChanged = (bool) $task->is_active !== $active;
 

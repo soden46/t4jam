@@ -1318,7 +1318,7 @@ class ExampleTest extends TestCase
                 return Http::response(['data' => [[
                     'id' => $campaign->external_id,
                     'name' => $campaign->name,
-                    'status' => 'PAUSED',
+                    'status' => 'ACTIVE',
                     'effective_status' => 'PAUSED',
                     'daily_budget' => '210000',
                     'objective' => 'OUTCOME_SALES',
@@ -1357,7 +1357,8 @@ class ExampleTest extends TestCase
 
         $this->assertDatabaseHas('campaigns', [
             'id' => $campaign->id,
-            'status' => 'PAUSED',
+            'status' => 'ACTIVE',
+            'effective_status' => 'PAUSED',
             'daily_budget' => 210000,
             'spend' => 45000,
             'result' => 3,
