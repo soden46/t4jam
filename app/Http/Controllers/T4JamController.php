@@ -594,7 +594,11 @@ class T4JamController extends Controller
         return response()->json(['status' => 200, 'text' => $metaPushed ? 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.' : 'Automation strategy berhasil diupdate.']);
     }
 
-    public function updateStatusAutomation(Request $request, MetaAdsSyncService $metaSync): JsonResponse
+    public function updateStatusAutomation(
+        Request $request,
+        MetaAdsSyncService $metaSync,
+        AutomationBudgetService $automationBudget,
+    ): JsonResponse
     {
         $task = AutomationTask::where('user_id', Auth::id())->with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
         $isActive = $request->input('status', 'true') === 'true';
@@ -621,7 +625,38 @@ class T4JamController extends Controller
             ]);
         });
 
-        return response()->json(['status' => 200, 'text' => 'Status automation berhasil diperbarui dan Meta berhasil diupdate.']);
+        $verificationCompleted = true;
+        if ($isActive) {
+            $profile = $this->metaCredentialProfile();
+            $verificationCompleted = $automationBudget->enforceTaskImmediately($profile, $metaSync->client($profile), $task);
+        }
+
+        $task = $task->fresh(['adAccount', 'campaign', 'adSet']);
+        $metricsUnavailable = $task->metrics_unavailable_at !== null
+            && ($task->last_metrics_synced_at === null || $task->metrics_unavailable_at->gte($task->last_metrics_synced_at));
+        $verificationMessage = null;
+
+        if ($isActive && $task->is_active && (! $verificationCompleted || $metricsUnavailable)) {
+            $verificationMessage = $verificationCompleted
+                ? 'Status automation berhasil diperbarui; Meta berhasil diupdate. Verifikasi CPR belum dapat diselesaikan karena metrik Meta tidak tersedia; campaign tetap aktif dan akan diperiksa scheduler.'
+                : 'Status automation berhasil diperbarui; Meta berhasil diupdate. Verifikasi CPR belum dapat dijalankan karena proses automation lain sedang berjalan; campaign tetap aktif dan akan diperiksa scheduler.';
+
+            DB::transaction(function () use ($task, $verificationMessage): void {
+                $task->update(['last_log' => $verificationMessage]);
+                AutomationLog::create([
+                    'automation_task_id' => $task->id,
+                    'messages' => [$verificationMessage],
+                ]);
+            });
+            $task->refresh();
+        }
+
+        $data = $this->taskPayload($task);
+        $text = ! $task->is_active && $task->last_budget_action === 'pause'
+            ? $task->last_log
+            : ($verificationMessage ?? 'Status automation berhasil diperbarui dan Meta berhasil diupdate.');
+
+        return response()->json(['status' => 200, 'text' => $text, 'data' => $data]);
     }
 
     public function deleteAutomationTask(Request $request): JsonResponse

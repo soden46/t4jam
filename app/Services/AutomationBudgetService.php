@@ -10,6 +10,7 @@ use App\Models\AutomationTask;
 use App\Models\Campaign;
 use App\Models\T4JamProfile;
 use App\Support\MetaFlowLog;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -57,6 +58,38 @@ class AutomationBudgetService
         return Cache::lock('automation-profile:'.$profile->id, 900)->get(
             fn () => $this->evaluateTasks($profile, $client, $refreshMetrics, $syncedTargets, $source)
         ) ?: 0;
+    }
+
+    public function enforceTaskImmediately(T4JamProfile $profile, MetaAdsClient $client, AutomationTask $task): bool
+    {
+        $target = $this->target($task);
+        $campaignIds = $task->level === 'campaign' ? $this->normalizeIds([$task->campaign_external_id]) : [];
+        $adSetIds = $task->level === 'adset' ? $this->normalizeIds([$task->ad_set_external_id]) : [];
+
+        try {
+            return Cache::lock('automation-profile:'.$profile->id, 900)->block(10, function () use ($profile, $client, $target, $campaignIds, $adSetIds): bool {
+                $this->evaluateTasks(
+                    $profile,
+                    $client,
+                    true,
+                    null,
+                    'manual_activation',
+                    true,
+                    $target?->adAccount?->external_id,
+                    $campaignIds,
+                    $adSetIds,
+                );
+
+                return true;
+            });
+        } catch (LockTimeoutException) {
+            MetaFlowLog::warning('immediate automation enforcement lock unavailable', [
+                'profile_id' => $profile->id,
+                'automation_task_id' => $task->id,
+            ]);
+
+            return false;
+        }
     }
 
     public function pauseWebhookTasksOverCprCap(
