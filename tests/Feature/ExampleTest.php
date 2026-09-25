@@ -1275,6 +1275,7 @@ class ExampleTest extends TestCase
             ]),
             'graph.facebook.com/*/cmp_456/adsets?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_456/insights?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/insights?*' => Http::response(['data' => []]),
         ]);
 
         $this->postJson('/profile/sync-meta-ads/')
@@ -1585,6 +1586,7 @@ class ExampleTest extends TestCase
             ]),
             'graph.facebook.com/*/cmp_321/adsets?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_321/insights?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/insights?*' => Http::response(['data' => []]),
         ]);
 
         $this->artisan('t4jam:sync-meta-ads')
@@ -1636,6 +1638,7 @@ class ExampleTest extends TestCase
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true]),
+            'graph.facebook.com/*/insights?*' => Http::response(['data' => []]),
         ]);
 
         $this->runMetaSyncJob($profile);
@@ -2031,6 +2034,7 @@ class ExampleTest extends TestCase
             'graph.facebook.com/*/act_654/campaigns?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_777/campaigns?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_888/campaigns?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/insights?*' => Http::response(['data' => []]),
         ]);
 
         $this->runMetaSyncJob($profile);

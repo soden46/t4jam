@@ -111,9 +111,9 @@ class ProductionSafetyTest extends TestCase
         [, $task] = $this->fixture();
         Http::fake([
             '*/insights?*' => Http::sequence()
-                ->push(['data' => [['spend' => 40000, 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]])
-                ->push(['data' => [['spend' => 40000, 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]])
-                ->push(['data' => [['spend' => 10000, 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]]),
+                ->push(['data' => [['campaign_id' => $task->campaign_external_id, 'spend' => 40000, 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]])
+                ->push(['data' => [['campaign_id' => $task->campaign_external_id, 'spend' => 40000, 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]])
+                ->push(['data' => [['campaign_id' => $task->campaign_external_id, 'spend' => 10000, 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]]),
             '*'.$task->campaign_external_id => Http::response(['success' => true]),
         ]);
         $this->artisan('t4jam:enforce-automation')->assertSuccessful();
