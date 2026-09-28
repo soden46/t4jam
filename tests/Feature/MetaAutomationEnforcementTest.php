@@ -9,6 +9,7 @@ use App\Models\T4JamProfile;
 use App\Models\User;
 use App\Services\AutomationBudgetService;
 use App\Services\MetaAdsSyncService;
+use App\Services\MetaRateLimitService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
@@ -1099,5 +1100,168 @@ class MetaAutomationEnforcementTest extends TestCase
                 'HTTP_X_HUB_SIGNATURE_256' => 'sha256='.hash_hmac('sha256', $content, (string) $profile->app_secret),
             ],
         ];
+    }
+
+    public function test_rate_limit_613_opens_shared_cooldown(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->update([
+            'current_spend' => 75000,
+            'current_result' => 1,
+            'current_budget' => 50000,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '75000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign_external_id => Http::response([
+                'error' => ['code' => 613, 'message' => 'Application request limit reached'],
+            ], 429, ['Retry-After' => '30']),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame('ACTIVE', $fresh->campaign->fresh()->status);
+        $this->assertStringContainsString('Pending pause (rate limited).', $fresh->last_log);
+
+        $rateLimit = app(MetaRateLimitService::class);
+        $this->assertTrue($rateLimit->isRateLimited($profile));
+    }
+
+    public function test_request_during_cooldown_is_not_sent(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->update([
+            'current_spend' => 75000,
+            'current_result' => 1,
+            'current_budget' => 50000,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+
+        $rateLimit = app(MetaRateLimitService::class);
+        $rateLimit->record($profile, 60);
+
+        Http::fake([
+            'graph.facebook.com/*' => Http::response(['error' => ['message' => 'should not be called']]),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), 'graph.facebook.com'));
+        $this->assertTrue($task->fresh()->is_active);
+    }
+
+    public function test_over_cap_with_613_keeps_active_with_pending_pause(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->update([
+            'current_spend' => 75000,
+            'current_result' => 1,
+            'current_budget' => 50000,
+            'cpr_cap' => 25000,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '75000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign_external_id => Http::response([
+                'error' => ['code' => 613, 'message' => 'Application request limit reached'],
+            ], 429),
+        ]);
+
+        $this->artisan('t4jam:enforce-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame('ACTIVE', $fresh->campaign->fresh()->status);
+        $this->assertNotSame('pause', $fresh->last_budget_action);
+        $this->assertStringContainsString('Pending pause (rate limited).', $fresh->last_log);
+    }
+
+    public function test_resume_pending_pause_when_cooldown_expired_and_still_over_cap(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->update([
+            'current_spend' => 75000,
+            'current_result' => 1,
+            'current_budget' => 50000,
+            'cpr_cap' => 25000,
+            'last_checked_at' => now()->subMinutes(11),
+            'last_log' => 'Pending pause (rate limited). CPR Rp. 75.000 vs cap Rp. 25.000.',
+        ]);
+
+        $rateLimit = app(MetaRateLimitService::class);
+        $rateLimit->clear($profile);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '75000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+            'graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true]),
+        ]);
+
+        $paused = app(AutomationBudgetService::class)->resumePendingPauses(
+            $profile,
+            app(MetaAdsSyncService::class)->client($profile),
+        );
+
+        $this->assertSame(1, $paused);
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        $this->assertSame('pause', $task->fresh()->last_budget_action);
+    }
+
+    public function test_resume_pending_pause_clears_when_cpr_healthy(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->update([
+            'current_spend' => 10000,
+            'current_result' => 1,
+            'current_budget' => 50000,
+            'cpr_cap' => 25000,
+            'last_checked_at' => now()->subMinutes(11),
+            'last_log' => 'Pending pause (rate limited). CPR Rp. 10.000 vs cap Rp. 25.000.',
+        ]);
+
+        $rateLimit = app(MetaRateLimitService::class);
+        $rateLimit->clear($profile);
+
+        Http::fake([
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
+                'data' => [[
+                    'campaign_id' => $task->campaign_external_id,
+                    'spend' => '10000',
+                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                ]],
+            ]),
+        ]);
+
+        $paused = app(AutomationBudgetService::class)->resumePendingPauses(
+            $profile,
+            app(MetaAdsSyncService::class)->client($profile),
+        );
+
+        $this->assertSame(0, $paused);
+        $this->assertTrue($task->fresh()->is_active);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        $this->assertStringContainsString('dibersihkan', $task->fresh()->last_log);
     }
 }

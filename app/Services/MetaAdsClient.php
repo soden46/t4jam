@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\MetaAdsException;
+use App\Models\T4JamProfile;
 use App\Support\MetaFlowLog;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
@@ -10,7 +11,11 @@ use Illuminate\Support\Facades\Http;
 
 class MetaAdsClient
 {
-    public function __construct(private readonly string $accessToken) {}
+    public function __construct(
+        private readonly string $accessToken,
+        private readonly ?T4JamProfile $profile = null,
+        private readonly ?MetaRateLimitService $rateLimit = null,
+    ) {}
 
     public function validateToken(): array
     {
@@ -277,6 +282,8 @@ class MetaAdsClient
 
     private function send(string $method, string $url, array $data = []): array
     {
+        $this->assertNotRateLimited();
+
         $payload = $data + ['access_token' => $this->accessToken];
         $request = Http::acceptJson()
             ->timeout(config('services.meta.timeout'));
@@ -302,6 +309,27 @@ class MetaAdsClient
         return $data;
     }
 
+    private function assertNotRateLimited(): void
+    {
+        $rateLimit = $this->rateLimit ?? app(MetaRateLimitService::class);
+        $profile = $this->profile ?? $this->resolveProfile();
+
+        if (! $profile) {
+            return;
+        }
+
+        $rateLimit->assertNotRateLimited($profile);
+    }
+
+    private function resolveProfile(): ?T4JamProfile
+    {
+        if (! $this->accessToken) {
+            return null;
+        }
+
+        return T4JamProfile::query()->where('access_token', $this->accessToken)->first();
+    }
+
     private function url(string $path): string
     {
         if (str_starts_with($path, 'http://') || str_starts_with($path, 'https://')) {
@@ -318,9 +346,16 @@ class MetaAdsClient
         $metaType = $error['type'] ?? null;
         $metaSubcode = $error['error_subcode'] ?? null;
         $providerMessage = $this->safeProviderMessage($error['error_user_msg'] ?? $error['message'] ?? null);
+        $retryAfter = $this->parseRetryAfter($response);
 
-        if ($this->isRateLimitError($metaCode)) {
-            $retryAfter = $this->parseRetryAfter($response);
+        if ($this->isRateLimitError($metaCode) || $response->status() === 429) {
+            $rateLimit = $this->rateLimit ?? app(MetaRateLimitService::class);
+            $profile = $this->profile ?? $this->resolveProfile();
+
+            if ($profile) {
+                $rateLimit->record($profile, $retryAfter);
+            }
+
             MetaFlowLog::warning('rate limit hit', [
                 'meta_code' => $metaCode,
                 'meta_type' => $metaType,
@@ -339,7 +374,7 @@ class MetaAdsClient
             $response->status(),
             $metaCode,
             $metaType,
-            $this->parseRetryAfter($response),
+            $retryAfter,
             (bool) ($error['is_transient'] ?? false),
             $response->status() >= 500,
             $metaSubcode,

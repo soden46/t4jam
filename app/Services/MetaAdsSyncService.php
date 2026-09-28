@@ -5,8 +5,6 @@ namespace App\Services;
 use App\Exceptions\MetaAdsException;
 use App\Models\AdAccount;
 use App\Models\AdSet;
-use App\Models\AutomationLog;
-use App\Models\AutomationTask;
 use App\Models\Campaign;
 use App\Models\T4JamProfile;
 use App\Support\MetaFlowLog;
@@ -90,7 +88,11 @@ class MetaAdsSyncService
             throw new MetaAdsException('Access token Meta belum diisi.');
         }
 
-        return new MetaAdsClient($profile->access_token);
+        return new MetaAdsClient(
+            $profile->access_token,
+            $profile,
+            app(MetaRateLimitService::class),
+        );
     }
 
     private function prefetchAccounts(MetaAdsClient $client): array
@@ -198,6 +200,11 @@ class MetaAdsSyncService
             if ($exception->retryable() || $exception->metaCode === 190 || $exception->httpStatus === 401) {
                 throw $exception;
             }
+
+            if ($this->isRateLimit($exception)) {
+                throw $exception;
+            }
+
             $this->warnings[] = $exception->getMessage();
 
             MetaFlowLog::warning($message, $context + [
@@ -208,6 +215,12 @@ class MetaAdsSyncService
 
             return [];
         }
+    }
+
+    private function isRateLimit(MetaAdsException $exception): bool
+    {
+        return $exception->metaCode === 613 || $exception->httpStatus === 429
+            || in_array($exception->metaCode, [4, 17, 80000, 80001, 80002, 80003, 80004], true);
     }
 
     private function upsertAccount(array $accountData, ?T4JamProfile $profile = null): AdAccount
@@ -347,167 +360,27 @@ class MetaAdsSyncService
         array $campaignIds = [],
         array $adSetIds = [],
     ): array {
-        $this->warnings = [];
-        $adAccountExternalId = $this->normalizeAdAccountId($adAccountExternalId);
-        $client = $this->client($profile);
-        $freshInsightTargets = [];
-        $datePreset = app(AutomationBudgetService::class)->automationInsightsDatePreset();
-
-        MetaFlowLog::info('webhook account sync started', [
+        MetaFlowLog::info('webhook automation reconciliation started', [
             'profile_id' => $profile->id,
             'ad_account_id' => $adAccountExternalId,
+            'campaign_ids' => $campaignIds,
+            'ad_set_ids' => $adSetIds,
         ]);
 
-        $accountData = $client->adAccount($adAccountExternalId);
-        $campaigns = $client->campaigns($adAccountExternalId);
-        $adSets = $client->accountAdSets($adAccountExternalId);
-        $campaignInsights = collect($this->optionalMetaRequest(
-            fn () => $client->accountCampaignInsights($adAccountExternalId, $datePreset),
-            'Meta webhook campaign insights skipped',
-            ['ad_account_id' => $adAccountExternalId],
-        ))->keyBy('campaign_id');
-        $adSetInsights = collect($this->optionalMetaRequest(
-            fn () => $client->accountAdSetInsights($adAccountExternalId, $datePreset),
-            'Meta webhook ad set insights skipped',
-            ['ad_account_id' => $adAccountExternalId],
-        ))->keyBy('adset_id');
-
-        $counts = DB::transaction(function () use (
+        $counts = app(MetaAutomationReconciliationService::class)->reconcileProfile(
             $profile,
-            $accountData,
-            $campaigns,
-            $adSets,
-            $campaignInsights,
-            $adSetInsights,
-            &$freshInsightTargets,
-        ): array {
-            $account = $this->upsertAccount($accountData, $profile);
-            $campaignModels = [];
-            $campaignIds = [];
-            $adSetIds = [];
-            $insightCount = 0;
-
-            foreach ($campaigns as $campaignData) {
-                $campaign = $this->upsertCampaign($account, $campaignData);
-                $campaignModels[$campaign->external_id] = $campaign;
-                $campaignIds[] = $campaign->id;
-
-                if ($insights = $campaignInsights->get($campaign->external_id)) {
-                    $metrics = app(AutomationBudgetService::class)->metricSnapshot($insights);
-                    $campaign->update(app(AutomationBudgetService::class)->insightPayload($metrics));
-                    $freshInsightTargets['campaign:'.$campaign->external_id] = $metrics;
-                    $insightCount++;
-                }
-            }
-
-            $this->markMissingCampaignsDeleted($account, $campaignIds);
-
-            foreach ($adSets as $adSetData) {
-                $campaignExternalId = $adSetData['campaign_id'] ?? null;
-                $campaign = $campaignExternalId ? ($campaignModels[$campaignExternalId] ?? null) : null;
-
-                if (! $campaign) {
-                    continue;
-                }
-
-                $adSet = $this->upsertAdSet($account, $campaign, $adSetData);
-                $adSetIds[] = $adSet->id;
-
-                if ($insights = $adSetInsights->get($adSet->external_id)) {
-                    $metrics = app(AutomationBudgetService::class)->metricSnapshot($insights);
-                    $adSet->update(app(AutomationBudgetService::class)->insightPayload($metrics));
-                    $freshInsightTargets['adset:'.$adSet->external_id] = $metrics;
-                    $insightCount++;
-                }
-            }
-
-            $this->markMissingAdSetsDeleted($account, $adSetIds);
-            $this->reconcileAutomationTasks($profile, $account);
-
-            return [
-                'accounts' => 1,
-                'campaigns' => count($campaignIds),
-                'adsets' => count($adSetIds),
-                'insights' => $insightCount,
-            ];
-        });
-
-        $profile->update([
-            'last_meta_sync_at' => now(),
-            'last_meta_error' => $this->warnings === [] ? null : end($this->warnings),
-        ]);
-
-        $counts['automation_paused'] = app(AutomationBudgetService::class)->pauseWebhookTasksOverCprCap(
-            $profile,
-            $client,
             $adAccountExternalId,
             $campaignIds,
             $adSetIds,
-            $freshInsightTargets,
+            'webhook',
         );
 
-        MetaFlowLog::info('webhook account sync finished', [
-            'profile_id' => $profile->id,
-            'ad_account_id' => $adAccountExternalId,
-            'campaigns' => $counts['campaigns'],
-            'adsets' => $counts['adsets'],
-            'insights' => $counts['insights'],
-            'automation_paused' => $counts['automation_paused'],
+        $profile->update([
+            'last_meta_sync_at' => now(),
+            'last_meta_error' => $counts['rate_limited'] ? 'Meta reconciliation ditunda karena rate limit.' : null,
         ]);
 
         return $counts;
-    }
-
-    private function reconcileAutomationTasks(T4JamProfile $profile, AdAccount $account): void
-    {
-        AutomationTask::query()
-            ->where('user_id', $profile->user_id)
-            ->where('ad_account_id', $account->id)
-            ->with(['campaign', 'adSet'])
-            ->get()
-            ->each(function (AutomationTask $task): void {
-                $target = $task->level === 'adset' ? $task->adSet : $task->campaign;
-
-                if (! $target) {
-                    return;
-                }
-
-                // Meta can keep the object status ACTIVE while its effective status is
-                // PAUSED by a parent campaign or ad account. Automation must follow the
-                // state Meta is actually serving, not merely the requested object state.
-                $active = strtoupper((string) ($target->effective_status ?: $target->status)) === 'ACTIVE';
-                $budgetChanged = (int) $task->current_budget !== (int) $target->daily_budget;
-                $statusChanged = (bool) $task->is_active !== $active;
-
-                if (! $budgetChanged && ! $statusChanged) {
-                    return;
-                }
-
-                $changes = ['current_budget' => (int) $target->daily_budget];
-                $messages = [];
-
-                if ($budgetChanged) {
-                    $messages[] = 'Budget disinkronkan dari Meta Ads Manager.';
-                }
-
-                if ($statusChanged) {
-                    $changes += [
-                        'is_active' => $active,
-                        'last_budget_action' => 'meta_sync',
-                    ];
-                    $messages[] = $active
-                        ? 'Status diaktifkan dari Meta Ads Manager.'
-                        : 'Status dipause dari Meta Ads Manager.';
-                }
-
-                $message = implode(' ', $messages);
-                $changes['last_log'] = $message;
-                $task->update($changes);
-                AutomationLog::create([
-                    'automation_task_id' => $task->id,
-                    'messages' => [$message],
-                ]);
-            });
     }
 
     private function normalizeAdAccountId(string $adAccountExternalId): string

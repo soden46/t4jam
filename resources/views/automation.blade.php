@@ -46,8 +46,8 @@
             <colgroup>
                 <col style="width: 200px">
                 <col style="width: 140px">
-                <col style="width: 90px">
-                <col style="width: 90px">
+                <col style="width: 130px">
+                <col style="width: 130px">
                 <col style="width: 90px">
                 <col style="width: 90px">
                 <col style="width: 75px">
@@ -62,11 +62,23 @@
                     <th>Account</th>
                     <th>Automation Status</th>
                     <th>Meta Status</th>
-                    <th class="num">Budget</th>
+                    <th class="num">
+                        CURRENT BUDGET
+                        <details class="info-tooltip">
+                            <summary><span aria-hidden="true">ⓘ</span><span class="sr-only">Info CURRENT BUDGET</span></summary>
+                            <span class="info-tooltip__content" role="tooltip">Budget aktif campaign. Nilai ini dapat dinaikkan otomatis saat CPR masih sehat. Budget bukan trigger pause.</span>
+                        </details>
+                    </th>
                     <th class="num">Spend</th>
                     <th class="num">Hasil</th>
                     <th class="num">CPR</th>
-                    <th class="num">Batas CPR</th>
+                    <th class="num">
+                        CPR PAUSE LIMIT
+                        <details class="info-tooltip">
+                            <summary><span aria-hidden="true">ⓘ</span><span class="sr-only">Info CPR PAUSE LIMIT</span></summary>
+                            <span class="info-tooltip__content" role="tooltip">Campaign akan dipause otomatis jika CPR mencapai atau melebihi batas ini.</span>
+                        </details>
+                    </th>
                     <th>Log</th>
                     <th>Options</th>
                 </tr>

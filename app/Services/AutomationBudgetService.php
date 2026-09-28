@@ -19,7 +19,11 @@ class AutomationBudgetService
 {
     private const BUDGET_INCREASE_RATIO = 0.15;
 
+    private const PENDING_PAUSE_MARKER = 'Pending pause (rate limited).';
+
     private array $statusCache = [];
+
+    private bool $stopBatch = false;
 
     private const CONVERSION_ACTION_TYPES = [
         'purchase' => ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase', 'onsite_conversion.purchase'],
@@ -119,6 +123,30 @@ class AutomationBudgetService
         ) ?: 0;
     }
 
+    public function reconcileTasks(
+        T4JamProfile $profile,
+        MetaAdsClient $client,
+        string $adAccountExternalId,
+        array $campaignIds,
+        array $adSetIds,
+        array $freshTargets,
+    ): int {
+        return Cache::lock('automation-profile:'.$profile->id, 55)->get(
+            fn () => $this->evaluateTasks(
+                $profile,
+                $client,
+                false,
+                $freshTargets,
+                'reconciliation',
+                true,
+                $adAccountExternalId,
+                $this->normalizeIds($campaignIds),
+                $this->normalizeIds($adSetIds),
+                false,
+            )
+        ) ?: 0;
+    }
+
     public function refreshTaskMetricsForDisplay(T4JamProfile $profile, MetaAdsClient $client, Collection $tasks): int
     {
         if ($tasks->isEmpty()) {
@@ -176,8 +204,10 @@ class AutomationBudgetService
         ?string $adAccountExternalId = null,
         array $campaignIds = [],
         array $adSetIds = [],
+        bool $allowMissingTargetRefresh = true,
     ): int {
         $this->statusCache = [];
+        $this->stopBatch = false;
         $paused = 0;
         $account = $adAccountExternalId
             ? AdAccount::query()->where('external_id', $adAccountExternalId)->first()
@@ -253,7 +283,7 @@ class AutomationBudgetService
         $datePreset = $this->automationInsightsDatePreset();
         $freshTargets = $refreshMetrics ? $this->refreshMetrics($tasks, $client, $profile, $datePreset) : $syncedTargets;
 
-        if (! $refreshMetrics && $freshTargets !== null) {
+        if (! $refreshMetrics && $allowMissingTargetRefresh && $freshTargets !== null) {
             $missingTasks = $tasks
                 ->filter(function (AutomationTask $task) use ($freshTargets): bool {
                     $target = $this->target($task);
@@ -269,9 +299,16 @@ class AutomationBudgetService
 
         $tasks
             ->each(function (AutomationTask $task) use ($profile, $client, $freshTargets, &$paused, $source): void {
+                if ($this->stopBatch) {
+                    return;
+                }
+
                 $beforeAction = $task->last_budget_action;
                 $beforeLog = $task->last_log;
                 $reason = 'rules_not_met';
+                $cpr = null;
+                $targetId = null;
+                $message = null;
                 try {
                     $target = $this->target($task);
 
@@ -337,6 +374,7 @@ class AutomationBudgetService
                     if ($cpr < (int) $task->cpr_cap) {
                         $reason = 'cpr_below_cap';
                         $this->increaseBudgetIfEligible($task, $target, $client, $profile, $result, $cpr);
+                        $this->clearPendingPause($task);
 
                         return;
                     }
@@ -373,27 +411,7 @@ class AutomationBudgetService
                             $client->updateCampaignStatus($targetId, false);
                         }
                     } catch (MetaAdsException $exception) {
-                        $reason = 'cpr_pause_status_update_failed';
-                        $message = 'CPR cap terlewati, tetapi campaign gagal dipause di Meta.';
-
-                        MetaFlowLog::warning('automation cpr cap status update failed', [
-                            'profile_id' => $profile->id,
-                            'automation_task_id' => $task->id,
-                            'target_id' => $targetId,
-                            'cpr' => $cpr,
-                            'cpr_cap' => $task->cpr_cap,
-                            'http_status' => $exception->httpStatus,
-                            'meta_code' => $exception->metaCode,
-                        ]);
-
-                        $task->update([
-                            'last_log' => $message,
-                            'last_checked_at' => now(),
-                        ]);
-                        AutomationLog::create([
-                            'automation_task_id' => $task->id,
-                            'messages' => [$message],
-                        ]);
+                        $this->handlePauseFailure($task, $profile, $exception, $cpr, $task->cpr_cap, $targetId, $reason, $message);
 
                         return;
                     }
@@ -421,6 +439,8 @@ class AutomationBudgetService
                         ]);
                     });
 
+                    $this->clearPendingPause($task);
+
                     MetaFlowLog::info('automation cpr cap status update finished', [
                         'profile_id' => $profile->id,
                         'automation_task_id' => $task->id,
@@ -430,6 +450,38 @@ class AutomationBudgetService
                     ]);
 
                     $paused++;
+                } catch (MetaAdsException $exception) {
+                    if ($this->isRateLimitException($exception)) {
+                        $reason = 'pause_failed_rate_limited';
+                        $this->handlePauseFailure($task, $profile, $exception, $cpr ?? null, $task->cpr_cap, $targetId ?? null, $reason, $message);
+                        $this->stopBatch = true;
+
+                        return;
+                    }
+
+                    $reason = 'cpr_pause_status_update_failed';
+                    $message = 'CPR cap terlewati, tetapi campaign gagal dipause di Meta.';
+
+                    MetaFlowLog::warning('automation cpr cap status update failed', [
+                        'profile_id' => $profile->id,
+                        'automation_task_id' => $task->id,
+                        'target_id' => $targetId ?? null,
+                        'cpr' => $cpr ?? null,
+                        'cpr_cap' => $task->cpr_cap,
+                        'http_status' => $exception->httpStatus,
+                        'meta_code' => $exception->metaCode,
+                    ]);
+
+                    $task->update([
+                        'last_log' => $message,
+                        'last_checked_at' => now(),
+                    ]);
+                    AutomationLog::create([
+                        'automation_task_id' => $task->id,
+                        'messages' => [$message],
+                    ]);
+
+                    return;
                 } finally {
                     $action = ($task->last_budget_action !== $beforeAction || ($task->last_budget_action === 'increase' && $beforeLog !== $task->last_log)) && in_array($task->last_budget_action, ['pause', 'resume', 'increase', 'schedule_pause', 'schedule_resume', 'manual_pause', 'manual_resume', 'manual_budget_decrease'], true) ? $task->last_budget_action : 'none';
                     $this->logEvaluation($profile, $task, $action, $action === 'none' ? $reason : null, $source);
@@ -1032,5 +1084,199 @@ class AutomationBudgetService
             ?? ($task->campaign_external_id
                 ? Campaign::query()->where('external_id', $task->campaign_external_id)->first()
                 : null);
+    }
+
+    private function isRateLimited(T4JamProfile $profile): bool
+    {
+        return app(MetaRateLimitService::class)->isRateLimited($profile);
+    }
+
+    private function isRateLimitException(MetaAdsException $exception): bool
+    {
+        return $exception->metaCode === 613 || $exception->httpStatus === 429
+            || in_array($exception->metaCode, [4, 17, 80000, 80001, 80002, 80003, 80004], true);
+    }
+
+    private function handlePauseFailure(
+        AutomationTask $task,
+        T4JamProfile $profile,
+        MetaAdsException $exception,
+        ?int $cpr,
+        ?int $cprCap,
+        ?string $targetId,
+        string &$reason,
+        ?string $message,
+    ): void {
+        $rateLimited = $this->isRateLimitException($exception);
+        $this->recordPendingPause($task, $profile, $cpr, $cprCap);
+        $reason = $rateLimited ? 'pause_failed_rate_limited' : 'cpr_pause_status_update_pending';
+        $message = $rateLimited
+            ? self::PENDING_PAUSE_MARKER.' CPR cap terlewati, tetapi pause ke Meta ditunda karena rate limit.'
+            : 'CPR cap terlewati, tetapi pause ke Meta belum berhasil dan menunggu verifikasi ulang.';
+
+        MetaFlowLog::warning('automation cpr cap status update pending', [
+            'profile_id' => $profile->id,
+            'automation_task_id' => $task->id,
+            'target_id' => $targetId,
+            'cpr' => $cpr,
+            'cpr_cap' => $cprCap,
+            'http_status' => $exception->httpStatus,
+            'meta_code' => $exception->metaCode,
+            'retry_after_seconds' => $exception->retryAfter,
+        ]);
+
+        $task->update([
+            'last_log' => $message,
+            'last_checked_at' => now(),
+        ]);
+        AutomationLog::create([
+            'automation_task_id' => $task->id,
+            'messages' => [$message],
+        ]);
+
+        if ($rateLimited) {
+            $this->stopBatch = true;
+        }
+    }
+
+    private function recordPendingPause(AutomationTask $task, T4JamProfile $profile, ?int $cpr, ?int $cprCap): void
+    {
+        $task->update([
+            'pending_meta_action' => 'pause',
+            'meta_verification_due_at' => now(),
+            'last_log' => self::PENDING_PAUSE_MARKER.' CPR Rp. '.number_format($cpr ?? 0, 0, ',', '.')
+                .' vs cap Rp. '.number_format($cprCap ?? 0, 0, ',', '.').'.',
+            'last_checked_at' => now(),
+        ]);
+
+        AutomationLog::create([
+            'automation_task_id' => $task->id,
+            'messages' => [self::PENDING_PAUSE_MARKER],
+        ]);
+    }
+
+    private function clearPendingPause(AutomationTask $task): void
+    {
+        if ($task->pending_meta_action !== 'pause'
+            && ! str_contains((string) $task->last_log, self::PENDING_PAUSE_MARKER)) {
+            return;
+        }
+
+        $task->update([
+            'pending_meta_action' => null,
+            'meta_verification_due_at' => null,
+            'last_log' => 'Pending pause rate limit dibersihkan; campaign tetap aktif.',
+        ]);
+    }
+
+    public function resumePendingPauses(T4JamProfile $profile, MetaAdsClient $client, ?array $syncedTargets = null): int
+    {
+        if ($this->isRateLimited($profile)) {
+            return 0;
+        }
+
+        $tasks = AutomationTask::query()
+            ->where('user_id', $profile->user_id)
+            ->where('is_active', true)
+            ->where(function ($query): void {
+                $query->where('pending_meta_action', 'pause')
+                    ->orWhere('last_log', 'like', '%'.self::PENDING_PAUSE_MARKER.'%');
+            })
+            ->with(['campaign', 'adSet'])
+            ->get();
+
+        if ($tasks->isEmpty()) {
+            return 0;
+        }
+
+        $datePreset = $this->automationInsightsDatePreset();
+        $freshTargets = $this->refreshMetrics($tasks, $client, $profile, $datePreset);
+        $paused = 0;
+
+        $tasks->each(function (AutomationTask $task) use ($profile, $client, $freshTargets, &$paused): void {
+            $target = $this->target($task);
+
+            if (! $target) {
+                return;
+            }
+
+            $targetKey = $this->targetKey($task, $target);
+            $metrics = $freshTargets[$targetKey] ?? null;
+
+            if ($metrics === null) {
+                $this->recordPendingPause($task, $profile, null, $task->cpr_cap);
+
+                return;
+            }
+
+            $spend = (int) ($metrics['spend'] ?? $task->current_spend);
+            $result = max(0, (int) ($metrics['results'][$task->conversion] ?? $task->current_result));
+            $cpr = $result > 0 ? (int) round($spend / $result) : $spend;
+
+            $task->update([
+                'current_spend' => $spend,
+                'current_result' => $result,
+                'current_budget' => $target->daily_budget,
+                'last_metrics_synced_at' => $metrics['insights_synced_at'] ?? now(),
+                'metrics_unavailable_at' => null,
+                'last_checked_at' => now(),
+            ]);
+
+            if ((int) $task->cpr_cap <= 0 || $cpr < (int) $task->cpr_cap || ! $task->pause_when_cpr_loss) {
+                $this->clearPendingPause($task);
+
+                return;
+            }
+
+            if ($target->status !== 'ACTIVE') {
+                $target = $this->refreshInactiveTargetStatus($task, $target, $client, $profile);
+            }
+
+            if ($target->status !== 'ACTIVE' || ! config('services.meta.enable_writes')) {
+                $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap);
+
+                return;
+            }
+
+            try {
+                if ($task->level === 'adset') {
+                    $client->updateAdSetStatus($target->external_id, false);
+                } else {
+                    $client->updateCampaignStatus($target->external_id, false);
+                }
+            } catch (MetaAdsException $exception) {
+                $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap);
+
+                return;
+            }
+
+            $message = sprintf(
+                'Campaign otomatis dipause karena CPR Rp. %s mencapai batas Rp. %s setelah cooldown rate limit.',
+                number_format($cpr, 0, ',', '.'),
+                number_format((int) $task->cpr_cap, 0, ',', '.'),
+            );
+
+            DB::transaction(function () use ($task, $target, $message): void {
+                $target->update([
+                    'status' => 'PAUSED',
+                    'effective_status' => 'PAUSED',
+                ]);
+                $task->update([
+                    'is_active' => false,
+                    'last_log' => $message,
+                    'last_checked_at' => now(),
+                    'last_budget_action' => 'pause',
+                ]);
+                AutomationLog::create([
+                    'automation_task_id' => $task->id,
+                    'messages' => [$message],
+                ]);
+            });
+
+            $this->clearPendingPause($task);
+            $paused++;
+        });
+
+        return $paused;
     }
 }

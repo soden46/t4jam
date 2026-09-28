@@ -432,7 +432,7 @@ async function loadAutomationTasks(options = {}) {
     if (automationRequest) {
         if (background === true) return automationRequest;
         await automationRequest.catch(() => {});
-        return loadAutomationTasks({ background, localOnly });
+        return loadAutomationTasks({ background });
     }
     automationRequest = (async () => {
         const acc = qs('#add_account_filter')?.value || 'all';

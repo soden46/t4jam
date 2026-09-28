@@ -5,6 +5,7 @@ use App\Models\AutomationTask;
 use App\Models\T4JamProfile;
 use App\Services\AutomationBudgetService;
 use App\Services\MetaAdsSyncService;
+use App\Services\MetaAutomationReconciliationService;
 use App\Support\MetaFlowLog;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
@@ -125,6 +126,37 @@ Artisan::command('t4jam:enforce-automation', function (AutomationBudgetService $
     return 0;
 })->purpose('Pause active automation targets that reached their CPR cap');
 
+Artisan::command('t4jam:reconcile-meta-automation {--profile_id=}', function (MetaAutomationReconciliationService $reconciliation): int {
+    $profiles = T4JamProfile::query()
+        ->whereNotNull('access_token')
+        ->where('access_token', '<>', '')
+        ->when($this->option('profile_id'), fn ($query, $profileId) => $query->whereKey($profileId))
+        ->get();
+
+    foreach ($profiles as $profile) {
+        try {
+            $counts = $reconciliation->reconcileProfile($profile);
+            $this->info(sprintf(
+                'Profile %d: %d group, %d API call, %d task updated, %d paused.',
+                $profile->id,
+                $counts['groups'],
+                $counts['api_calls'],
+                $counts['updated'],
+                $counts['paused'],
+            ));
+        } catch (MetaAdsException $exception) {
+            $profile->update(['last_meta_error' => $exception->getMessage()]);
+            MetaFlowLog::warning('automation reconciliation profile failed with meta error', [
+                'profile_id' => $profile->id,
+                'http_status' => $exception->httpStatus,
+                'meta_code' => $exception->metaCode,
+            ]);
+        }
+    }
+
+    return 0;
+})->purpose('Reconcile active Meta automation targets without a full account sync');
+
 Artisan::command('t4jam:post-deploy-sync {--profile_id=} {--configure-webhook}', function (): int {
     $profileId = $this->option('profile_id');
     $options = $profileId ? ['--profile_id' => $profileId] : [];
@@ -161,3 +193,9 @@ Schedule::command('t4jam:enforce-automation')
     ->timezone('Asia/Jakarta')
     ->withoutOverlapping(10)
     ->name('t4jam-enforce-automation');
+
+Schedule::command('t4jam:reconcile-meta-automation')
+    ->everyMinute()
+    ->timezone('Asia/Jakarta')
+    ->withoutOverlapping(1)
+    ->name('t4jam-reconcile-meta-automation');

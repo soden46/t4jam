@@ -43,6 +43,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'last_budget_changed_at',
     'last_budget_before',
     'last_budget_action',
+    'pending_meta_action',
+    'meta_verification_due_at',
 ])]
 class AutomationTask extends Model
 {
@@ -61,6 +63,7 @@ class AutomationTask extends Model
             'metrics_unavailable_at' => 'datetime',
             'last_checked_at' => 'datetime',
             'last_budget_changed_at' => 'datetime',
+            'meta_verification_due_at' => 'datetime',
         ];
     }
 

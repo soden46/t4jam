@@ -469,6 +469,7 @@ class T4JamController extends Controller
                 'level' => $level,
                 'last_log' => $successMessage,
                 'last_checked_at' => null,
+                'meta_verification_due_at' => now(),
                 'last_budget_changed_at' => now(),
                 'last_budget_action' => 'baseline',
             ]);
@@ -530,6 +531,7 @@ class T4JamController extends Controller
                             'last_budget_changed_at' => now(),
                             'last_budget_before' => $task->current_budget,
                             'last_budget_action' => $manualAction,
+                            'meta_verification_due_at' => now(),
                             'last_log' => 'Budget Meta berhasil diupdate, tetapi perubahan status gagal.',
                         ]);
                     });
@@ -559,6 +561,7 @@ class T4JamController extends Controller
             $taskData = $this->automationPayload($request) + [
                 'last_log' => $logMessage,
                 'last_checked_at' => null,
+                'meta_verification_due_at' => now(),
                 'last_budget_action' => $manualAction,
                 'is_active' => $requestedActive,
             ] + ($budgetChanged ? [
@@ -587,8 +590,7 @@ class T4JamController extends Controller
         Request $request,
         MetaAdsSyncService $metaSync,
         AutomationBudgetService $automationBudget,
-    ): JsonResponse
-    {
+    ): JsonResponse {
         $task = AutomationTask::where('user_id', Auth::id())->with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
         $isActive = $request->input('status', 'true') === 'true';
         $metaResult = $this->pushMetaStatus($task, $isActive, $metaSync);
@@ -606,6 +608,7 @@ class T4JamController extends Controller
                 'is_active' => $isActive,
                 'last_log' => $successMessage,
                 'last_checked_at' => $isActive ? null : now(),
+                'meta_verification_due_at' => now(),
                 'last_budget_action' => $isActive ? 'manual_resume' : 'manual_pause',
             ]);
             AutomationLog::create([
@@ -715,6 +718,7 @@ class T4JamController extends Controller
                 'current_budget' => $task->starting_budget,
                 'last_log' => $successMessage,
                 'last_checked_at' => now(),
+                'meta_verification_due_at' => now(),
                 'last_budget_changed_at' => now(),
                 'last_budget_before' => $task->current_budget,
             ];

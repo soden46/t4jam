@@ -242,6 +242,12 @@ label small { color: var(--muted); font-weight: 500; }
 #automation_table .num strong { font-size: 13px; white-space: nowrap; }
 #automation_table .log-cell { min-width: 150px; }
 #automation_table .center { text-align: center; }
+.info-tooltip { display: inline-block; position: relative; margin-left: .2rem; text-align: left; text-transform: none; vertical-align: middle; }
+.info-tooltip summary { color: var(--primary); cursor: pointer; display: inline-flex; font-size: .9rem; font-weight: 800; list-style: none; min-height: 24px; min-width: 24px; align-items: center; justify-content: center; }
+.info-tooltip summary::-webkit-details-marker { display: none; }
+.info-tooltip summary:focus-visible { border-radius: 999px; box-shadow: 0 0 0 .2rem rgba(114, 57, 234, .2); outline: none; }
+.info-tooltip:not([open]) .info-tooltip__content { display: none; }
+.info-tooltip__content { background: var(--ink); border-radius: .45rem; box-shadow: 0 .75rem 1.5rem rgba(7, 20, 55, .2); color: var(--surface); font-size: .78rem; font-weight: 500; left: auto; letter-spacing: normal; line-height: 1.45; padding: .65rem .75rem; position: absolute; right: 0; text-align: left; text-transform: none; top: calc(100% + .35rem); width: min(20rem, calc(100vw - 2rem)); z-index: 40; }
 
 
 #automation_table .action-btn {
@@ -370,6 +376,7 @@ label small { color: var(--muted); font-weight: 500; }
     .account-combobox__menu { width: 100%; max-width: none; }
     .form-actions { width: 100%; flex-direction: column; align-items: stretch; }
     .form-actions .btn { width: 100%; }
+    .info-tooltip__content { position: static; margin-top: .35rem; width: min(18rem, calc(100vw - 2rem)); }
 }
 
 @media (max-width: 520px) {
