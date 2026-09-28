@@ -59,15 +59,15 @@
                 </label>
                 <label>Starting Budget <span class="currency">IDR</span>
                     <input type="number" name="starting_budget" id="starting_budget" value="100000">
-                    <small>Budget ini akan digunakan untuk reset ke budget awal.</small>
+                    {{-- <small>Budget ini akan digunakan untuk reset ke budget awal.</small> --}}
                 </label>
                 <label>Maximum Budget <span class="currency">IDR</span>
                     <input type="number" name="maximum_budget" id="maximum_budget" value="0">
-                    <small>Batas maksimum kenaikan budget otomatis. Campaign tidak dipause ketika batas ini tercapai.</small>
+                    {{-- <small>Batas maksimum kenaikan budget otomatis. Campaign tidak dipause ketika batas ini tercapai.</small> --}}
                 </label>
                 <label>CPR Pause Limit <span class="currency">IDR</span>
                     <input type="number" name="cpr_cap" id="cpr_cap" value="7000">
-                    <small>Campaign dipause jika CPR &gt;= nilai ini.</small>
+                    {{-- <small>Campaign dipause jika CPR &gt;= nilai ini.</small> --}}
                 </label>
                 <label>Running Period
                     <select name="period" id="period">
