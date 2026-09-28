@@ -374,6 +374,7 @@ class AutomationBudgetService
                     if ($cpr < (int) $task->cpr_cap) {
                         $reason = 'cpr_below_cap';
                         $this->increaseBudgetIfEligible($task, $target, $client, $profile, $result, $cpr);
+                        $this->logPendingPauseCancellation($task);
                         $this->clearPendingPause($task);
 
                         return;
@@ -1165,7 +1166,21 @@ class AutomationBudgetService
         $task->update([
             'pending_meta_action' => null,
             'meta_verification_due_at' => null,
-            'last_log' => 'Pending pause rate limit dibersihkan; campaign tetap aktif.',
+        ]);
+    }
+
+    private function logPendingPauseCancellation(AutomationTask $task): void
+    {
+        if ($task->pending_meta_action !== 'pause'
+            && ! str_contains((string) $task->last_log, self::PENDING_PAUSE_MARKER)) {
+            return;
+        }
+
+        $message = 'Pending pause dibatalkan karena CPR sudah kembali di bawah batas.';
+        $task->update(['last_log' => $message]);
+        AutomationLog::create([
+            'automation_task_id' => $task->id,
+            'messages' => [$message],
         ]);
     }
 
@@ -1222,7 +1237,14 @@ class AutomationBudgetService
                 'last_checked_at' => now(),
             ]);
 
-            if ((int) $task->cpr_cap <= 0 || $cpr < (int) $task->cpr_cap || ! $task->pause_when_cpr_loss) {
+            if ($cpr < (int) $task->cpr_cap) {
+                $this->logPendingPauseCancellation($task);
+                $this->clearPendingPause($task);
+
+                return;
+            }
+
+            if ((int) $task->cpr_cap <= 0 || ! $task->pause_when_cpr_loss) {
                 $this->clearPendingPause($task);
 
                 return;

@@ -81,6 +81,22 @@ class MetaAutomationReconciliationTest extends TestCase
 
         $this->assertFalse($task->fresh()->is_active);
         $this->assertNull($task->fresh()->pending_meta_action);
+        $this->assertSame('pause', $task->fresh()->last_budget_action);
+        $this->assertStringContainsString('Campaign otomatis dipause', $task->fresh()->last_log);
+        $this->assertStringNotContainsString('campaign tetap aktif', $task->fresh()->last_log);
+    }
+
+    public function test_pending_pause_is_cancelled_when_fresh_cpr_is_healthy(): void
+    {
+        [, $task] = $this->fixture();
+        $task->update(['pending_meta_action' => 'pause', 'meta_verification_due_at' => now()->subMinute()]);
+        $this->fakeReconciliation($task, 'ACTIVE', 100000, 10000, 1);
+
+        $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
+
+        $this->assertTrue($task->fresh()->is_active);
+        $this->assertNull($task->fresh()->pending_meta_action);
+        $this->assertSame('Pending pause dibatalkan karena CPR sudah kembali di bawah batas.', $task->fresh()->last_log);
     }
 
     public function test_rate_limit_613_stops_reconciliation_profile_batch(): void
@@ -89,7 +105,7 @@ class MetaAutomationReconciliationTest extends TestCase
         $task->update(['current_spend' => 50000, 'current_result' => 4]);
 
         Http::fake([
-            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/campaigns?*' => Http::response([
+            'graph.facebook.com/*/'.$task->campaign_external_id.'?*' => Http::response([
                 'error' => ['code' => 613, 'message' => 'Application request limit reached'],
             ], 429, ['Retry-After' => '60']),
             'graph.facebook.com/*' => Http::response(['error' => ['message' => 'must not be called']], 500),
@@ -132,6 +148,8 @@ class MetaAutomationReconciliationTest extends TestCase
 
         Http::assertNotSent(fn ($request) => str_contains($request->url(), 'inactive-campaign'));
         Http::assertSentCount(2);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign_external_id.'?'));
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign_external_id.'/insights'));
     }
 
     public function test_metric_failure_keeps_stored_metrics_and_marks_task_unavailable(): void
@@ -141,13 +159,13 @@ class MetaAutomationReconciliationTest extends TestCase
         $account = $task->campaign->adAccount;
 
         Http::fake([
-            'graph.facebook.com/*/'.$account->external_id.'/campaigns?*' => Http::response(['data' => [[
+            'graph.facebook.com/*/'.$task->campaign_external_id.'?*' => Http::response([
                 'id' => $task->campaign_external_id,
                 'status' => 'ACTIVE',
                 'effective_status' => 'ACTIVE',
                 'daily_budget' => '100000',
-            ]]]),
-            'graph.facebook.com/*/'.$account->external_id.'/insights?*' => Http::response([
+            ]),
+            'graph.facebook.com/*/'.$task->campaign_external_id.'/insights?*' => Http::response([
                 'error' => ['message' => 'temporary failure'],
             ], 500),
         ]);
@@ -200,28 +218,27 @@ class MetaAutomationReconciliationTest extends TestCase
     {
         $account = $task->campaign->adAccount;
 
-        Http::fake(function ($request) use ($task, $account, $status, $budget, $spend, $result, $allowPause) {
+        Http::fake(function ($request) use ($task, $status, $budget, $spend, $result, $allowPause) {
             $url = $request->url();
 
             if ($allowPause && $request->method() === 'POST' && str_contains($url, '/'.$task->campaign_external_id)) {
                 return Http::response(['success' => true]);
             }
 
-            if (str_contains($url, '/'.$account->external_id.'/campaigns')) {
+            if (str_contains($url, '/'.$task->campaign_external_id.'/insights')) {
                 return Http::response(['data' => [[
+                    'spend' => (string) $spend,
+                    'actions' => [['action_type' => 'purchase', 'value' => (string) $result]],
+                ]]]);
+            }
+
+            if (str_contains($url, '/'.$task->campaign_external_id)) {
+                return Http::response([
                     'id' => $task->campaign_external_id,
                     'status' => $status,
                     'effective_status' => $status,
                     'daily_budget' => (string) $budget,
-                ]]]);
-            }
-
-            if (str_contains($url, '/'.$account->external_id.'/insights')) {
-                return Http::response(['data' => [[
-                    'campaign_id' => $task->campaign_external_id,
-                    'spend' => (string) $spend,
-                    'actions' => [['action_type' => 'purchase', 'value' => (string) $result]],
-                ]]]);
+                ]);
             }
 
             return Http::response([], 404);

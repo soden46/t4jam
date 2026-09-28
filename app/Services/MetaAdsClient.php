@@ -65,6 +65,13 @@ class MetaAdsClient
         ]);
     }
 
+    public function campaign(string $campaignId): array
+    {
+        return $this->get("/{$campaignId}", [
+            'fields' => 'id,name,status,effective_status,daily_budget,objective',
+        ]);
+    }
+
     public function campaignInsights(string $campaignId, ?string $datePreset = null): array
     {
         $response = $this->get("/{$campaignId}/insights", [
@@ -96,6 +103,13 @@ class MetaAdsClient
         return $this->paginate("/{$adAccountId}/adsets", [
             'fields' => 'id,name,status,effective_status,daily_budget,campaign_id',
             'limit' => 100,
+        ]);
+    }
+
+    public function adSet(string $adSetId): array
+    {
+        return $this->get("/{$adSetId}", [
+            'fields' => 'id,name,status,effective_status,daily_budget,campaign_id',
         ]);
     }
 

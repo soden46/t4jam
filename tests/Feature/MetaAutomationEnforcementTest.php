@@ -359,7 +359,6 @@ class MetaAutomationEnforcementTest extends TestCase
         $this->assertNotNull($fresh->last_metrics_synced_at);
         $this->assertSame($profile->id, T4JamProfile::where('user_id', User::firstOrFail()->id)->value('id'));
         Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign->adAccount->external_id.'/insights')
-            && $request['level'] === 'campaign'
             && $request['date_preset'] === 'last_7d');
     }
 
@@ -424,9 +423,7 @@ class MetaAutomationEnforcementTest extends TestCase
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $task->campaign_external_id)
             && $request['status'] === 'PAUSED');
-        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign->adAccount->external_id.'/insights')
-            && $request['level'] === 'campaign'
-            && $request['date_preset'] === 'last_7d');
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign_external_id.'/insights'));
     }
 
     public function test_unrelated_campaign_webhook_does_not_pause_other_task(): void
@@ -1027,56 +1024,31 @@ class MetaAutomationEnforcementTest extends TestCase
         int $webhookResult,
         ?Campaign $extraCampaign = null,
     ): void {
-        $account = $task->campaign->adAccount;
-        $campaigns = [[
-            'id' => $task->campaign_external_id,
+        $targetId = $task->level === 'adset' ? $task->ad_set_external_id : $task->campaign_external_id;
+        $target = [
+            'id' => $targetId,
             'name' => $task->campaign->name,
             'status' => 'ACTIVE',
             'effective_status' => 'ACTIVE',
             'daily_budget' => '100000',
-        ]];
+        ];
 
-        if ($extraCampaign) {
-            $campaigns[] = [
-                'id' => $extraCampaign->external_id,
-                'name' => $extraCampaign->name,
-                'status' => 'ACTIVE',
-                'effective_status' => 'ACTIVE',
-                'daily_budget' => '100000',
-            ];
-        }
-
-        Http::fake(function ($request) use ($account, $task, $campaigns, $webhookSpend, $webhookResult) {
+        Http::fake(function ($request) use ($targetId, $target, $webhookSpend, $webhookResult) {
             $url = $request->url();
 
-            if ($request->method() === 'POST' && str_contains($url, '/'.$task->campaign_external_id)) {
+            if ($request->method() === 'POST' && str_contains($url, '/'.$targetId)) {
                 return Http::response(['success' => true]);
             }
 
-            if (str_contains($url, '/'.$account->external_id.'/campaigns')) {
-                return Http::response(['data' => $campaigns]);
-            }
-
-            if (str_contains($url, '/'.$account->external_id.'/adsets')) {
-                return Http::response(['data' => []]);
-            }
-
-            if (str_contains($url, '/'.$account->external_id.'/insights')) {
-                return Http::response(['data' => $request['level'] === 'campaign' ? [[
-                    'campaign_id' => $task->campaign_external_id,
+            if (str_contains($url, '/'.$targetId.'/insights')) {
+                return Http::response(['data' => [[
                     'spend' => (string) $webhookSpend,
                     'actions' => [['action_type' => 'purchase', 'value' => (string) $webhookResult]],
-                ]] : []]);
+                ]]]);
             }
 
-            if (str_contains($url, '/'.$account->external_id)) {
-                return Http::response([
-                    'account_id' => $account->account_id,
-                    'id' => $account->external_id,
-                    'name' => $account->name,
-                    'currency' => $account->currency,
-                    'account_status' => 1,
-                ]);
+            if (str_contains($url, '/'.$targetId)) {
+                return Http::response($target);
             }
 
             return Http::response([], 404);
@@ -1262,6 +1234,6 @@ class MetaAutomationEnforcementTest extends TestCase
         $this->assertSame(0, $paused);
         $this->assertTrue($task->fresh()->is_active);
         $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
-        $this->assertStringContainsString('dibersihkan', $task->fresh()->last_log);
+        $this->assertSame('Pending pause dibatalkan karena CPR sudah kembali di bawah batas.', $task->fresh()->last_log);
     }
 }

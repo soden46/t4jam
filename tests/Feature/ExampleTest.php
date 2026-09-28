@@ -1358,41 +1358,27 @@ class ExampleTest extends TestCase
         $account = $campaign->adAccount;
         $task->update(['is_active' => true, 'current_budget' => 100000, 'last_budget_action' => 'manual']);
 
-        Http::fake(function ($request) use ($account, $campaign) {
+        Http::fake(function ($request) use ($campaign) {
             $url = $request->url();
 
-            if (str_contains($url, '/'.$account->external_id.'/campaigns')) {
+            if (str_contains($url, '/'.$campaign->external_id.'/insights')) {
                 return Http::response(['data' => [[
+                    'id' => $campaign->external_id,
+                    'spend' => '45000',
+                    'reach' => '1000',
+                    'inline_link_clicks' => '20',
+                    'actions' => [['action_type' => 'purchase', 'value' => '3']],
+                ]]]);
+            }
+
+            if (str_contains($url, '/'.$campaign->external_id)) {
+                return Http::response([
                     'id' => $campaign->external_id,
                     'name' => $campaign->name,
                     'status' => 'ACTIVE',
                     'effective_status' => 'PAUSED',
                     'daily_budget' => '210000',
                     'objective' => 'OUTCOME_SALES',
-                ]]]);
-            }
-
-            if (str_contains($url, '/'.$account->external_id.'/adsets')) {
-                return Http::response(['data' => []]);
-            }
-
-            if (str_contains($url, '/'.$account->external_id.'/insights')) {
-                return Http::response(['data' => $request['level'] === 'campaign' ? [[
-                    'campaign_id' => $campaign->external_id,
-                    'spend' => '45000',
-                    'reach' => '1000',
-                    'inline_link_clicks' => '20',
-                    'actions' => [['action_type' => 'purchase', 'value' => '3']],
-                ]] : []]);
-            }
-
-            if (str_contains($url, '/'.$account->external_id)) {
-                return Http::response([
-                    'account_id' => $account->account_id,
-                    'id' => $account->external_id,
-                    'name' => $account->name,
-                    'currency' => $account->currency,
-                    'account_status' => 1,
                 ]);
             }
 
@@ -1413,8 +1399,9 @@ class ExampleTest extends TestCase
         $this->assertFalse($task->fresh()->is_active);
         $this->assertSame(210000, $task->fresh()->current_budget);
         $this->assertSame('meta_sync', $task->fresh()->last_budget_action);
-        $this->assertTrue($profile->fresh()->adAccounts->contains($account));
-        Http::assertSentCount(5);
+        Http::assertSentCount(2);
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/'.$account->external_id.'/campaigns')
+            || str_contains($request->url(), '/'.$account->external_id.'/insights'));
     }
 
     public function test_automation_background_refresh_reads_local_database_only(): void

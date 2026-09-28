@@ -115,7 +115,7 @@ class MetaAutomationReconciliationService
         return $tasks->groupBy(function (AutomationTask $task): string {
             $target = $this->target($task);
 
-            return $task->level.'|'.$target->adAccount->external_id;
+            return $task->level.'|'.$target->external_id;
         });
     }
 
@@ -126,40 +126,39 @@ class MetaAutomationReconciliationService
         $target = $this->target($first);
         $level = $first->level;
         $adAccountId = $target->adAccount->external_id;
+        $targetId = $target->external_id;
         $apiCalls = 0;
 
         try {
             $apiCalls++;
-            $statusRows = $level === 'adset'
-                ? $client->accountAdSets($adAccountId)
-                : $client->campaigns($adAccountId);
+            $status = $level === 'adset'
+                ? $client->adSet($targetId)
+                : $client->campaign($targetId);
         } catch (MetaAdsException $exception) {
             $this->markMetricsUnavailable($tasks);
 
-            return $this->groupFailure($profile, $adAccountId, $level, $source, $exception, $apiCalls);
+            return $this->groupFailure($profile, $targetId, $level, $source, $exception, $apiCalls);
         }
 
-        $statusById = collect($statusRows)->keyBy('id');
+        $statusById = collect([$targetId => $status]);
         $updated = $this->syncStatusAndBudget($tasks, $statusById);
 
         try {
             $apiCalls++;
-            $insightRows = $level === 'adset'
-                ? $client->accountAdSetInsights($adAccountId, $datePreset)
-                : $client->accountCampaignInsights($adAccountId, $datePreset);
+            $insights = $level === 'adset'
+                ? $client->adSetInsights($targetId, $datePreset)
+                : $client->campaignInsights($targetId, $datePreset);
         } catch (MetaAdsException $exception) {
             $this->markMetricsUnavailable($tasks);
 
-            return $this->groupFailure($profile, $adAccountId, $level, $source, $exception, $apiCalls, $updated);
+            return $this->groupFailure($profile, $targetId, $level, $source, $exception, $apiCalls, $updated);
         }
 
-        $insightById = collect($insightRows)->keyBy($level === 'adset' ? 'adset_id' : 'campaign_id');
         $freshTargets = [];
 
-        DB::transaction(function () use ($tasks, $insightById, &$freshTargets, &$updated): void {
+        DB::transaction(function () use ($tasks, $insights, &$freshTargets): void {
             foreach ($tasks as $task) {
                 $target = $this->target($task);
-                $insights = $insightById->get($target->external_id);
                 if (is_array($insights)) {
                     $metrics = $this->automation->metricSnapshot($insights);
                     $target->update($this->automation->insightPayload($metrics));
@@ -234,11 +233,11 @@ class MetaAutomationReconciliationService
         return $updated;
     }
 
-    private function groupFailure(T4JamProfile $profile, string $adAccountId, string $level, string $source, MetaAdsException $exception, int $apiCalls, int $updated = 0): array
+    private function groupFailure(T4JamProfile $profile, string $targetId, string $level, string $source, MetaAdsException $exception, int $apiCalls, int $updated = 0): array
     {
         MetaFlowLog::warning('automation reconciliation group failed', [
             'profile_id' => $profile->id,
-            'ad_account_id' => $adAccountId,
+            'target_id' => $targetId,
             'level' => $level,
             'source' => $source,
             'http_status' => $exception->httpStatus,
