@@ -44,17 +44,17 @@
     <div class="table-wrap">
         <table class="data-table" id="automation_table">
             <colgroup>
+                <col style="width: 230px">
+                <col style="width: 145px">
+                <col style="width: 135px">
+                <col style="width: 120px">
+                <col style="width: 155px">
+                <col style="width: 120px">
+                <col style="width: 70px">
+                <col style="width: 125px">
+                <col style="width: 160px">
                 <col style="width: 200px">
-                <col style="width: 140px">
-                <col style="width: 130px">
-                <col style="width: 130px">
-                <col style="width: 90px">
-                <col style="width: 90px">
-                <col style="width: 75px">
-                <col style="width: 90px">
-                <col style="width: 90px">
-                <col style="width: 200px">
-                <col style="width: 260px">
+                <col style="width: 280px">
             </colgroup>
             <thead>
                 <tr>

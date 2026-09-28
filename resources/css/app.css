@@ -213,9 +213,9 @@ label small { color: var(--muted); font-weight: 500; }
 .metric-card.good { border-color: rgba(80, 205, 137, .45); }
 .metric-card.warn { border-color: rgba(231, 139, 47, .45); }
 
-.table-wrap { width: 100%; max-width: 100%; overflow-x: auto; min-width: 0; }
+.table-wrap { width: 100%; max-width: 100%; overflow-x: auto; min-width: 0; scrollbar-gutter: stable; }
 .data-table { width: 100%; border-collapse: collapse; min-width: 900px; }
-#automation_table { width: 100%; table-layout: fixed; }
+#automation_table { width: 100%; min-width: 1740px; table-layout: fixed; }
 .data-table th, .data-table td { padding: .95rem .75rem; border-bottom: 1px dashed #dbdfe9; vertical-align: middle; }
 .data-table th { text-align: left; color: #99a1b7; font-size: .78rem; text-transform: uppercase; letter-spacing: 0; }
 .data-table .num { text-align: right; white-space: nowrap; }
@@ -229,6 +229,8 @@ label small { color: var(--muted); font-weight: 500; }
 .badge.draft { background: #f1f5f9; color: #64748b; }
 .badge.failed { background: rgba(241, 65, 108, .13); color: var(--danger); }
 #automation_table th, #automation_table td { padding: 12px 10px; vertical-align: middle; }
+#automation_table th { overflow: visible; white-space: normal; }
+#automation_table th.num { white-space: normal; }
 
 #automation_table .badge { border-radius: 999px; font-size: 10px; padding: 3px 7px; text-transform: uppercase; font-weight: 700; }
 
@@ -247,7 +249,7 @@ label small { color: var(--muted); font-weight: 500; }
 .info-tooltip summary::-webkit-details-marker { display: none; }
 .info-tooltip summary:focus-visible { border-radius: 999px; box-shadow: 0 0 0 .2rem rgba(114, 57, 234, .2); outline: none; }
 .info-tooltip:not([open]) .info-tooltip__content { display: none; }
-.info-tooltip__content { background: var(--ink); border-radius: .45rem; box-shadow: 0 .75rem 1.5rem rgba(7, 20, 55, .2); color: var(--surface); font-size: .78rem; font-weight: 500; left: auto; letter-spacing: normal; line-height: 1.45; padding: .65rem .75rem; position: absolute; right: 0; text-align: left; text-transform: none; top: calc(100% + .35rem); width: min(20rem, calc(100vw - 2rem)); z-index: 40; }
+.info-tooltip__content { background: var(--ink); border-radius: .45rem; bottom: calc(100% + .35rem); box-shadow: 0 .75rem 1.5rem rgba(7, 20, 55, .2); color: var(--surface); font-size: .78rem; font-weight: 500; left: auto; letter-spacing: normal; line-height: 1.45; padding: .65rem .75rem; position: absolute; right: 0; text-align: left; text-transform: none; width: min(20rem, calc(100vw - 2rem)); z-index: 40; }
 
 
 #automation_table .action-btn {
@@ -273,9 +275,6 @@ label small { color: var(--muted); font-weight: 500; }
 #automation_table .action-btn-delete { background: rgba(241, 65, 108, .1); color: var(--danger); border-color: rgba(241, 65, 108, .25); }
 #automation_table .actions-cell { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: center; }
 
-@media (max-width: 1100px) {
-    #automation_table { min-width: 0; }
-}
 .pagination-bar { align-items: center; display: flex; gap: .75rem; justify-content: space-between; padding-top: .9rem; }
 .pagination-summary { color: var(--muted); font-size: .82rem; font-weight: 700; }
 .pagination-controls { align-items: center; display: flex; gap: .35rem; }
