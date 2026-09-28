@@ -469,7 +469,7 @@ class T4JamController extends Controller
                 'level' => $level,
                 'last_log' => $successMessage,
                 'last_checked_at' => null,
-                'meta_verification_due_at' => now(),
+                'meta_verification_due_at' => $this->automationVerificationDueAt(),
                 'last_budget_changed_at' => now(),
                 'last_budget_action' => 'baseline',
             ]);
@@ -531,7 +531,7 @@ class T4JamController extends Controller
                             'last_budget_changed_at' => now(),
                             'last_budget_before' => $task->current_budget,
                             'last_budget_action' => $manualAction,
-                            'meta_verification_due_at' => now(),
+                            'meta_verification_due_at' => $this->automationVerificationDueAt(),
                             'last_log' => 'Budget Meta berhasil diupdate, tetapi perubahan status gagal.',
                         ]);
                     });
@@ -561,7 +561,7 @@ class T4JamController extends Controller
             $taskData = $this->automationPayload($request) + [
                 'last_log' => $logMessage,
                 'last_checked_at' => null,
-                'meta_verification_due_at' => now(),
+                'meta_verification_due_at' => $this->automationVerificationDueAt(),
                 'last_budget_action' => $manualAction,
                 'is_active' => $requestedActive,
             ] + ($budgetChanged ? [
@@ -608,7 +608,7 @@ class T4JamController extends Controller
                 'is_active' => $isActive,
                 'last_log' => $successMessage,
                 'last_checked_at' => $isActive ? null : now(),
-                'meta_verification_due_at' => now(),
+                'meta_verification_due_at' => $this->automationVerificationDueAt(),
                 'last_budget_action' => $isActive ? 'manual_resume' : 'manual_pause',
             ]);
             AutomationLog::create([
@@ -718,7 +718,7 @@ class T4JamController extends Controller
                 'current_budget' => $task->starting_budget,
                 'last_log' => $successMessage,
                 'last_checked_at' => now(),
-                'meta_verification_due_at' => now(),
+                'meta_verification_due_at' => $this->automationVerificationDueAt(),
                 'last_budget_changed_at' => now(),
                 'last_budget_before' => $task->current_budget,
             ];
@@ -1470,5 +1470,10 @@ class T4JamController extends Controller
     private function metaCredentialProfile(): T4JamProfile
     {
         return T4JamProfile::usableForUser(Auth::id());
+    }
+
+    private function automationVerificationDueAt(): \DateTimeInterface
+    {
+        return now()->addSeconds(max(0, (int) config('services.meta.automation_verify_delay_seconds', 30)));
     }
 }

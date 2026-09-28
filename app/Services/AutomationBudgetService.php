@@ -1109,7 +1109,7 @@ class AutomationBudgetService
         ?string $message,
     ): void {
         $rateLimited = $this->isRateLimitException($exception);
-        $this->recordPendingPause($task, $profile, $cpr, $cprCap);
+        $this->recordPendingPause($task, $profile, $cpr, $cprCap, $rateLimited);
         $reason = $rateLimited ? 'pause_failed_rate_limited' : 'cpr_pause_status_update_pending';
         $message = $rateLimited
             ? self::PENDING_PAUSE_MARKER.' CPR cap terlewati, tetapi pause ke Meta ditunda karena rate limit.'
@@ -1140,11 +1140,15 @@ class AutomationBudgetService
         }
     }
 
-    private function recordPendingPause(AutomationTask $task, T4JamProfile $profile, ?int $cpr, ?int $cprCap): void
+    private function recordPendingPause(AutomationTask $task, T4JamProfile $profile, ?int $cpr, ?int $cprCap, bool $rateLimited = false): void
     {
+        $dueAt = $rateLimited
+            ? app(MetaRateLimitService::class)->cooldownUntil($profile) ?? now()->addSeconds(60)
+            : now();
+
         $task->update([
             'pending_meta_action' => 'pause',
-            'meta_verification_due_at' => now(),
+            'meta_verification_due_at' => $dueAt,
             'last_log' => self::PENDING_PAUSE_MARKER.' CPR Rp. '.number_format($cpr ?? 0, 0, ',', '.')
                 .' vs cap Rp. '.number_format($cprCap ?? 0, 0, ',', '.').'.',
             'last_checked_at' => now(),
@@ -1267,7 +1271,12 @@ class AutomationBudgetService
                     $client->updateCampaignStatus($target->external_id, false);
                 }
             } catch (MetaAdsException $exception) {
-                $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap);
+                $rateLimited = $this->isRateLimitException($exception);
+                $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap, $rateLimited);
+
+                if ($rateLimited) {
+                    $this->stopBatch = true;
+                }
 
                 return;
             }

@@ -9,12 +9,15 @@ use App\Models\AutomationTask;
 use App\Models\Campaign;
 use App\Models\T4JamProfile;
 use App\Support\MetaFlowLog;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 class MetaAutomationReconciliationService
 {
+    private const METRIC_RETRY_DELAYS = [1 => 60, 2 => 180, 3 => 300];
+
     public function __construct(
         private readonly AutomationBudgetService $automation,
         private readonly MetaAdsSyncService $metaSync,
@@ -28,31 +31,45 @@ class MetaAutomationReconciliationService
         array $adSetIds = [],
         string $source = 'reconciliation',
     ): array {
-        $empty = ['groups' => 0, 'api_calls' => 0, 'updated' => 0, 'paused' => 0, 'rate_limited' => false];
+        $empty = $this->emptyCounts();
 
-        if (! $profile->hasAccessToken() || $this->rateLimit->isRateLimited($profile)) {
-            return $empty + ['rate_limited' => $this->rateLimit->isRateLimited($profile)];
+        if (! $profile->hasAccessToken()) {
+            return $this->logSummary($profile, $source, $empty);
+        }
+
+        if ($this->rateLimit->isRateLimited($profile)) {
+            $empty['rate_limited'] = true;
+            $empty['skip_reason'] = 'cooldown_active';
+
+            return $this->logSummary($profile, $source, $empty);
         }
 
         return Cache::lock('meta-automation-reconcile:'.$profile->id, 55)->get(function () use ($profile, $adAccountExternalId, $campaignIds, $adSetIds, $source, $empty): array {
-            $tasks = $this->relevantTasks($profile, $adAccountExternalId, $campaignIds, $adSetIds);
+            $selection = $this->selectTasks($profile, $adAccountExternalId, $campaignIds, $adSetIds, $source);
+            $counts = array_replace($empty, $selection['counts']);
 
-            if ($tasks->isEmpty()) {
-                return $empty;
+            if ($selection['tasks']->isEmpty()) {
+                return $this->logSummary($profile, $source, $counts);
             }
 
+            $allGroups = $this->groups($selection['tasks'])->sortBy(fn (Collection $tasks) => $this->priority($tasks->first()));
+            $groups = $allGroups->take($this->maxTargets());
+            $counts['target_limit_reached'] = max(0, $allGroups->count() - $groups->count());
+            $counts['pending_actions'] = $selection['tasks']->whereNotNull('pending_meta_action')->count();
+
             $client = $this->metaSync->client($profile);
-            $counts = $empty;
             $datePreset = $this->automation->automationInsightsDatePreset();
 
-            foreach ($this->groups($tasks) as $group) {
+            foreach ($groups as $group) {
                 if ($this->rateLimit->isRateLimited($profile)) {
                     $counts['rate_limited'] = true;
+                    $counts['skip_reason'] = 'cooldown_active';
 
                     break;
                 }
 
                 $counts['groups']++;
+                $counts['processed_targets']++;
                 $result = $this->reconcileGroup($profile, $client, $group, $datePreset, $source);
                 $counts['api_calls'] += $result['api_calls'];
                 $counts['updated'] += $result['updated'];
@@ -65,21 +82,65 @@ class MetaAutomationReconciliationService
                 }
             }
 
-            MetaFlowLog::info('automation reconciliation finished', [
-                'profile_id' => $profile->id,
-                'source' => $source,
-                'groups' => $counts['groups'],
-                'api_calls' => $counts['api_calls'],
-                'updated' => $counts['updated'],
-                'paused' => $counts['paused'],
-                'rate_limited' => $counts['rate_limited'],
-            ]);
-
-            return $counts;
+            return $this->logSummary($profile, $source, $counts);
         }) ?? $empty;
     }
 
-    private function relevantTasks(T4JamProfile $profile, ?string $adAccountExternalId, array $campaignIds, array $adSetIds): Collection
+    private function selectTasks(T4JamProfile $profile, ?string $adAccountExternalId, array $campaignIds, array $adSetIds, string $source): array
+    {
+        $query = $this->taskQuery($profile, $adAccountExternalId, $campaignIds, $adSetIds);
+        $targetedWebhook = $source === 'webhook' && ($campaignIds !== [] || $adSetIds !== []);
+
+        if ($targetedWebhook) {
+            $tasks = $query->get()->filter(fn (AutomationTask $task) => $this->target($task) !== null)->values();
+
+            return ['tasks' => $tasks, 'counts' => ['eligible_tasks' => $tasks->count()]];
+        }
+
+        $now = now();
+        $freshAfter = now()->subSeconds($this->freshSeconds());
+        $notDue = (clone $query)->where('meta_verification_due_at', '>', $now)->count();
+        $fresh = (clone $query)
+            ->where('is_active', true)
+            ->whereNull('pending_meta_action')
+            ->whereNull('metrics_unavailable_at')
+            ->whereNull('meta_verification_due_at')
+            ->where('last_metrics_synced_at', '>', $freshAfter)
+            ->count();
+
+        $tasks = $query
+            ->where(function (Builder $due) use ($now): void {
+                $due->whereNull('meta_verification_due_at')
+                    ->orWhere('meta_verification_due_at', '<=', $now);
+            })
+            ->where(function (Builder $eligible) use ($freshAfter): void {
+                $eligible->whereNotNull('pending_meta_action')
+                    ->orWhereNotNull('metrics_unavailable_at')
+                    ->orWhereNotNull('meta_verification_due_at')
+                    ->orWhere(function (Builder $stale) use ($freshAfter): void {
+                        $stale->where('is_active', true)
+                            ->where(function (Builder $metrics) use ($freshAfter): void {
+                                $metrics->whereNull('last_metrics_synced_at')
+                                    ->orWhere('last_metrics_synced_at', '<=', $freshAfter);
+                            });
+                    });
+            })
+            ->orderByRaw('CASE WHEN pending_meta_action IS NOT NULL THEN 0 WHEN meta_verification_due_at IS NOT NULL THEN 1 WHEN metrics_unavailable_at IS NOT NULL THEN 2 ELSE 3 END')
+            ->get()
+            ->filter(fn (AutomationTask $task) => $this->target($task) !== null)
+            ->values();
+
+        return [
+            'tasks' => $tasks,
+            'counts' => [
+                'eligible_tasks' => $tasks->count(),
+                'skipped_fresh' => $fresh,
+                'skipped_not_due' => $notDue,
+            ],
+        ];
+    }
+
+    private function taskQuery(T4JamProfile $profile, ?string $adAccountExternalId, array $campaignIds, array $adSetIds): Builder
     {
         $account = $adAccountExternalId
             ? AdAccount::query()->where('external_id', $this->normalizeAdAccountId($adAccountExternalId))->first()
@@ -88,26 +149,17 @@ class MetaAutomationReconciliationService
         return AutomationTask::query()
             ->with(['campaign.adAccount', 'adSet.adAccount'])
             ->where('user_id', $profile->user_id)
-            ->when($adAccountExternalId, fn ($query) => $account ? $query->where('ad_account_id', $account->id) : $query->whereRaw('1 = 0'))
-            ->when($campaignIds !== [] || $adSetIds !== [], function ($query) use ($campaignIds, $adSetIds): void {
-                $query->where(function ($targets) use ($campaignIds, $adSetIds): void {
+            ->when($adAccountExternalId, fn (Builder $query) => $account ? $query->where('ad_account_id', $account->id) : $query->whereRaw('1 = 0'))
+            ->when($campaignIds !== [] || $adSetIds !== [], function (Builder $query) use ($campaignIds, $adSetIds): void {
+                $query->where(function (Builder $targets) use ($campaignIds, $adSetIds): void {
                     if ($campaignIds !== []) {
-                        $targets->orWhere(fn ($campaigns) => $campaigns->where('level', 'campaign')->whereIn('campaign_external_id', $campaignIds));
+                        $targets->orWhere(fn (Builder $campaigns) => $campaigns->where('level', 'campaign')->whereIn('campaign_external_id', $campaignIds));
                     }
                     if ($adSetIds !== []) {
-                        $targets->orWhere(fn ($adSets) => $adSets->where('level', 'adset')->whereIn('ad_set_external_id', $adSetIds));
+                        $targets->orWhere(fn (Builder $adSets) => $adSets->where('level', 'adset')->whereIn('ad_set_external_id', $adSetIds));
                     }
                 });
-            })
-            ->where(function ($query): void {
-                $query->where('is_active', true)
-                    ->orWhereNotNull('pending_meta_action')
-                    ->orWhereNotNull('metrics_unavailable_at')
-                    ->orWhereNotNull('meta_verification_due_at');
-            })
-            ->get()
-            ->filter(fn (AutomationTask $task) => $this->target($task) !== null)
-            ->values();
+            });
     }
 
     private function groups(Collection $tasks): Collection
@@ -131,17 +183,14 @@ class MetaAutomationReconciliationService
 
         try {
             $apiCalls++;
-            $status = $level === 'adset'
-                ? $client->adSet($targetId)
-                : $client->campaign($targetId);
+            $status = $level === 'adset' ? $client->adSet($targetId) : $client->campaign($targetId);
         } catch (MetaAdsException $exception) {
-            $this->markMetricsUnavailable($tasks);
+            $this->markMetricsUnavailable($tasks, $profile, $exception);
 
             return $this->groupFailure($profile, $targetId, $level, $source, $exception, $apiCalls);
         }
 
-        $statusById = collect([$targetId => $status]);
-        $updated = $this->syncStatusAndBudget($tasks, $statusById);
+        $updated = $this->syncStatusAndBudget($tasks, collect([$targetId => $status]));
 
         try {
             $apiCalls++;
@@ -149,7 +198,7 @@ class MetaAutomationReconciliationService
                 ? $client->adSetInsights($targetId, $datePreset)
                 : $client->campaignInsights($targetId, $datePreset);
         } catch (MetaAdsException $exception) {
-            $this->markMetricsUnavailable($tasks);
+            $this->markMetricsUnavailable($tasks, $profile, $exception);
 
             return $this->groupFailure($profile, $targetId, $level, $source, $exception, $apiCalls, $updated);
         }
@@ -159,33 +208,29 @@ class MetaAutomationReconciliationService
         DB::transaction(function () use ($tasks, $insights, &$freshTargets): void {
             foreach ($tasks as $task) {
                 $target = $this->target($task);
-                if (is_array($insights)) {
-                    $metrics = $this->automation->metricSnapshot($insights);
-                    $target->update($this->automation->insightPayload($metrics));
-                    $freshTargets[$task->level.':'.$target->external_id] = $metrics;
-                    $task->update([
-                        'current_spend' => (int) $metrics['spend'],
-                        'current_result' => max(0, (int) ($metrics['results'][$task->conversion] ?? 0)),
-                        'last_metrics_synced_at' => $metrics['insights_synced_at'] ?? now(),
-                        'metrics_unavailable_at' => null,
-                        'last_checked_at' => now(),
-                    ]);
-                } else {
-                    $task->update(['metrics_unavailable_at' => now()]);
+                $metrics = $this->automation->metricSnapshot($insights);
+                $target->update($this->automation->insightPayload($metrics));
+                $freshTargets[$task->level.':'.$target->external_id] = $metrics;
+                $changes = [
+                    'current_spend' => (int) $metrics['spend'],
+                    'current_result' => max(0, (int) ($metrics['results'][$task->conversion] ?? 0)),
+                    'last_metrics_synced_at' => $metrics['insights_synced_at'] ?? now(),
+                    'metrics_unavailable_at' => null,
+                    'meta_reconciliation_failure_count' => 0,
+                    'last_checked_at' => now(),
+                ];
+
+                if ($task->pending_meta_action === null) {
+                    $changes['meta_verification_due_at'] = null;
                 }
+
+                $task->update($changes);
             }
         });
 
         $campaignIds = $level === 'campaign' ? $tasks->pluck('campaign_external_id')->filter()->values()->all() : [];
         $adSetIds = $level === 'adset' ? $tasks->pluck('ad_set_external_id')->filter()->values()->all() : [];
-        $paused = $this->automation->reconcileTasks(
-            $profile,
-            $client,
-            $adAccountId,
-            $campaignIds,
-            $adSetIds,
-            $freshTargets,
-        );
+        $paused = $this->automation->reconcileTasks($profile, $client, $adAccountId, $campaignIds, $adSetIds, $freshTargets);
 
         return ['api_calls' => $apiCalls, 'updated' => $updated, 'paused' => $paused, 'rate_limited' => $this->rateLimit->isRateLimited($profile)];
     }
@@ -200,8 +245,6 @@ class MetaAutomationReconciliationService
                 $remote = $statusById->get($target->external_id);
 
                 if (! is_array($remote)) {
-                    $task->update(['metrics_unavailable_at' => now()]);
-
                     continue;
                 }
 
@@ -211,11 +254,12 @@ class MetaAutomationReconciliationService
                     'daily_budget' => (int) ($remote['daily_budget'] ?? $target->daily_budget),
                 ]);
 
-                $changes = [
-                    'current_budget' => (int) $target->daily_budget,
-                    'meta_verification_due_at' => null,
-                ];
+                $changes = ['current_budget' => (int) $target->daily_budget];
                 $active = strtoupper((string) ($target->effective_status ?: $target->status)) === 'ACTIVE';
+
+                if ($task->pending_meta_action === null) {
+                    $changes['meta_verification_due_at'] = null;
+                }
 
                 if ($task->is_active && ! $active) {
                     $changes += [
@@ -252,9 +296,82 @@ class MetaAutomationReconciliationService
         ];
     }
 
-    private function markMetricsUnavailable(Collection $tasks): void
+    private function markMetricsUnavailable(Collection $tasks, T4JamProfile $profile, MetaAdsException $exception): void
     {
-        $tasks->each(fn (AutomationTask $task) => $task->update(['metrics_unavailable_at' => now()]));
+        $rateLimited = $this->rateLimit->isRateLimitCode($exception->metaCode, $exception->httpStatus);
+
+        $tasks->each(function (AutomationTask $task) use ($profile, $rateLimited): void {
+            $attempt = max(1, (int) $task->meta_reconciliation_failure_count + 1);
+            $dueAt = $rateLimited
+                ? $this->rateLimit->cooldownUntil($profile) ?? now()->addSeconds(60)
+                : now()->addSeconds(self::METRIC_RETRY_DELAYS[min(3, $attempt)]);
+
+            $task->update([
+                'metrics_unavailable_at' => now(),
+                'meta_verification_due_at' => $dueAt,
+                'meta_reconciliation_failure_count' => $rateLimited ? $task->meta_reconciliation_failure_count : min(3, $attempt),
+            ]);
+        });
+    }
+
+    private function emptyCounts(): array
+    {
+        return [
+            'groups' => 0,
+            'eligible_tasks' => 0,
+            'processed_targets' => 0,
+            'skipped_fresh' => 0,
+            'skipped_not_due' => 0,
+            'target_limit_reached' => 0,
+            'pending_actions' => 0,
+            'api_calls' => 0,
+            'updated' => 0,
+            'paused' => 0,
+            'rate_limited' => false,
+            'skip_reason' => null,
+        ];
+    }
+
+    private function logSummary(T4JamProfile $profile, string $source, array $counts): array
+    {
+        $skipReasons = array_filter([
+            'metrics_fresh' => $counts['skipped_fresh'],
+            'verification_not_due' => $counts['skipped_not_due'],
+            'target_limit_reached' => $counts['target_limit_reached'],
+            'cooldown_active' => $counts['rate_limited'],
+        ]);
+
+        MetaFlowLog::info('automation reconciliation finished', [
+            'profile_id' => $profile->id,
+            'source' => $source,
+            'skip_reasons' => $skipReasons,
+            ...$counts,
+        ]);
+
+        return $counts;
+    }
+
+    private function priority(AutomationTask $task): int
+    {
+        if ($task->pending_meta_action !== null) {
+            return 0;
+        }
+
+        if ($task->meta_verification_due_at !== null) {
+            return 1;
+        }
+
+        return $task->metrics_unavailable_at !== null ? 2 : 3;
+    }
+
+    private function freshSeconds(): int
+    {
+        return max(1, (int) config('services.meta.automation_reconcile_fresh_seconds', 180));
+    }
+
+    private function maxTargets(): int
+    {
+        return max(1, (int) config('services.meta.automation_reconcile_max_targets', 25));
     }
 
     private function target(AutomationTask $task): Campaign|AdSet|null

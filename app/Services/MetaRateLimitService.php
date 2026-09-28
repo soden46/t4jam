@@ -46,6 +46,11 @@ class MetaRateLimitService
         return max(0, now()->diffInSeconds($until, false));
     }
 
+    public function cooldownUntil(T4JamProfile $profile): mixed
+    {
+        return Cache::get($this->cooldownKey($profile));
+    }
+
     public function clear(T4JamProfile $profile): void
     {
         Cache::forget($this->cooldownKey($profile));

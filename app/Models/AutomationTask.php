@@ -45,6 +45,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'last_budget_action',
     'pending_meta_action',
     'meta_verification_due_at',
+    'meta_reconciliation_failure_count',
 ])]
 class AutomationTask extends Model
 {
@@ -64,6 +65,7 @@ class AutomationTask extends Model
             'last_checked_at' => 'datetime',
             'last_budget_changed_at' => 'datetime',
             'meta_verification_due_at' => 'datetime',
+            'meta_reconciliation_failure_count' => 'integer',
         ];
     }
 
