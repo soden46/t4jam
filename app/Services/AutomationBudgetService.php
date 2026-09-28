@@ -19,6 +19,14 @@ class AutomationBudgetService
 {
     private const BUDGET_INCREASE_RATIO = 0.15;
 
+    private const BUDGET_INCREASE_COOLDOWN_HOURS = 72;
+
+    private const MIN_RESULTS_FOR_BUDGET_INCREASE = 3;
+
+    private const BUDGET_SCALE_CPR_RATIO = 0.80;
+
+    private const BUDGET_INCREASE_LOCK_SECONDS = 120;
+
     private const PENDING_PAUSE_MARKER = 'Pending pause (rate limited).';
 
     private array $statusCache = [];
@@ -372,8 +380,15 @@ class AutomationBudgetService
                     }
 
                     if ($cpr < (int) $task->cpr_cap) {
-                        $reason = 'cpr_below_cap';
-                        $this->increaseBudgetIfEligible($task, $target, $client, $profile, $result, $cpr);
+                        $reason = $this->increaseBudgetIfEligible(
+                            $task,
+                            $target,
+                            $client,
+                            $profile,
+                            $result,
+                            $cpr,
+                            $metrics !== null,
+                        );
                         $this->logPendingPauseCancellation($task);
                         $this->clearPendingPause($task);
 
@@ -914,78 +929,116 @@ class AutomationBudgetService
         T4JamProfile $profile,
         int $result,
         int $cpr,
-    ): void {
-        if ($target->status !== 'ACTIVE' || ! config('services.meta.enable_writes') || $result <= 0) {
-            return;
+        bool $hasFreshMetrics,
+    ): string {
+        if (! $hasFreshMetrics) {
+            return 'metrics_not_fresh';
         }
 
-        $cprTarget = (int) $task->cpr_cap;
-        if ($cprTarget <= 0 || $cpr >= $cprTarget) {
-            return;
-        }
+        $lock = Cache::lock('automation-budget-increase:'.$task->id, self::BUDGET_INCREASE_LOCK_SECONDS);
+        $reason = $lock->get(function () use ($task, $target, $client, $profile, $result, $cpr): string {
+            // Re-read after acquiring the task-level lock so a concurrent trigger cannot
+            // calculate its next increase from a stale local budget or cooldown value.
+            $task->refresh();
+            $target->refresh();
 
-        $currentBudget = (int) $target->daily_budget > 0
-            ? (int) $target->daily_budget
-            : ((int) $task->current_budget > 0 ? (int) $task->current_budget : (int) $task->starting_budget);
-        $maximumBudget = (int) $task->maximum_budget;
-
-        if ($currentBudget <= 0 || ($maximumBudget > 0 && $currentBudget >= $maximumBudget)) {
-            return;
-        }
-
-        $nextBudget = (int) (round(($currentBudget * (1 + self::BUDGET_INCREASE_RATIO)) / 1000) * 1000);
-        $nextBudget = max($currentBudget + 1000, $nextBudget);
-
-        if ($maximumBudget > 0) {
-            $nextBudget = min($nextBudget, $maximumBudget);
-        }
-
-        if ($nextBudget <= $currentBudget) {
-            return;
-        }
-
-        try {
-            if ($task->level === 'adset') {
-                $client->updateAdSetBudget($target->external_id, $nextBudget);
-            } else {
-                $client->updateCampaignBudget($target->external_id, $nextBudget);
+            if ($task->pending_meta_action !== null) {
+                return 'pending_meta_action';
             }
-        } catch (MetaAdsException $exception) {
-            MetaFlowLog::warning('automation budget increase failed', [
-                'profile_id' => $profile->id,
-                'automation_task_id' => $task->id,
-                'target_id' => $target->external_id,
-                'current_budget' => $currentBudget,
-                'next_budget' => $nextBudget,
-                'http_status' => $exception->httpStatus,
-                'meta_code' => $exception->metaCode,
-            ]);
 
-            return;
-        }
+            if ($target->status !== 'ACTIVE' || ! config('services.meta.enable_writes')) {
+                return 'target_not_eligible';
+            }
 
-        $message = sprintf(
-            'Budget otomatis dinaikkan dari Rp. %s menjadi Rp. %s karena CPR Rp. %s berada di bawah batas Rp. %s.',
-            number_format($currentBudget, 0, ',', '.'),
-            number_format($nextBudget, 0, ',', '.'),
-            number_format($cpr, 0, ',', '.'),
-            number_format($cprTarget, 0, ',', '.'),
-        );
+            if ($result < self::MIN_RESULTS_FOR_BUDGET_INCREASE) {
+                return 'minimum_results_not_met';
+            }
 
-        DB::transaction(function () use ($task, $target, $currentBudget, $nextBudget, $message): void {
-            $target->update(['daily_budget' => $nextBudget]);
-            $task->update([
-                'current_budget' => $nextBudget,
-                'last_budget_changed_at' => now(),
-                'last_budget_before' => $currentBudget,
-                'last_budget_action' => 'increase',
-                'last_log' => $message,
-            ]);
-            AutomationLog::create([
-                'automation_task_id' => $task->id,
-                'messages' => [$message],
-            ]);
+            $cprTarget = (int) $task->cpr_cap;
+            if ($cprTarget <= 0 || $cpr >= $cprTarget) {
+                return 'cpr_not_below_cap';
+            }
+
+            $scaleCprLimit = (int) floor($cprTarget * self::BUDGET_SCALE_CPR_RATIO);
+            if ($cpr > $scaleCprLimit) {
+                return 'cpr_not_healthy_enough_for_scale';
+            }
+
+            if ($task->last_budget_changed_at?->gt(now()->subHours(self::BUDGET_INCREASE_COOLDOWN_HOURS))) {
+                return 'budget_increase_cooldown';
+            }
+
+            $currentBudget = (int) $target->daily_budget > 0
+                ? (int) $target->daily_budget
+                : ((int) $task->current_budget > 0 ? (int) $task->current_budget : (int) $task->starting_budget);
+            $maximumBudget = (int) $task->maximum_budget;
+
+            if ($currentBudget <= 0) {
+                return 'missing_current_budget';
+            }
+
+            if ($maximumBudget > 0 && $currentBudget >= $maximumBudget) {
+                return 'maximum_budget_reached';
+            }
+
+            $nextBudget = (int) (round(($currentBudget * (1 + self::BUDGET_INCREASE_RATIO)) / 1000) * 1000);
+            $nextBudget = max($currentBudget + 1000, $nextBudget);
+
+            if ($maximumBudget > 0) {
+                $nextBudget = min($nextBudget, $maximumBudget);
+            }
+
+            if ($nextBudget <= $currentBudget) {
+                return 'maximum_budget_reached';
+            }
+
+            try {
+                if ($task->level === 'adset') {
+                    $client->updateAdSetBudget($target->external_id, $nextBudget);
+                } else {
+                    $client->updateCampaignBudget($target->external_id, $nextBudget);
+                }
+            } catch (MetaAdsException $exception) {
+                MetaFlowLog::warning('automation budget increase failed', [
+                    'profile_id' => $profile->id,
+                    'automation_task_id' => $task->id,
+                    'target_id' => $target->external_id,
+                    'current_budget' => $currentBudget,
+                    'next_budget' => $nextBudget,
+                    'http_status' => $exception->httpStatus,
+                    'meta_code' => $exception->metaCode,
+                ]);
+
+                return 'budget_increase_failed';
+            }
+
+            $message = sprintf(
+                'Budget otomatis dinaikkan dari Rp. %s menjadi Rp. %s karena CPR Rp. %s masih di bawah atau sama dengan 80%% batas CPR Rp. %s.',
+                number_format($currentBudget, 0, ',', '.'),
+                number_format($nextBudget, 0, ',', '.'),
+                number_format($cpr, 0, ',', '.'),
+                number_format($cprTarget, 0, ',', '.'),
+            );
+
+            DB::transaction(function () use ($task, $target, $currentBudget, $nextBudget, $message): void {
+                $target->update(['daily_budget' => $nextBudget]);
+                $task->update([
+                    'current_budget' => $nextBudget,
+                    'last_budget_changed_at' => now(),
+                    'last_budget_before' => $currentBudget,
+                    'last_budget_action' => 'increase',
+                    'last_log' => $message,
+                ]);
+                AutomationLog::create([
+                    'automation_task_id' => $task->id,
+                    'messages' => [$message],
+                ]);
+            });
+
+            return 'budget_increased';
         });
+
+        return $reason === false ? 'budget_increase_lock_unavailable' : $reason;
     }
 
     private function targetKey(AutomationTask $task, Campaign|AdSet $target): string
