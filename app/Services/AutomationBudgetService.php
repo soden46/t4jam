@@ -27,6 +27,8 @@ class AutomationBudgetService
 
     private const BUDGET_INCREASE_LOCK_SECONDS = 120;
 
+    private const TASK_MUTATION_LOCK_SECONDS = 120;
+
     private const PENDING_PAUSE_MARKER = 'Pending pause (rate limited).';
 
     private array $statusCache = [];
@@ -420,59 +422,80 @@ class AutomationBudgetService
 
                     $targetId = $target->external_id;
 
-                    try {
-                        if ($task->level === 'adset') {
-                            $client->updateAdSetStatus($targetId, false);
-                        } else {
-                            $client->updateCampaignStatus($targetId, false);
+                    $this->taskMutationLock($task)->get(function () use ($task, $target, $client, $profile, $cpr, $targetId, &$message, &$paused): void {
+                        $task->refresh();
+                        $target->refresh();
+
+                        if (! $task->is_active) {
+                            return;
                         }
-                    } catch (MetaAdsException $exception) {
-                        $this->handlePauseFailure($task, $profile, $exception, $cpr, $task->cpr_cap, $targetId, $reason, $message);
 
-                        return;
-                    }
+                        if ($target->status !== 'ACTIVE') {
+                            return;
+                        }
 
-                    $message = sprintf(
-                        'Campaign otomatis dipause karena CPR Rp. %s mencapai batas Rp. %s.',
-                        number_format($cpr, 0, ',', '.'),
-                        number_format((int) $task->cpr_cap, 0, ',', '.'),
-                    );
+                        if (! $this->assertNoPendingMetaAction($task)) {
+                            return;
+                        }
 
-                    DB::transaction(function () use ($task, $target, $message): void {
-                        $target->update([
-                            'status' => 'PAUSED',
-                            'effective_status' => 'PAUSED',
-                        ]);
-                        $task->update([
-                            'is_active' => false,
-                            'last_log' => $message,
-                            'last_checked_at' => now(),
-                            'last_budget_action' => 'pause',
-                        ]);
-                        AutomationLog::create([
+                        if (! config('services.meta.enable_writes')) {
+                            $this->recordSkippedPause($task, 'Automation melewati pause karena META_ADS_ENABLE_WRITES=false.');
+
+                            return;
+                        }
+
+                        try {
+                            if ($task->level === 'adset') {
+                                $client->updateAdSetStatus($targetId, false);
+                            } else {
+                                $client->updateCampaignStatus($targetId, false);
+                            }
+                        } catch (MetaAdsException $exception) {
+                            $this->handlePauseFailure($task, $profile, $exception, $cpr, $task->cpr_cap, $targetId, $reason, $message);
+
+                            return;
+                        }
+
+                        $message = sprintf(
+                            'Campaign otomatis dipause karena CPR Rp. %s mencapai batas Rp. %s.',
+                            number_format($cpr, 0, ',', '.'),
+                            number_format((int) $task->cpr_cap, 0, ',', '.'),
+                        );
+
+                        DB::transaction(function () use ($task, $target, $message): void {
+                            $target->update([
+                                'status' => 'PAUSED',
+                                'effective_status' => 'PAUSED',
+                            ]);
+                            $task->update([
+                                'is_active' => false,
+                                'last_log' => $message,
+                                'last_checked_at' => now(),
+                                'last_budget_action' => 'pause',
+                            ]);
+                            AutomationLog::create([
+                                'automation_task_id' => $task->id,
+                                'messages' => [$message],
+                            ]);
+                        });
+
+                        $this->clearPendingPause($task);
+
+                        MetaFlowLog::info('automation cpr cap status update finished', [
+                            'profile_id' => $profile->id,
                             'automation_task_id' => $task->id,
-                            'messages' => [$message],
+                            'target_id' => $targetId,
+                            'cpr' => $cpr,
+                            'cpr_cap' => $task->cpr_cap,
                         ]);
+
+                        $paused++;
                     });
 
                     $this->clearPendingPause($task);
-
-                    MetaFlowLog::info('automation cpr cap status update finished', [
-                        'profile_id' => $profile->id,
-                        'automation_task_id' => $task->id,
-                        'target_id' => $targetId,
-                        'cpr' => $cpr,
-                        'cpr_cap' => $task->cpr_cap,
-                    ]);
-
-                    $paused++;
                 } catch (MetaAdsException $exception) {
                     if ($this->isRateLimitException($exception)) {
-                        $reason = 'pause_failed_rate_limited';
-                        $this->handlePauseFailure($task, $profile, $exception, $cpr ?? null, $task->cpr_cap, $targetId ?? null, $reason, $message);
                         $this->stopBatch = true;
-
-                        return;
                     }
 
                     $reason = 'cpr_pause_status_update_failed';
@@ -562,60 +585,81 @@ class AutomationBudgetService
             return false;
         }
 
-        try {
-            if ($task->level === 'adset') {
-                $client->updateAdSetStatus($target->external_id, $active);
+        $lockAcquired = $this->taskMutationLock($task)->get(function () use ($task, $target, $client, $profile, $active, $source): bool {
+            $task->refresh();
+            $target->refresh();
+
+            if ($active) {
+                if ($task->is_active && $target->status === 'ACTIVE') {
+                    return false;
+                }
             } else {
-                $client->updateCampaignStatus($target->external_id, $active);
+                if (! $task->is_active && $target->status === 'PAUSED') {
+                    return false;
+                }
             }
-        } catch (MetaAdsException $exception) {
-            MetaFlowLog::warning('automation schedule status update failed', [
-                'profile_id' => $profile->id,
-                'automation_task_id' => $task->id,
-                'target_id' => $target->external_id,
-                'active' => $active,
-                'http_status' => $exception->httpStatus,
-                'meta_code' => $exception->metaCode,
-            ]);
 
-            $this->logEvaluation($profile, $task, 'none', 'schedule_status_update_failed', $source);
+            if (! $this->assertNoPendingMetaAction($task)) {
+                return false;
+            }
 
-            return false;
-        }
+            try {
+                if ($task->level === 'adset') {
+                    $client->updateAdSetStatus($target->external_id, $active);
+                } else {
+                    $client->updateCampaignStatus($target->external_id, $active);
+                }
+            } catch (MetaAdsException $exception) {
+                MetaFlowLog::warning('automation schedule status update failed', [
+                    'profile_id' => $profile->id,
+                    'automation_task_id' => $task->id,
+                    'target_id' => $target->external_id,
+                    'active' => $active,
+                    'http_status' => $exception->httpStatus,
+                    'meta_code' => $exception->metaCode,
+                ]);
 
-        $action = $active ? 'schedule_resume' : 'schedule_pause';
-        $message = $active
-            ? sprintf(
-                'Campaign otomatis diaktifkan kembali karena sudah masuk jam aktif %s-%s.',
-                substr((string) $task->on_time, 0, 5),
-                substr((string) $task->off_time, 0, 5),
-            )
-            : sprintf(
-                'Campaign otomatis dipause karena sudah di luar jam aktif %s-%s.',
-                substr((string) $task->on_time, 0, 5),
-                substr((string) $task->off_time, 0, 5),
-            );
+                $this->logEvaluation($profile, $task, 'none', 'schedule_status_update_failed', $source);
 
-        DB::transaction(function () use ($task, $target, $active, $action, $message): void {
-            $target->update([
-                'status' => $active ? 'ACTIVE' : 'PAUSED',
-                'effective_status' => $active ? 'ACTIVE' : 'PAUSED',
-            ]);
-            $task->update([
-                'is_active' => $active,
-                'last_log' => $message,
-                'last_checked_at' => now(),
-                'last_budget_action' => $action,
-            ]);
-            AutomationLog::create([
-                'automation_task_id' => $task->id,
-                'messages' => [$message],
-            ]);
+                return false;
+            }
+
+            $action = $active ? 'schedule_resume' : 'schedule_pause';
+            $message = $active
+                ? sprintf(
+                    'Campaign otomatis diaktifkan kembali karena sudah masuk jam aktif %s-%s.',
+                    substr((string) $task->on_time, 0, 5),
+                    substr((string) $task->off_time, 0, 5),
+                )
+                : sprintf(
+                    'Campaign otomatis dipause karena sudah di luar jam aktif %s-%s.',
+                    substr((string) $task->on_time, 0, 5),
+                    substr((string) $task->off_time, 0, 5),
+                );
+
+            DB::transaction(function () use ($task, $target, $active, $action, $message): void {
+                $target->update([
+                    'status' => $active ? 'ACTIVE' : 'PAUSED',
+                    'effective_status' => $active ? 'ACTIVE' : 'PAUSED',
+                ]);
+                $task->update([
+                    'is_active' => $active,
+                    'last_log' => $message,
+                    'last_checked_at' => now(),
+                    'last_budget_action' => $action,
+                ]);
+                AutomationLog::create([
+                    'automation_task_id' => $task->id,
+                    'messages' => [$message],
+                ]);
+            });
+
+            $this->logEvaluation($profile, $task->fresh(), $action, null, $source);
+
+            return $active;
         });
 
-        $this->logEvaluation($profile, $task->fresh(), $action, null, $source);
-
-        return $active;
+        return $lockAcquired === false ? false : $lockAcquired;
     }
 
     private function resumeTaskIfEligible(
@@ -634,47 +678,62 @@ class AutomationBudgetService
             return;
         }
 
-        try {
-            if ($task->level === 'adset') {
-                $client->updateAdSetStatus($target->external_id, true);
-            } else {
-                $client->updateCampaignStatus($target->external_id, true);
+        $this->taskMutationLock($task)->get(function () use ($task, $target, $client, $profile, $result, $cpr, $recoveryCap): void {
+            $task->refresh();
+            $target->refresh();
+
+            if (! $task->is_active || $task->last_budget_action !== 'pause' || $target->status !== 'PAUSED') {
+                return;
             }
-        } catch (MetaAdsException $exception) {
-            MetaFlowLog::warning('automation cpr recovery failed', [
-                'profile_id' => $profile->id,
-                'automation_task_id' => $task->id,
-                'target_id' => $target->external_id,
-                'cpr' => $cpr,
-                'recovery_cap' => $recoveryCap,
-                'http_status' => $exception->httpStatus,
-                'meta_code' => $exception->metaCode,
-            ]);
 
-            return;
-        }
+            if (! $this->assertNoPendingMetaAction($task)) {
+                return;
+            }
 
-        $message = sprintf(
-            'Campaign otomatis diaktifkan kembali karena CPR Rp. %s sudah di bawah batas recovery Rp. %s.',
-            number_format($cpr, 0, ',', '.'),
-            number_format($recoveryCap, 0, ',', '.'),
-        );
+            try {
+                if ($task->level === 'adset') {
+                    $client->updateAdSetStatus($target->external_id, true);
+                } else {
+                    $client->updateCampaignStatus($target->external_id, true);
+                }
+            } catch (MetaAdsException $exception) {
+                MetaFlowLog::warning('automation cpr recovery failed', [
+                    'profile_id' => $profile->id,
+                    'automation_task_id' => $task->id,
+                    'target_id' => $target->external_id,
+                    'cpr' => $cpr,
+                    'recovery_cap' => $recoveryCap,
+                    'http_status' => $exception->httpStatus,
+                    'meta_code' => $exception->metaCode,
+                ]);
 
-        DB::transaction(function () use ($task, $target, $message): void {
-            $target->update([
-                'status' => 'ACTIVE',
-                'effective_status' => 'ACTIVE',
-            ]);
-            $task->update([
-                'is_active' => true,
-                'last_log' => $message,
-                'last_checked_at' => now(),
-                'last_budget_action' => 'resume',
-            ]);
-            AutomationLog::create([
-                'automation_task_id' => $task->id,
-                'messages' => [$message],
-            ]);
+                return;
+            }
+
+            $message = sprintf(
+                'Campaign otomatis diaktifkan kembali karena CPR Rp. %s sudah di bawah batas recovery Rp. %s.',
+                number_format($cpr, 0, ',', '.'),
+                number_format($recoveryCap, 0, ',', '.'),
+            );
+
+            DB::transaction(function () use ($task, $target, $message): void {
+                $target->update([
+                    'status' => 'ACTIVE',
+                    'effective_status' => 'ACTIVE',
+                ]);
+                $task->update([
+                    'is_active' => true,
+                    'last_log' => $message,
+                    'last_checked_at' => now(),
+                    'last_budget_action' => 'resume',
+                ]);
+                AutomationLog::create([
+                    'automation_task_id' => $task->id,
+                    'messages' => [$message],
+                ]);
+            });
+
+            $this->clearPendingPause($task);
         });
     }
 
@@ -935,14 +994,18 @@ class AutomationBudgetService
             return 'metrics_not_fresh';
         }
 
-        $lock = Cache::lock('automation-budget-increase:'.$task->id, self::BUDGET_INCREASE_LOCK_SECONDS);
+        $lock = $this->taskMutationLock($task);
         $reason = $lock->get(function () use ($task, $target, $client, $profile, $result, $cpr): string {
             // Re-read after acquiring the task-level lock so a concurrent trigger cannot
             // calculate its next increase from a stale local budget or cooldown value.
             $task->refresh();
             $target->refresh();
 
-            if ($task->pending_meta_action !== null) {
+            if ($task->is_active !== true) {
+                return 'task_not_active';
+            }
+
+            if (! $this->assertNoPendingMetaAction($task)) {
                 return 'pending_meta_action';
             }
 
@@ -1039,6 +1102,17 @@ class AutomationBudgetService
         });
 
         return $reason === false ? 'budget_increase_lock_unavailable' : $reason;
+    }
+
+    private function taskMutationLock(AutomationTask $task)
+    {
+        return Cache::lock('automation-task-mutation:'.$task->id, self::TASK_MUTATION_LOCK_SECONDS);
+    }
+
+    private function assertNoPendingMetaAction(AutomationTask $task): bool
+    {
+        return $task->pending_meta_action === null
+            && ! str_contains((string) $task->last_log, self::PENDING_PAUSE_MARKER);
     }
 
     private function targetKey(AutomationTask $task, Campaign|AdSet $target): string
@@ -1318,11 +1392,67 @@ class AutomationBudgetService
             }
 
             try {
-                if ($task->level === 'adset') {
-                    $client->updateAdSetStatus($target->external_id, false);
-                } else {
-                    $client->updateCampaignStatus($target->external_id, false);
-                }
+                $this->taskMutationLock($task)->get(function () use ($task, $target, $client, $profile, $cpr, $freshTargets, &$paused): void {
+                    $task->refresh();
+                    $target->refresh();
+
+                    if (! $task->is_active) {
+                        return;
+                    }
+
+                    if (! $this->assertNoPendingMetaAction($task)) {
+                        return;
+                    }
+
+                    if ($target->status !== 'ACTIVE' || ! config('services.meta.enable_writes')) {
+                        $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap);
+
+                        return;
+                    }
+
+                    try {
+                        if ($task->level === 'adset') {
+                            $client->updateAdSetStatus($target->external_id, false);
+                        } else {
+                            $client->updateCampaignStatus($target->external_id, false);
+                        }
+                    } catch (MetaAdsException $exception) {
+                        $rateLimited = $this->isRateLimitException($exception);
+                        $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap, $rateLimited);
+
+                        if ($rateLimited) {
+                            $this->stopBatch = true;
+                        }
+
+                        return;
+                    }
+
+                    $message = sprintf(
+                        'Campaign otomatis dipause karena CPR Rp. %s mencapai batas Rp. %s setelah cooldown rate limit.',
+                        number_format($cpr, 0, ',', '.'),
+                        number_format((int) $task->cpr_cap, 0, ',', '.'),
+                    );
+
+                    DB::transaction(function () use ($task, $target, $message): void {
+                        $target->update([
+                            'status' => 'PAUSED',
+                            'effective_status' => 'PAUSED',
+                        ]);
+                        $task->update([
+                            'is_active' => false,
+                            'last_log' => $message,
+                            'last_checked_at' => now(),
+                            'last_budget_action' => 'pause',
+                        ]);
+                        AutomationLog::create([
+                            'automation_task_id' => $task->id,
+                            'messages' => [$message],
+                        ]);
+                    });
+
+                    $this->clearPendingPause($task);
+                    $paused++;
+                });
             } catch (MetaAdsException $exception) {
                 $rateLimited = $this->isRateLimitException($exception);
                 $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap, $rateLimited);
@@ -1333,32 +1463,6 @@ class AutomationBudgetService
 
                 return;
             }
-
-            $message = sprintf(
-                'Campaign otomatis dipause karena CPR Rp. %s mencapai batas Rp. %s setelah cooldown rate limit.',
-                number_format($cpr, 0, ',', '.'),
-                number_format((int) $task->cpr_cap, 0, ',', '.'),
-            );
-
-            DB::transaction(function () use ($task, $target, $message): void {
-                $target->update([
-                    'status' => 'PAUSED',
-                    'effective_status' => 'PAUSED',
-                ]);
-                $task->update([
-                    'is_active' => false,
-                    'last_log' => $message,
-                    'last_checked_at' => now(),
-                    'last_budget_action' => 'pause',
-                ]);
-                AutomationLog::create([
-                    'automation_task_id' => $task->id,
-                    'messages' => [$message],
-                ]);
-            });
-
-            $this->clearPendingPause($task);
-            $paused++;
         });
 
         return $paused;
