@@ -422,7 +422,7 @@ class AutomationBudgetService
 
                     $targetId = $target->external_id;
 
-                    $this->taskMutationLock($task)->get(function () use ($task, $target, $client, $profile, $cpr, $targetId, &$message, &$paused): void {
+                    $this->taskMutationLock($task)->get(function () use ($task, $target, $client, $profile, $cpr, $targetId, &$reason, &$message, &$paused): void {
                         $task->refresh();
                         $target->refresh();
 
@@ -431,6 +431,16 @@ class AutomationBudgetService
                         }
 
                         if ($target->status !== 'ACTIVE') {
+                            return;
+                        }
+
+                        if ((int) $task->cpr_cap <= 0 || ! $task->pause_when_cpr_loss || $cpr < (int) $task->cpr_cap) {
+                            return;
+                        }
+
+                        if ($this->hasPendingPause($task)) {
+                            $this->retryPendingPauseUnderLock($task, $target, $client, $profile, $cpr, $paused);
+
                             return;
                         }
 
@@ -492,7 +502,6 @@ class AutomationBudgetService
                         $paused++;
                     });
 
-                    $this->clearPendingPause($task);
                 } catch (MetaAdsException $exception) {
                     if ($this->isRateLimitException($exception)) {
                         $this->stopBatch = true;
@@ -682,7 +691,11 @@ class AutomationBudgetService
             $task->refresh();
             $target->refresh();
 
-            if (! $task->is_active || $task->last_budget_action !== 'pause' || $target->status !== 'PAUSED') {
+            // A CPR recovery candidate is intentionally inactive until Meta accepts
+            // the ACTIVE mutation. Do not reject that expected state.
+            if ($task->is_active || ! $task->counter_cpr || $task->last_budget_action !== 'pause' || $target->status !== 'PAUSED'
+                || $recoveryCap >= (int) $task->cpr_cap || ! config('services.meta.enable_writes')
+                || $result <= 0 || $recoveryCap <= 0 || $cpr > $recoveryCap) {
                 return;
             }
 
@@ -1111,8 +1124,75 @@ class AutomationBudgetService
 
     private function assertNoPendingMetaAction(AutomationTask $task): bool
     {
-        return $task->pending_meta_action === null
-            && ! str_contains((string) $task->last_log, self::PENDING_PAUSE_MARKER);
+        return ! $this->hasPendingPause($task);
+    }
+
+    private function hasPendingPause(AutomationTask $task): bool
+    {
+        return $task->pending_meta_action === 'pause'
+            || str_contains((string) $task->last_log, self::PENDING_PAUSE_MARKER);
+    }
+
+    private function retryPendingPauseUnderLock(
+        AutomationTask $task,
+        Campaign|AdSet $target,
+        MetaAdsClient $client,
+        T4JamProfile $profile,
+        int $cpr,
+        int &$paused,
+    ): void {
+        $task->refresh();
+        $target->refresh();
+
+        if (! $task->is_active || ! $this->hasPendingPause($task)
+            || (int) $task->cpr_cap <= 0 || ! $task->pause_when_cpr_loss
+            || $cpr < (int) $task->cpr_cap || $target->status !== 'ACTIVE'
+            || ! config('services.meta.enable_writes')) {
+            return;
+        }
+
+        try {
+            if ($task->level === 'adset') {
+                $client->updateAdSetStatus($target->external_id, false);
+            } else {
+                $client->updateCampaignStatus($target->external_id, false);
+            }
+        } catch (MetaAdsException $exception) {
+            $rateLimited = $this->isRateLimitException($exception);
+            $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap, $rateLimited);
+
+            if ($rateLimited) {
+                $this->stopBatch = true;
+            }
+
+            return;
+        }
+
+        $message = sprintf(
+            'Campaign otomatis dipause karena CPR Rp. %s mencapai batas Rp. %s setelah cooldown rate limit.',
+            number_format($cpr, 0, ',', '.'),
+            number_format((int) $task->cpr_cap, 0, ',', '.'),
+        );
+
+        DB::transaction(function () use ($task, $target, $message): void {
+            $target->update([
+                'status' => 'PAUSED',
+                'effective_status' => 'PAUSED',
+            ]);
+            $task->update([
+                'is_active' => false,
+                'last_log' => $message,
+                'last_checked_at' => now(),
+                'last_budget_action' => 'pause',
+            ]);
+            AutomationLog::create([
+                'automation_task_id' => $task->id,
+                'messages' => [$message],
+            ]);
+        });
+
+        $this->clearPendingPause($task);
+        $paused++;
     }
 
     private function targetKey(AutomationTask $task, Campaign|AdSet $target): string
@@ -1321,6 +1401,10 @@ class AutomationBudgetService
             return 0;
         }
 
+        // A retry runs in a later cooldown window and must not inherit a prior
+        // batch's rate-limit stop signal from a shared service instance.
+        $this->stopBatch = false;
+
         $tasks = AutomationTask::query()
             ->where('user_id', $profile->user_id)
             ->where('is_active', true)
@@ -1392,66 +1476,8 @@ class AutomationBudgetService
             }
 
             try {
-                $this->taskMutationLock($task)->get(function () use ($task, $target, $client, $profile, $cpr, $freshTargets, &$paused): void {
-                    $task->refresh();
-                    $target->refresh();
-
-                    if (! $task->is_active) {
-                        return;
-                    }
-
-                    if (! $this->assertNoPendingMetaAction($task)) {
-                        return;
-                    }
-
-                    if ($target->status !== 'ACTIVE' || ! config('services.meta.enable_writes')) {
-                        $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap);
-
-                        return;
-                    }
-
-                    try {
-                        if ($task->level === 'adset') {
-                            $client->updateAdSetStatus($target->external_id, false);
-                        } else {
-                            $client->updateCampaignStatus($target->external_id, false);
-                        }
-                    } catch (MetaAdsException $exception) {
-                        $rateLimited = $this->isRateLimitException($exception);
-                        $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap, $rateLimited);
-
-                        if ($rateLimited) {
-                            $this->stopBatch = true;
-                        }
-
-                        return;
-                    }
-
-                    $message = sprintf(
-                        'Campaign otomatis dipause karena CPR Rp. %s mencapai batas Rp. %s setelah cooldown rate limit.',
-                        number_format($cpr, 0, ',', '.'),
-                        number_format((int) $task->cpr_cap, 0, ',', '.'),
-                    );
-
-                    DB::transaction(function () use ($task, $target, $message): void {
-                        $target->update([
-                            'status' => 'PAUSED',
-                            'effective_status' => 'PAUSED',
-                        ]);
-                        $task->update([
-                            'is_active' => false,
-                            'last_log' => $message,
-                            'last_checked_at' => now(),
-                            'last_budget_action' => 'pause',
-                        ]);
-                        AutomationLog::create([
-                            'automation_task_id' => $task->id,
-                            'messages' => [$message],
-                        ]);
-                    });
-
-                    $this->clearPendingPause($task);
-                    $paused++;
+                $this->taskMutationLock($task)->get(function () use ($task, $target, $client, $profile, $cpr, &$paused): void {
+                    $this->retryPendingPauseUnderLock($task, $target, $client, $profile, $cpr, $paused);
                 });
             } catch (MetaAdsException $exception) {
                 $rateLimited = $this->isRateLimitException($exception);

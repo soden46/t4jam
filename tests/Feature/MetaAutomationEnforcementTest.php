@@ -339,7 +339,7 @@ class MetaAutomationEnforcementTest extends TestCase
 
         $this->fakeEnforcementInsights($task, 45000, 3, includeStatusPost: false);
 
-        Cache::lock('automation-budget-increase:'.$task->id, 120)->get(function () use ($profile): void {
+        Cache::lock('automation-task-mutation:'.$task->id, 120)->get(function () use ($profile): void {
             app(AutomationBudgetService::class)->pauseTasksOverCprCap(
                 $profile,
                 app(MetaAdsSyncService::class)->client($profile),
@@ -1269,6 +1269,37 @@ class MetaAutomationEnforcementTest extends TestCase
         ];
     }
 
+    public function test_cpr_recovery_resumes_a_campaign_paused_by_cpr(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+        $task->update([
+            'is_active' => false,
+            'last_budget_action' => 'pause',
+            'counter_cpr' => true,
+            'cpr_cap' => 30000,
+            'pause_cpr_cap' => 20000,
+            'last_checked_at' => now()->subMinutes(11),
+        ]);
+        $this->fakeEnforcementInsights($task, 45000, 3);
+
+        app(AutomationBudgetService::class)->pauseTasksOverCprCap(
+            $profile,
+            app(MetaAdsSyncService::class)->client($profile),
+            true,
+        );
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame('resume', $fresh->last_budget_action);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->effective_status);
+        Http::assertSentCount(2);
+        Http::assertSent(fn ($request) => $request->method() === 'POST'
+            && str_contains($request->url(), $task->campaign_external_id)
+            && $request['status'] === 'ACTIVE');
+    }
+
     public function test_rate_limit_613_opens_shared_cooldown(): void
     {
         [$profile, $task] = $this->automationFixture();
@@ -1297,6 +1328,9 @@ class MetaAutomationEnforcementTest extends TestCase
         $fresh = $task->fresh();
         $this->assertTrue($fresh->is_active);
         $this->assertSame('ACTIVE', $fresh->campaign->fresh()->status);
+        $this->assertSame('pause', $fresh->pending_meta_action);
+        $this->assertNotNull($fresh->meta_verification_due_at);
+        $this->assertNotSame('pause', $fresh->last_budget_action);
         $this->assertStringContainsString('Pending pause (rate limited).', $fresh->last_log);
 
         $rateLimit = app(MetaRateLimitService::class);
@@ -1368,6 +1402,7 @@ class MetaAutomationEnforcementTest extends TestCase
             'current_budget' => 50000,
             'cpr_cap' => 25000,
             'last_checked_at' => now()->subMinutes(11),
+            'pending_meta_action' => 'pause',
             'last_log' => 'Pending pause (rate limited). CPR Rp. 75.000 vs cap Rp. 25.000.',
         ]);
 
@@ -1391,9 +1426,14 @@ class MetaAutomationEnforcementTest extends TestCase
         );
 
         $this->assertSame(1, $paused);
-        $this->assertFalse($task->fresh()->is_active);
-        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
-        $this->assertSame('pause', $task->fresh()->last_budget_action);
+        $fresh = $task->fresh();
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame('PAUSED', $fresh->campaign->fresh()->status);
+        $this->assertSame('PAUSED', $fresh->campaign->fresh()->effective_status);
+        $this->assertNull($fresh->pending_meta_action);
+        $this->assertNull($fresh->meta_verification_due_at);
+        $this->assertSame('pause', $fresh->last_budget_action);
+        Http::assertSentCount(2);
     }
 
     public function test_resume_pending_pause_clears_when_cpr_healthy(): void
