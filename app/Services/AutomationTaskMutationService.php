@@ -30,19 +30,35 @@ class AutomationTaskMutationService
 
     public function hasPendingPause(AutomationTask $task): bool
     {
-        return $task->pending_meta_action === 'pause'
-            || str_contains((string) $task->last_log, self::PENDING_PAUSE_MARKER);
+        if ($task->pending_meta_action === 'pause') {
+            return true;
+        }
+
+        // Older rows may predate the canonical marker. Only honor their display
+        // marker while an actual verification is still due; a historical
+        // last_log alone must never keep a resolved pause logically pending.
+        return $task->pending_meta_action === null
+            && $task->meta_verification_due_at !== null
+            && str_contains((string) $task->last_log, self::PENDING_PAUSE_MARKER);
     }
 
     public function clearPendingPause(AutomationTask $task): void
     {
-        if (! $this->hasPendingPause($task)) {
+        $hasMarker = str_contains((string) $task->last_log, self::PENDING_PAUSE_MARKER);
+
+        if (! $this->hasPendingPause($task) && ! $hasMarker) {
             return;
         }
 
-        $task->update([
+        $changes = [
             'pending_meta_action' => null,
             'meta_verification_due_at' => null,
-        ]);
+        ];
+
+        if ($hasMarker) {
+            $changes['last_log'] = 'Pending pause telah diselesaikan.';
+        }
+
+        $task->update($changes);
     }
 }

@@ -145,6 +145,27 @@ class MetaAutomationReconciliationTest extends TestCase
         $this->assertSame('Pending pause dibatalkan karena CPR sudah kembali di bawah batas.', $task->fresh()->last_log);
     }
 
+    public function test_reconciliation_resolves_pending_pause_when_meta_is_already_paused(): void
+    {
+        [, $task] = $this->fixture();
+        $task->update([
+            'pending_meta_action' => 'pause',
+            'meta_verification_due_at' => now()->subMinute(),
+            'last_log' => 'Pending pause (rate limited). CPR masih di atas batas.',
+        ]);
+        $this->fakeReconciliation($task, 'PAUSED', 100000, 75000, 1, true);
+
+        $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        $this->assertNull($fresh->pending_meta_action);
+        $this->assertNull($fresh->meta_verification_due_at);
+        $this->assertSame('pause', $fresh->last_budget_action);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
     public function test_rate_limit_613_stops_reconciliation_profile_batch(): void
     {
         [$profile, $task] = $this->fixture();

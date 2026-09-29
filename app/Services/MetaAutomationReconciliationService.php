@@ -22,6 +22,7 @@ class MetaAutomationReconciliationService
         private readonly AutomationBudgetService $automation,
         private readonly MetaAdsSyncService $metaSync,
         private readonly MetaRateLimitService $rateLimit,
+        private readonly AutomationTaskMutationService $taskMutations,
     ) {}
 
     public function reconcileProfile(
@@ -257,7 +258,15 @@ class MetaAutomationReconciliationService
                 $changes = ['current_budget' => (int) $target->daily_budget];
                 $active = strtoupper((string) ($target->effective_status ?: $target->status)) === 'ACTIVE';
 
-                if ($task->pending_meta_action === null) {
+                if ($this->taskMutations->hasPendingPause($task) && ! $active) {
+                    $changes += [
+                        'is_active' => false,
+                        'pending_meta_action' => null,
+                        'meta_verification_due_at' => null,
+                        'last_budget_action' => 'pause',
+                        'last_log' => 'Pending pause telah terkonfirmasi dari Meta Ads Manager.',
+                    ];
+                } elseif ($task->pending_meta_action === null) {
                     $changes['meta_verification_due_at'] = null;
                 }
 

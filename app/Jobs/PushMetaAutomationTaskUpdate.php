@@ -68,10 +68,29 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
                 $target = $this->target($task);
                 $target?->refresh();
 
-                if (! $target || ! $this->stillRelevant($task) || ! config('services.meta.enable_writes')) {
+                if (! $target) {
+                    MetaFlowLog::warning('queued automation meta update skipped without target', [
+                        'automation_task_id' => $task->id,
+                        'action' => $this->action,
+                    ]);
+
+                    return ['skipped' => true];
+                }
+
+                if (! config('services.meta.enable_writes')) {
                     MetaFlowLog::info('queued automation meta update skipped as stale', [
                         'automation_task_id' => $task->id,
                         'action' => $this->action,
+                    ]);
+
+                    return ['skipped' => true];
+                }
+
+                if (! $this->writableTarget($target)) {
+                    MetaFlowLog::warning('queued automation meta update skipped for archived target', [
+                        'automation_task_id' => $task->id,
+                        'action' => $this->action,
+                        'target_id' => $target->external_id,
                     ]);
 
                     return ['skipped' => true];
@@ -94,6 +113,18 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
                 }
 
                 if ($this->alreadyApplied($target)) {
+                    $this->syncLocalSuccess($task, $target);
+                    $this->resolvePendingPauseIfSatisfied($task);
+
+                    return ['skipped' => true];
+                }
+
+                if (! $this->stillRelevant($task)) {
+                    MetaFlowLog::info('queued automation meta update skipped as stale', [
+                        'automation_task_id' => $task->id,
+                        'action' => $this->action,
+                    ]);
+
                     return ['skipped' => true];
                 }
 
@@ -111,8 +142,7 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
                     $this->pushBudget($client, $task);
                 }
 
-                $this->syncLocalSuccess($task, $target);
-                $this->markSucceeded($task);
+                $this->markSucceeded($task, $target);
 
                 return ['completed' => true];
             });
@@ -216,42 +246,68 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
         return (int) $target->daily_budget === $this->budget;
     }
 
-    private function syncLocalSuccess(AutomationTask $task, Campaign|AdSet $target): void
+    private function writableTarget(Campaign|AdSet $target): bool
     {
-        DB::transaction(function () use ($task, $target): void {
-            if ($this->action === 'status') {
-                $status = $this->active ? 'ACTIVE' : 'PAUSED';
-                $target->update([
-                    'status' => $status,
-                    'effective_status' => $status,
-                ]);
-                $task->update(['is_active' => $this->active]);
-
-                return;
-            }
-
-            $target->update(['daily_budget' => $this->budget]);
-            $task->update(['current_budget' => $this->budget]);
-        });
+        return ! in_array(strtoupper((string) $target->status), ['ARCHIVED', 'DELETED'], true)
+            && ! in_array(strtoupper((string) $target->effective_status), ['ARCHIVED', 'DELETED'], true);
     }
 
-    private function markSucceeded(AutomationTask $task): void
+    private function syncLocalSuccess(AutomationTask $task, Campaign|AdSet $target): void
+    {
+        DB::transaction(fn () => $this->syncLocalState($task, $target));
+    }
+
+    private function syncLocalState(AutomationTask $task, Campaign|AdSet $target): void
+    {
+        if ($this->action === 'status') {
+            $status = $this->active ? 'ACTIVE' : 'PAUSED';
+            $target->update([
+                'status' => $status,
+                'effective_status' => $status,
+            ]);
+            $task->update(['is_active' => $this->active]);
+
+            return;
+        }
+
+        $target->update(['daily_budget' => $this->budget]);
+        $task->update(['current_budget' => $this->budget]);
+    }
+
+    private function resolvePendingPauseIfSatisfied(AutomationTask $task): void
+    {
+        if ($this->action === 'status' && $this->active === false) {
+            app(AutomationTaskMutationService::class)->clearPendingPause($task);
+        }
+    }
+
+    private function markSucceeded(AutomationTask $task, Campaign|AdSet $target): void
     {
         $message = $this->baseMessage.'; Meta berhasil diupdate.';
+
+        DB::transaction(function () use ($task, $target, $message): void {
+            $this->syncLocalState($task, $target);
+
+            $changes = ['last_log' => $message];
+            if ($this->action === 'status' && $this->active === false
+                && app(AutomationTaskMutationService::class)->hasPendingPause($task)) {
+                $changes += [
+                    'pending_meta_action' => null,
+                    'meta_verification_due_at' => null,
+                ];
+            }
+            $task->update($changes);
+
+            AutomationLog::create([
+                'automation_task_id' => $task->id,
+                'messages' => [$message],
+            ]);
+        });
 
         MetaFlowLog::info('queued automation meta update finished', [
             'automation_task_id' => $task->id,
             'action' => $this->action,
             'target_id' => $this->targetId($task),
-        ]);
-
-        $task->update([
-            'last_log' => $message,
-        ]);
-
-        AutomationLog::create([
-            'automation_task_id' => $task->id,
-            'messages' => [$message],
         ]);
     }
 

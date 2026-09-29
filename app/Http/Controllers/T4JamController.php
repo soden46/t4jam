@@ -511,6 +511,9 @@ class T4JamController extends Controller
             $deferBudgetMutation = $resolvesPendingPause && $requestedBudget !== (int) $target->daily_budget;
             $budgetChanged = ! $deferBudgetMutation && $requestedBudget !== (int) $task->starting_budget;
             $budgetNeedsMetaWrite = ! $deferBudgetMutation && $requestedBudget !== (int) $target->daily_budget;
+            $budgetNeedsLocalNormalization = ! $deferBudgetMutation
+                && ! $budgetNeedsMetaWrite
+                && (int) $task->current_budget !== $requestedBudget;
 
             if ($this->taskMutations->hasPendingPause($task) && $requestedActive) {
                 return ['ok' => false, 'pending' => true, 'text' => 'Pause otomatis masih menunggu konfirmasi Meta. Resume atau perubahan budget ditunda agar proteksi CPR tidak tertimpa.'];
@@ -556,7 +559,7 @@ class T4JamController extends Controller
             $metaPushed = $metaBudgetPushed || $metaStatusPushed;
             $logMessage = $metaPushed ? 'Automation strategy berhasil diupdate; Meta berhasil diupdate.' : 'Automation strategy berhasil diupdate';
 
-            DB::transaction(function () use ($request, $task, $target, $logMessage, $budgetChanged, $requestedBudget, $requestedActive, $statusChanged, $manualAction, $resolvesPendingPause, $deferBudgetMutation): void {
+            DB::transaction(function () use ($request, $task, $target, $logMessage, $budgetChanged, $budgetNeedsLocalNormalization, $requestedBudget, $requestedActive, $statusChanged, $manualAction, $resolvesPendingPause, $deferBudgetMutation): void {
                 if ($budgetChanged) {
                     $this->persistLocalBudget($target, $requestedBudget, $task->level);
                 }
@@ -574,8 +577,9 @@ class T4JamController extends Controller
                     'meta_verification_due_at' => $this->automationVerificationDueAt(),
                     'last_budget_action' => $manualAction,
                     'is_active' => $requestedActive,
-                ] + ($budgetChanged ? [
+                ] + (($budgetChanged || $budgetNeedsLocalNormalization) ? [
                     'current_budget' => $requestedBudget,
+                ] : []) + ($budgetChanged ? [
                     'last_budget_changed_at' => now(),
                     'last_budget_before' => $task->current_budget,
                     'last_budget_action' => $manualAction,
@@ -599,7 +603,12 @@ class T4JamController extends Controller
                 ]);
             });
 
-            return ['ok' => true, 'meta_pushed' => $metaPushed];
+            return [
+                'ok' => true,
+                'meta_pushed' => $metaPushed,
+                'budget_meta_pushed' => $metaBudgetPushed,
+                'status_meta_pushed' => $metaStatusPushed,
+            ];
         });
 
         if ($outcome === false) {
@@ -609,7 +618,13 @@ class T4JamController extends Controller
             return response()->json(['status' => 422, 'text' => $outcome['text']], 422);
         }
 
-        return response()->json(['status' => 200, 'text' => $outcome['meta_pushed'] ? 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.' : 'Automation strategy berhasil diupdate.']);
+        $text = $outcome['budget_meta_pushed']
+            ? 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.'
+            : ($outcome['status_meta_pushed']
+                ? 'Automation strategy berhasil diupdate dan status Meta berhasil diupdate.'
+                : 'Automation strategy berhasil diupdate.');
+
+        return response()->json(['status' => 200, 'text' => $text]);
     }
 
     public function updateStatusAutomation(
@@ -755,6 +770,10 @@ class T4JamController extends Controller
                 return ['ok' => false, 'text' => 'Pause otomatis masih menunggu konfirmasi Meta. Perubahan budget ditunda agar proteksi CPR tidak tertimpa.'];
             }
             if ((int) $target->daily_budget === $budget) {
+                if ((int) $task->current_budget !== $budget) {
+                    $task->update(['current_budget' => $budget]);
+                }
+
                 return ['ok' => true, 'noop' => true];
             }
 

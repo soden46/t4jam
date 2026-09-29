@@ -424,7 +424,7 @@ class AutomationBudgetService
                         $task->refresh();
                         $target->refresh();
 
-                        if (! $task->is_active) {
+                        if (! $task->is_active || ! $this->writableMetaTarget($target)) {
                             return;
                         }
 
@@ -596,6 +596,12 @@ class AutomationBudgetService
             $task->refresh();
             $target->refresh();
 
+            if (! $this->writableMetaTarget($target)) {
+                $this->logEvaluation($profile, $task, 'none', 'target_not_editable', $source);
+
+                return false;
+            }
+
             if ($active) {
                 if ($task->is_active && $target->status === 'ACTIVE') {
                     return false;
@@ -693,7 +699,7 @@ class AutomationBudgetService
             // the ACTIVE mutation. Do not reject that expected state.
             if ($task->is_active || ! $task->counter_cpr || $task->last_budget_action !== 'pause' || $target->status !== 'PAUSED'
                 || $recoveryCap >= (int) $task->cpr_cap || ! config('services.meta.enable_writes')
-                || $result <= 0 || $recoveryCap <= 0 || $cpr > $recoveryCap) {
+                || $result <= 0 || $recoveryCap <= 0 || $cpr > $recoveryCap || ! $this->writableMetaTarget($target)) {
                 return;
             }
 
@@ -912,6 +918,12 @@ class AutomationBudgetService
         return strtoupper((string) ($target->effective_status ?: $target->status)) === 'PAUSED';
     }
 
+    private function writableMetaTarget(Campaign|AdSet $target): bool
+    {
+        return ! in_array(strtoupper((string) $target->status), ['ARCHIVED', 'DELETED'], true)
+            && ! in_array(strtoupper((string) $target->effective_status), ['ARCHIVED', 'DELETED'], true);
+    }
+
     private function refreshInactiveTargetStatus(
         AutomationTask $task,
         Campaign|AdSet $target,
@@ -1014,6 +1026,10 @@ class AutomationBudgetService
 
             if ($task->is_active !== true) {
                 return 'task_not_active';
+            }
+
+            if (! $this->writableMetaTarget($target)) {
+                return 'target_not_eligible';
             }
 
             if (! $this->assertNoPendingMetaAction($task)) {
@@ -1144,7 +1160,7 @@ class AutomationBudgetService
         if (! $task->is_active || ! $this->hasPendingPause($task)
             || (int) $task->cpr_cap <= 0 || ! $task->pause_when_cpr_loss
             || $cpr < (int) $task->cpr_cap || $target->status !== 'ACTIVE'
-            || ! config('services.meta.enable_writes')) {
+            || ! config('services.meta.enable_writes') || ! $this->writableMetaTarget($target)) {
             return;
         }
 
@@ -1371,8 +1387,7 @@ class AutomationBudgetService
 
     private function logPendingPauseCancellation(AutomationTask $task): void
     {
-        if ($task->pending_meta_action !== 'pause'
-            && ! str_contains((string) $task->last_log, AutomationTaskMutationService::PENDING_PAUSE_MARKER)) {
+        if (! $this->hasPendingPause($task)) {
             return;
         }
 
@@ -1399,7 +1414,11 @@ class AutomationBudgetService
             ->where('is_active', true)
             ->where(function ($query): void {
                 $query->where('pending_meta_action', 'pause')
-                    ->orWhere('last_log', 'like', '%'.AutomationTaskMutationService::PENDING_PAUSE_MARKER.'%');
+                    ->orWhere(function ($legacy): void {
+                        $legacy->whereNull('pending_meta_action')
+                            ->whereNotNull('meta_verification_due_at')
+                            ->where('last_log', 'like', '%'.AutomationTaskMutationService::PENDING_PAUSE_MARKER.'%');
+                    });
             })
             ->with(['campaign', 'adSet'])
             ->get();
