@@ -1306,6 +1306,69 @@ class MetaAutomationEnforcementTest extends TestCase
         Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
+    public function test_queued_status_success_syncs_local_target(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->update(['is_active' => false]);
+        Http::fake(['*' => Http::response(['success' => true])]);
+
+        (new PushMetaAutomationTaskUpdate($profile->id, $task->id, 'status', 'Update', active: false))
+            ->handle(app(MetaAdsSyncService::class));
+
+        $fresh = $task->fresh();
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->effective_status);
+        Http::assertSent(fn ($request) => $request->method() === 'POST' && $request['status'] === 'PAUSED');
+    }
+
+    public function test_queued_budget_success_syncs_local_target(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->campaign->update(['daily_budget' => 60000]);
+        $task->update(['starting_budget' => 60000, 'current_budget' => 80000]);
+        Http::fake(['*' => Http::response(['success' => true])]);
+
+        (new PushMetaAutomationTaskUpdate($profile->id, $task->id, 'budget', 'Update', budget: 80000))
+            ->handle(app(MetaAdsSyncService::class));
+
+        $this->assertSame(80000, $task->campaign->fresh()->daily_budget);
+        $this->assertSame(80000, $task->fresh()->current_budget);
+        $this->assertSame(60000, $task->fresh()->starting_budget);
+        Http::assertSent(fn ($request) => $request->method() === 'POST' && $request['daily_budget'] === 80000);
+    }
+
+    public function test_failed_queued_status_does_not_sync_local_target(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->update(['is_active' => false]);
+        Http::fake(['*' => Http::response(['error' => ['code' => 100, 'message' => 'Meta rejected pause']], 400)]);
+        $job = (new PushMetaAutomationTaskUpdate($profile->id, $task->id, 'status', 'Update', active: false))
+            ->withFakeQueueInteractions();
+
+        $job->handle(app(MetaAdsSyncService::class));
+
+        $job->assertFailed();
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+    }
+
+    public function test_failed_queued_budget_does_not_sync_local_target(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->campaign->update(['daily_budget' => 60000]);
+        $task->update(['starting_budget' => 60000, 'current_budget' => 80000]);
+        Http::fake(['*' => Http::response(['error' => ['code' => 100, 'message' => 'Meta rejected budget']], 400)]);
+        $job = (new PushMetaAutomationTaskUpdate($profile->id, $task->id, 'budget', 'Update', budget: 80000))
+            ->withFakeQueueInteractions();
+
+        $job->handle(app(MetaAdsSyncService::class));
+
+        $job->assertFailed();
+        $this->assertSame(60000, $task->campaign->fresh()->daily_budget);
+        $this->assertSame(80000, $task->fresh()->current_budget);
+    }
+
     public function test_queued_meta_mutation_is_released_when_task_lock_is_busy(): void
     {
         [$profile, $task] = $this->automationFixture();
@@ -1326,7 +1389,7 @@ class MetaAutomationEnforcementTest extends TestCase
         (new PushMetaAutomationTaskUpdate($profile->id, $task->id, 'status', 'Update', active: false))
             ->handle(app(MetaAdsSyncService::class));
 
-        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
         $this->assertSame('Update; Meta berhasil diupdate.', $task->fresh()->last_log);
         Http::assertSent(fn ($request) => $request->method() === 'POST' && $request['status'] === 'PAUSED');
     }

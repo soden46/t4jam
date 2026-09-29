@@ -14,6 +14,7 @@ use App\Services\MetaAdsSyncService;
 use App\Support\MetaFlowLog;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Support\Facades\DB;
 use Throwable;
 
 class PushMetaAutomationTaskUpdate implements ShouldQueue
@@ -110,7 +111,10 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
                     $this->pushBudget($client, $task);
                 }
 
-                return ['completed' => true, 'task' => $task];
+                $this->syncLocalSuccess($task, $target);
+                $this->markSucceeded($task);
+
+                return ['completed' => true];
             });
 
             if ($outcome === false) {
@@ -142,7 +146,6 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
             throw $exception;
         }
 
-        $this->markSucceeded($task->fresh());
     }
 
     private function pushBudget($client, AutomationTask $task): void
@@ -211,6 +214,25 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
         }
 
         return (int) $target->daily_budget === $this->budget;
+    }
+
+    private function syncLocalSuccess(AutomationTask $task, Campaign|AdSet $target): void
+    {
+        DB::transaction(function () use ($task, $target): void {
+            if ($this->action === 'status') {
+                $status = $this->active ? 'ACTIVE' : 'PAUSED';
+                $target->update([
+                    'status' => $status,
+                    'effective_status' => $status,
+                ]);
+                $task->update(['is_active' => $this->active]);
+
+                return;
+            }
+
+            $target->update(['daily_budget' => $this->budget]);
+            $task->update(['current_budget' => $this->budget]);
+        });
     }
 
     private function markSucceeded(AutomationTask $task): void
