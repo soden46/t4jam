@@ -21,6 +21,8 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
     use Queueable;
     use RetriesMetaRequests;
 
+    private const LOCK_CONTENTION_DELAY_SECONDS = 5;
+
     public int $tries = 3;
 
     public int $timeout = 180;
@@ -115,7 +117,10 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
                 MetaFlowLog::info('queued automation meta update deferred by task lock', [
                     'automation_task_id' => $task->id,
                     'action' => $this->action,
+                    'retry_after_seconds' => self::LOCK_CONTENTION_DELAY_SECONDS,
                 ]);
+
+                $this->release(self::LOCK_CONTENTION_DELAY_SECONDS);
 
                 return;
             }

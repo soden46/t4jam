@@ -33,4 +33,16 @@ class AutomationTaskMutationService
         return $task->pending_meta_action === 'pause'
             || str_contains((string) $task->last_log, self::PENDING_PAUSE_MARKER);
     }
+
+    public function clearPendingPause(AutomationTask $task): void
+    {
+        if (! $this->hasPendingPause($task)) {
+            return;
+        }
+
+        $task->update([
+            'pending_meta_action' => null,
+            'meta_verification_due_at' => null,
+        ]);
+    }
 }

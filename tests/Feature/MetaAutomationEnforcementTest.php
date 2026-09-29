@@ -1160,6 +1160,106 @@ class MetaAutomationEnforcementTest extends TestCase
         Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
+    public function test_manual_pause_clears_pending_pause_after_successful_meta_pause(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->update([
+            'pending_meta_action' => 'pause',
+            'meta_verification_due_at' => now()->addMinute(),
+            'last_log' => 'Pending pause (rate limited). CPR masih di atas batas.',
+        ]);
+        Http::fake(['*' => Http::response(['success' => true])]);
+
+        $this->actingAs(User::firstOrFail())->postJson('/update-status-automation-tasks/', [
+            'automation_id' => $task->id,
+            'status' => 'false',
+        ])->assertOk();
+
+        $fresh = $task->fresh();
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->effective_status);
+        $this->assertNull($fresh->pending_meta_action);
+        $this->assertNull($fresh->meta_verification_due_at);
+        $this->assertSame('manual_pause', $fresh->last_budget_action);
+        Http::assertSent(fn ($request) => $request->method() === 'POST' && $request['status'] === 'PAUSED');
+    }
+
+    public function test_manual_pause_clears_pending_pause_when_target_is_already_paused(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+        $task->update([
+            'is_active' => true,
+            'pending_meta_action' => 'pause',
+            'meta_verification_due_at' => now()->addMinute(),
+            'last_log' => 'Pending pause (rate limited). CPR masih di atas batas.',
+        ]);
+        Http::fake(['*' => Http::response(['success' => true])]);
+
+        $this->actingAs(User::firstOrFail())->postJson('/update-status-automation-tasks/', [
+            'automation_id' => $task->id,
+            'status' => 'false',
+        ])->assertOk();
+
+        $fresh = $task->fresh();
+        $this->assertFalse($fresh->is_active);
+        $this->assertNull($fresh->pending_meta_action);
+        $this->assertNull($fresh->meta_verification_due_at);
+        $this->assertSame('manual_pause', $fresh->last_budget_action);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_update_automation_manual_pause_resolves_pending_pause_without_budget_mutation(): void
+    {
+        [, $task] = $this->automationFixture();
+        $startingBudget = (int) $task->starting_budget;
+        $task->update([
+            'pending_meta_action' => 'pause',
+            'meta_verification_due_at' => now()->addMinute(),
+            'last_log' => 'Pending pause (rate limited). CPR masih di atas batas.',
+        ]);
+        Http::fake(['*' => Http::response(['success' => true])]);
+
+        $this->actingAs(User::firstOrFail())->postJson('/update-automation-tasks/', [
+            'automation_id' => $task->id,
+            'automation_activation' => 'false',
+            'starting_budget' => 50000,
+        ])->assertOk();
+
+        $fresh = $task->fresh();
+        $this->assertFalse($fresh->is_active);
+        $this->assertNull($fresh->pending_meta_action);
+        $this->assertNull($fresh->meta_verification_due_at);
+        $this->assertSame($startingBudget, (int) $fresh->starting_budget);
+        $this->assertSame(100000, $task->campaign->fresh()->daily_budget);
+        Http::assertSent(fn ($request) => $request->method() === 'POST' && $request['status'] === 'PAUSED');
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && array_key_exists('daily_budget', $request->data()));
+    }
+
+    public function test_failed_manual_pause_keeps_pending_pause(): void
+    {
+        [, $task] = $this->automationFixture();
+        $dueAt = now()->addMinute()->startOfSecond();
+        $task->update([
+            'pending_meta_action' => 'pause',
+            'meta_verification_due_at' => $dueAt,
+            'last_log' => 'Pending pause (rate limited). CPR masih di atas batas.',
+        ]);
+        Http::fake(['*' => Http::response(['error' => ['code' => 100, 'message' => 'Meta rejected pause']], 400)]);
+
+        $this->actingAs(User::firstOrFail())->postJson('/update-status-automation-tasks/', [
+            'automation_id' => $task->id,
+            'status' => 'false',
+        ])->assertStatus(422);
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        $this->assertSame('pause', $fresh->pending_meta_action);
+        $this->assertTrue($fresh->meta_verification_due_at->equalTo($dueAt));
+    }
+
     public function test_duplicate_manual_status_requests_do_not_post_to_meta(): void
     {
         [, $task] = $this->automationFixture();
@@ -1204,6 +1304,31 @@ class MetaAutomationEnforcementTest extends TestCase
         $this->assertSame(80000, $task->campaign->fresh()->daily_budget);
         $this->assertSame(80000, $task->fresh()->current_budget);
         Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_queued_meta_mutation_is_released_when_task_lock_is_busy(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->update(['is_active' => false, 'last_log' => 'Sebelum queue']);
+        Http::fake(['*' => Http::response(['success' => true])]);
+        $job = (new PushMetaAutomationTaskUpdate($profile->id, $task->id, 'status', 'Update', active: false))
+            ->withFakeQueueInteractions();
+
+        Cache::lock('automation-task-mutation:'.$task->id, 120)->get(function () use ($job, $task): void {
+            $job->handle(app(MetaAdsSyncService::class));
+            $job->assertReleased(5);
+            $this->assertSame('Sebelum queue', $task->fresh()->last_log);
+            $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        });
+
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+
+        (new PushMetaAutomationTaskUpdate($profile->id, $task->id, 'status', 'Update', active: false))
+            ->handle(app(MetaAdsSyncService::class));
+
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        $this->assertSame('Update; Meta berhasil diupdate.', $task->fresh()->last_log);
+        Http::assertSent(fn ($request) => $request->method() === 'POST' && $request['status'] === 'PAUSED');
     }
 
     private function automationFixture(bool $writesEnabled = true, string $level = 'campaign'): array

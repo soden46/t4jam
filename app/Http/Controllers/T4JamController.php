@@ -504,13 +504,15 @@ class T4JamController extends Controller
                 return ['ok' => false, 'text' => 'Target campaign/ad set tidak ditemukan.'];
             }
 
-            $budgetChanged = $requestedBudget !== (int) $task->starting_budget;
-            $budgetNeedsMetaWrite = $requestedBudget !== (int) $target->daily_budget;
             $desiredStatus = $requestedActive ? 'ACTIVE' : 'PAUSED';
             $statusNeedsMetaWrite = $target->status !== $desiredStatus;
             $statusChanged = $requestedActive !== (bool) $task->is_active || $statusNeedsMetaWrite;
+            $resolvesPendingPause = ! $requestedActive && $this->taskMutations->hasPendingPause($task);
+            $deferBudgetMutation = $resolvesPendingPause && $requestedBudget !== (int) $target->daily_budget;
+            $budgetChanged = ! $deferBudgetMutation && $requestedBudget !== (int) $task->starting_budget;
+            $budgetNeedsMetaWrite = ! $deferBudgetMutation && $requestedBudget !== (int) $target->daily_budget;
 
-            if ($this->taskMutations->hasPendingPause($task) && ($requestedActive || $budgetNeedsMetaWrite)) {
+            if ($this->taskMutations->hasPendingPause($task) && $requestedActive) {
                 return ['ok' => false, 'pending' => true, 'text' => 'Pause otomatis masih menunggu konfirmasi Meta. Resume atau perubahan budget ditunda agar proteksi CPR tidak tertimpa.'];
             }
 
@@ -554,7 +556,7 @@ class T4JamController extends Controller
             $metaPushed = $metaBudgetPushed || $metaStatusPushed;
             $logMessage = $metaPushed ? 'Automation strategy berhasil diupdate; Meta berhasil diupdate.' : 'Automation strategy berhasil diupdate';
 
-            DB::transaction(function () use ($request, $task, $target, $logMessage, $budgetChanged, $requestedBudget, $requestedActive, $statusChanged, $manualAction): void {
+            DB::transaction(function () use ($request, $task, $target, $logMessage, $budgetChanged, $requestedBudget, $requestedActive, $statusChanged, $manualAction, $resolvesPendingPause, $deferBudgetMutation): void {
                 if ($budgetChanged) {
                     $this->persistLocalBudget($target, $requestedBudget, $task->level);
                 }
@@ -578,12 +580,18 @@ class T4JamController extends Controller
                     'last_budget_before' => $task->current_budget,
                     'last_budget_action' => $manualAction,
                 ] : []);
+                if ($deferBudgetMutation) {
+                    $taskData['starting_budget'] = $task->starting_budget;
+                }
 
                 if (($taskData['conversion'] ?? $task->conversion) !== $task->conversion) {
                     $taskData['current_result'] = 0;
                     $taskData['current_spend'] = 0;
                 }
                 $task->update($taskData);
+                if ($resolvesPendingPause) {
+                    $this->taskMutations->clearPendingPause($task);
+                }
 
                 AutomationLog::create([
                     'automation_task_id' => $task->id,
@@ -620,6 +628,7 @@ class T4JamController extends Controller
             }
 
             $desiredStatus = $isActive ? 'ACTIVE' : 'PAUSED';
+            $resolvesPendingPause = ! $isActive && $this->taskMutations->hasPendingPause($task);
             $metaPushed = false;
             if ($target->status !== $desiredStatus) {
                 $metaResult = $this->pushMetaStatus($task, $isActive, $metaSync, $target);
@@ -632,7 +641,7 @@ class T4JamController extends Controller
             $successMessage = $metaPushed
                 ? 'Status automation berhasil diperbarui; Meta berhasil diupdate.'
                 : 'Status automation sudah sesuai.';
-            DB::transaction(function () use ($task, $target, $isActive, $successMessage): void {
+            DB::transaction(function () use ($task, $target, $isActive, $successMessage, $resolvesPendingPause): void {
                 $target->update(['status' => $isActive ? 'ACTIVE' : 'PAUSED', 'effective_status' => $isActive ? 'ACTIVE' : 'PAUSED']);
                 $task->update([
                     'is_active' => $isActive,
@@ -641,6 +650,9 @@ class T4JamController extends Controller
                     'meta_verification_due_at' => $this->automationVerificationDueAt(),
                     'last_budget_action' => $isActive ? 'manual_resume' : 'manual_pause',
                 ]);
+                if ($resolvesPendingPause) {
+                    $this->taskMutations->clearPendingPause($task);
+                }
                 AutomationLog::create([
                     'automation_task_id' => $task->id,
                     'messages' => [$successMessage],

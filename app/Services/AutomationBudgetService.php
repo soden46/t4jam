@@ -1366,15 +1366,7 @@ class AutomationBudgetService
 
     private function clearPendingPause(AutomationTask $task): void
     {
-        if ($task->pending_meta_action !== 'pause'
-            && ! str_contains((string) $task->last_log, AutomationTaskMutationService::PENDING_PAUSE_MARKER)) {
-            return;
-        }
-
-        $task->update([
-            'pending_meta_action' => null,
-            'meta_verification_due_at' => null,
-        ]);
+        $this->taskMutations->clearPendingPause($task);
     }
 
     private function logPendingPauseCancellation(AutomationTask $task): void
