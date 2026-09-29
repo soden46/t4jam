@@ -112,18 +112,18 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
                     return ['skipped' => true];
                 }
 
-                if ($this->alreadyApplied($target)) {
-                    $this->syncLocalSuccess($task, $target);
-                    $this->resolvePendingPauseIfSatisfied($task);
-
-                    return ['skipped' => true];
-                }
-
                 if (! $this->stillRelevant($task)) {
                     MetaFlowLog::info('queued automation meta update skipped as stale', [
                         'automation_task_id' => $task->id,
                         'action' => $this->action,
                     ]);
+
+                    return ['skipped' => true];
+                }
+
+                if ($this->alreadyApplied($target)) {
+                    $this->syncLocalSuccess($task, $target);
+                    $this->resolvePendingPauseIfSatisfied($task);
 
                     return ['skipped' => true];
                 }

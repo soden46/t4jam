@@ -1327,6 +1327,51 @@ class MetaAutomationEnforcementTest extends TestCase
         Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
+    public function test_stale_queued_status_does_not_normalize_task_when_target_matches_old_intent(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $dueAt = now()->addMinute()->startOfSecond();
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+        $task->update([
+            'is_active' => true,
+            'pending_meta_action' => 'pause',
+            'meta_verification_due_at' => $dueAt,
+            'last_log' => 'Intent ACTIVE terbaru.',
+        ]);
+        Http::fake(['*' => Http::response(['success' => true])]);
+
+        (new PushMetaAutomationTaskUpdate($profile->id, $task->id, 'status', 'Update lama', active: false))
+            ->handle(app(MetaAdsSyncService::class));
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        $this->assertSame('pause', $fresh->pending_meta_action);
+        $this->assertTrue($fresh->meta_verification_due_at->equalTo($dueAt));
+        $this->assertSame('Intent ACTIVE terbaru.', $fresh->last_log);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_stale_queued_budget_does_not_normalize_task_when_target_matches_old_budget(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->campaign->update(['daily_budget' => 60000]);
+        $task->update([
+            'starting_budget' => 80000,
+            'current_budget' => 80000,
+            'last_log' => 'Intent budget terbaru.',
+        ]);
+        Http::fake(['*' => Http::response(['success' => true])]);
+
+        (new PushMetaAutomationTaskUpdate($profile->id, $task->id, 'budget', 'Update lama', budget: 60000))
+            ->handle(app(MetaAdsSyncService::class));
+
+        $this->assertSame(80000, $task->fresh()->current_budget);
+        $this->assertSame(60000, $task->campaign->fresh()->daily_budget);
+        $this->assertSame('Intent budget terbaru.', $task->fresh()->last_log);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
     public function test_queued_status_success_syncs_local_target(): void
     {
         [$profile, $task] = $this->automationFixture();
@@ -1441,11 +1486,11 @@ class MetaAutomationEnforcementTest extends TestCase
         Http::assertSent(fn ($request) => $request->method() === 'POST' && $request['daily_budget'] === 80000);
     }
 
-    public function test_queued_budget_noop_normalizes_stale_local_budget(): void
+    public function test_relevant_queued_budget_noop_skips_duplicate_post(): void
     {
         [$profile, $task] = $this->automationFixture();
         $task->campaign->update(['daily_budget' => 80000]);
-        $task->update(['starting_budget' => 80000, 'current_budget' => 60000]);
+        $task->update(['starting_budget' => 80000, 'current_budget' => 80000]);
         Http::fake(['*' => Http::response(['success' => true])]);
 
         (new PushMetaAutomationTaskUpdate($profile->id, $task->id, 'budget', 'Update', budget: 80000))
