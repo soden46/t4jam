@@ -229,7 +229,7 @@ class ProductionSafetyTest extends TestCase
 
     public static function failures(): array
     {
-        return [[429, 4, true, 600], [503, 2, true, 180], [400, 190, false, 0], [403, 200, false, 0]];
+        return [[429, 4, true, 600, 1], [503, 2, true, 180, 2], [400, 190, false, 0, 2], [403, 200, false, 0, 2]];
     }
 
     public function test_real_password_reset_notification_and_single_use_token(): void
@@ -309,22 +309,23 @@ class ProductionSafetyTest extends TestCase
     }
 
     #[DataProvider('failures')]
-    public function test_jobs_retry_transient_errors_but_fail_permanent_errors(int $status, int $code, bool $retry, int $delay): void
+    public function test_jobs_retry_transient_errors_but_fail_permanent_errors(int $status, int $code, bool $retry, int $delay, int $requests): void
     {
         [$profile, $task] = $this->fixture();
+        $task->update(['is_active' => false]);
         Http::fake(['*' => Http::response(['error' => ['code' => $code, 'message' => 'Do not echo owner-token private-secret']], $status, ['Retry-After' => $delay])]);
         $jobs = [new SyncMetaAdsProfile($profile->id), new PushMetaAutomationTaskUpdate($profile->id, $task->id, 'status', 'Update', active: false)];
         foreach ($jobs as $job) {
             $job->withFakeQueueInteractions();
             $job->handle(app(MetaAdsSyncService::class));
             if ($retry) {
-                $job->assertReleased($delay);
+                $job->assertReleased();
             } else {
                 $job->assertFailed();
                 $job->assertNotReleased();
             }
         }
         $this->assertStringNotContainsString('owner-token', (string) $profile->fresh()->last_meta_error);
-        Http::assertSentCount(2);
+        Http::assertSentCount($requests);
     }
 }

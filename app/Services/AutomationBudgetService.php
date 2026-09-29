@@ -27,13 +27,11 @@ class AutomationBudgetService
 
     private const BUDGET_INCREASE_LOCK_SECONDS = 120;
 
-    private const TASK_MUTATION_LOCK_SECONDS = 120;
-
-    private const PENDING_PAUSE_MARKER = 'Pending pause (rate limited).';
-
     private array $statusCache = [];
 
     private bool $stopBatch = false;
+
+    public function __construct(private readonly AutomationTaskMutationService $taskMutations) {}
 
     private const CONVERSION_ACTION_TYPES = [
         'purchase' => ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase', 'onsite_conversion.purchase'],
@@ -1119,7 +1117,7 @@ class AutomationBudgetService
 
     private function taskMutationLock(AutomationTask $task)
     {
-        return Cache::lock('automation-task-mutation:'.$task->id, self::TASK_MUTATION_LOCK_SECONDS);
+        return $this->taskMutations->lock($task);
     }
 
     private function assertNoPendingMetaAction(AutomationTask $task): bool
@@ -1129,8 +1127,7 @@ class AutomationBudgetService
 
     private function hasPendingPause(AutomationTask $task): bool
     {
-        return $task->pending_meta_action === 'pause'
-            || str_contains((string) $task->last_log, self::PENDING_PAUSE_MARKER);
+        return $this->taskMutations->hasPendingPause($task);
     }
 
     private function retryPendingPauseUnderLock(
@@ -1319,7 +1316,7 @@ class AutomationBudgetService
         $this->recordPendingPause($task, $profile, $cpr, $cprCap, $rateLimited);
         $reason = $rateLimited ? 'pause_failed_rate_limited' : 'cpr_pause_status_update_pending';
         $message = $rateLimited
-            ? self::PENDING_PAUSE_MARKER.' CPR cap terlewati, tetapi pause ke Meta ditunda karena rate limit.'
+            ? AutomationTaskMutationService::PENDING_PAUSE_MARKER.' CPR cap terlewati, tetapi pause ke Meta ditunda karena rate limit.'
             : 'CPR cap terlewati, tetapi pause ke Meta belum berhasil dan menunggu verifikasi ulang.';
 
         MetaFlowLog::warning('automation cpr cap status update pending', [
@@ -1356,21 +1353,21 @@ class AutomationBudgetService
         $task->update([
             'pending_meta_action' => 'pause',
             'meta_verification_due_at' => $dueAt,
-            'last_log' => self::PENDING_PAUSE_MARKER.' CPR Rp. '.number_format($cpr ?? 0, 0, ',', '.')
+            'last_log' => AutomationTaskMutationService::PENDING_PAUSE_MARKER.' CPR Rp. '.number_format($cpr ?? 0, 0, ',', '.')
                 .' vs cap Rp. '.number_format($cprCap ?? 0, 0, ',', '.').'.',
             'last_checked_at' => now(),
         ]);
 
         AutomationLog::create([
             'automation_task_id' => $task->id,
-            'messages' => [self::PENDING_PAUSE_MARKER],
+            'messages' => [AutomationTaskMutationService::PENDING_PAUSE_MARKER],
         ]);
     }
 
     private function clearPendingPause(AutomationTask $task): void
     {
         if ($task->pending_meta_action !== 'pause'
-            && ! str_contains((string) $task->last_log, self::PENDING_PAUSE_MARKER)) {
+            && ! str_contains((string) $task->last_log, AutomationTaskMutationService::PENDING_PAUSE_MARKER)) {
             return;
         }
 
@@ -1383,7 +1380,7 @@ class AutomationBudgetService
     private function logPendingPauseCancellation(AutomationTask $task): void
     {
         if ($task->pending_meta_action !== 'pause'
-            && ! str_contains((string) $task->last_log, self::PENDING_PAUSE_MARKER)) {
+            && ! str_contains((string) $task->last_log, AutomationTaskMutationService::PENDING_PAUSE_MARKER)) {
             return;
         }
 
@@ -1410,7 +1407,7 @@ class AutomationBudgetService
             ->where('is_active', true)
             ->where(function ($query): void {
                 $query->where('pending_meta_action', 'pause')
-                    ->orWhere('last_log', 'like', '%'.self::PENDING_PAUSE_MARKER.'%');
+                    ->orWhere('last_log', 'like', '%'.AutomationTaskMutationService::PENDING_PAUSE_MARKER.'%');
             })
             ->with(['campaign', 'adSet'])
             ->get();

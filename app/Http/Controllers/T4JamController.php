@@ -14,6 +14,7 @@ use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\T4JamProfile;
 use App\Services\AutomationBudgetService;
+use App\Services\AutomationTaskMutationService;
 use App\Services\MetaAdsClient;
 use App\Services\MetaAdsSyncService;
 use App\Support\MetaFlowLog;
@@ -32,6 +33,8 @@ use Throwable;
 class T4JamController extends Controller
 {
     private const NON_EDITABLE_META_STATUSES = ['ARCHIVED', 'DELETED'];
+
+    public function __construct(private readonly AutomationTaskMutationService $taskMutations) {}
 
     public function root(): RedirectResponse
     {
@@ -489,101 +492,116 @@ class T4JamController extends Controller
     {
         $this->validateAutomation($request);
         $task = AutomationTask::where('user_id', Auth::id())->with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
-        $budget = max(1000, (int) $request->input('starting_budget', $task->starting_budget));
+        $requestedBudget = max(1000, (int) $request->input('starting_budget', $task->starting_budget));
 
-        if ($budget < 1000) {
+        if ($requestedBudget < 1000) {
             return response()->json(['status' => 422, 'text' => 'Budget minimal adalah Rp. 1.000,-.'], 422);
         }
 
-        $budgetChanged = $budget !== (int) $task->starting_budget;
         $requestedActive = $this->automationActive($request);
-        $statusChanged = $requestedActive !== (bool) $task->is_active;
-        $manualAction = $statusChanged
-            ? ($requestedActive ? 'manual_resume' : 'manual_pause')
-            : ($budgetChanged ? 'manual_budget_decrease' : 'manual');
-        $baseMessage = 'Automation strategy berhasil diupdate';
-        $metaBudgetPushed = false;
-        $metaStatusPushed = false;
-        $target = $task->level === 'adset'
-            ? ($task->adSet ?? $task->ad_set_external_id)
-            : ($task->campaign ?? $task->campaign_external_id);
+        $outcome = $this->runManualTaskMutation($task, function (AutomationTask $task, Campaign|AdSet|null $target) use ($request, $requestedBudget, $requestedActive, $metaSync): array {
+            if (! $target instanceof Campaign && ! $target instanceof AdSet) {
+                return ['ok' => false, 'text' => 'Target campaign/ad set tidak ditemukan.'];
+            }
 
-        if ($budgetChanged || $this->shouldRefreshMetaBudget()) {
-            $metaResult = $this->pushMetaBudget($target, $budget, $task->level, $metaSync);
-            if (! $metaResult['ok']) {
+            $budgetChanged = $requestedBudget !== (int) $task->starting_budget;
+            $budgetNeedsMetaWrite = $requestedBudget !== (int) $target->daily_budget;
+            $desiredStatus = $requestedActive ? 'ACTIVE' : 'PAUSED';
+            $statusNeedsMetaWrite = $target->status !== $desiredStatus;
+            $statusChanged = $requestedActive !== (bool) $task->is_active || $statusNeedsMetaWrite;
+
+            if ($this->taskMutations->hasPendingPause($task) && ($requestedActive || $budgetNeedsMetaWrite)) {
+                return ['ok' => false, 'pending' => true, 'text' => 'Pause otomatis masih menunggu konfirmasi Meta. Resume atau perubahan budget ditunda agar proteksi CPR tidak tertimpa.'];
+            }
+
+            $manualAction = $statusChanged
+                ? ($requestedActive ? 'manual_resume' : 'manual_pause')
+                : ($budgetChanged ? 'manual_budget_decrease' : 'manual');
+            $metaBudgetPushed = false;
+            $metaStatusPushed = false;
+
+            if ($budgetNeedsMetaWrite) {
+                $metaResult = $this->pushMetaBudget($target, $requestedBudget, $task->level, $metaSync);
+                if (! $metaResult['ok']) {
+                    return ['ok' => false, 'text' => $metaResult['text']];
+                }
+                $metaBudgetPushed = ! ($metaResult['noop'] ?? false);
+            }
+
+            if ($statusNeedsMetaWrite) {
+                $metaResult = $this->pushMetaStatus($task, $requestedActive, $metaSync, $target);
+                if (! $metaResult['ok']) {
+                    if ($budgetNeedsMetaWrite && $metaBudgetPushed) {
+                        DB::transaction(function () use ($task, $target, $requestedBudget, $manualAction): void {
+                            $this->persistLocalBudget($target, $requestedBudget, $task->level);
+                            $task->update([
+                                'starting_budget' => $requestedBudget,
+                                'current_budget' => $requestedBudget,
+                                'last_budget_changed_at' => now(),
+                                'last_budget_before' => $task->current_budget,
+                                'last_budget_action' => $manualAction,
+                                'meta_verification_due_at' => $this->automationVerificationDueAt(),
+                                'last_log' => 'Budget Meta berhasil diupdate, tetapi perubahan status gagal.',
+                            ]);
+                        });
+                    }
+
+                    return ['ok' => false, 'text' => $metaResult['text']];
+                }
+                $metaStatusPushed = ! ($metaResult['noop'] ?? false);
+            }
+
+            $metaPushed = $metaBudgetPushed || $metaStatusPushed;
+            $logMessage = $metaPushed ? 'Automation strategy berhasil diupdate; Meta berhasil diupdate.' : 'Automation strategy berhasil diupdate';
+
+            DB::transaction(function () use ($request, $task, $target, $logMessage, $budgetChanged, $requestedBudget, $requestedActive, $statusChanged, $manualAction): void {
                 if ($budgetChanged) {
-                    return response()->json(['status' => 422, 'text' => $metaResult['text']], 422);
-                }
-            } else {
-                $metaBudgetPushed = true;
-            }
-        }
-
-        if ($statusChanged) {
-            $metaResult = $this->pushMetaStatus($task, $requestedActive, $metaSync);
-            if (! $metaResult['ok']) {
-                if ($budgetChanged && $metaBudgetPushed) {
-                    DB::transaction(function () use ($task, $target, $budget, $manualAction): void {
-                        $this->persistLocalBudget($target, $budget, $task->level);
-                        $task->update([
-                            'starting_budget' => $budget,
-                            'current_budget' => $budget,
-                            'last_budget_changed_at' => now(),
-                            'last_budget_before' => $task->current_budget,
-                            'last_budget_action' => $manualAction,
-                            'meta_verification_due_at' => $this->automationVerificationDueAt(),
-                            'last_log' => 'Budget Meta berhasil diupdate, tetapi perubahan status gagal.',
-                        ]);
-                    });
+                    $this->persistLocalBudget($target, $requestedBudget, $task->level);
                 }
 
-                return response()->json(['status' => 422, 'text' => $metaResult['text']], 422);
-            }
+                if ($statusChanged) {
+                    $target->update([
+                        'status' => $requestedActive ? 'ACTIVE' : 'PAUSED',
+                        'effective_status' => $requestedActive ? 'ACTIVE' : 'PAUSED',
+                    ]);
+                }
 
-            $metaStatusPushed = true;
-        }
+                $taskData = $this->automationPayload($request) + [
+                    'last_log' => $logMessage,
+                    'last_checked_at' => null,
+                    'meta_verification_due_at' => $this->automationVerificationDueAt(),
+                    'last_budget_action' => $manualAction,
+                    'is_active' => $requestedActive,
+                ] + ($budgetChanged ? [
+                    'current_budget' => $requestedBudget,
+                    'last_budget_changed_at' => now(),
+                    'last_budget_before' => $task->current_budget,
+                    'last_budget_action' => $manualAction,
+                ] : []);
 
-        $metaPushed = $metaBudgetPushed || $metaStatusPushed;
-        $logMessage = $metaPushed ? $baseMessage.'; Meta berhasil diupdate.' : $baseMessage;
+                if (($taskData['conversion'] ?? $task->conversion) !== $task->conversion) {
+                    $taskData['current_result'] = 0;
+                    $taskData['current_spend'] = 0;
+                }
+                $task->update($taskData);
 
-        DB::transaction(function () use ($request, $task, $target, $logMessage, $budgetChanged, $budget, $requestedActive, $statusChanged, $manualAction): void {
-            if ($budgetChanged) {
-                $this->persistLocalBudget($target, $budget, $task->level);
-            }
-
-            if ($statusChanged && ($target instanceof Campaign || $target instanceof AdSet)) {
-                $target->update([
-                    'status' => $requestedActive ? 'ACTIVE' : 'PAUSED',
-                    'effective_status' => $requestedActive ? 'ACTIVE' : 'PAUSED',
+                AutomationLog::create([
+                    'automation_task_id' => $task->id,
+                    'messages' => [$logMessage],
                 ]);
-            }
+            });
 
-            $taskData = $this->automationPayload($request) + [
-                'last_log' => $logMessage,
-                'last_checked_at' => null,
-                'meta_verification_due_at' => $this->automationVerificationDueAt(),
-                'last_budget_action' => $manualAction,
-                'is_active' => $requestedActive,
-            ] + ($budgetChanged ? [
-                'current_budget' => $budget,
-                'last_budget_changed_at' => now(),
-                'last_budget_before' => $task->current_budget,
-                'last_budget_action' => $manualAction,
-            ] : []);
-
-            if (($taskData['conversion'] ?? $task->conversion) !== $task->conversion) {
-                $taskData['current_result'] = 0;
-                $taskData['current_spend'] = 0;
-            }
-            $task->update($taskData);
-
-            AutomationLog::create([
-                'automation_task_id' => $task->id,
-                'messages' => [$logMessage],
-            ]);
+            return ['ok' => true, 'meta_pushed' => $metaPushed];
         });
 
-        return response()->json(['status' => 200, 'text' => $metaPushed ? 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.' : 'Automation strategy berhasil diupdate.']);
+        if ($outcome === false) {
+            return $this->taskMutationBusyResponse();
+        }
+        if (! $outcome['ok']) {
+            return response()->json(['status' => 422, 'text' => $outcome['text']], 422);
+        }
+
+        return response()->json(['status' => 200, 'text' => $outcome['meta_pushed'] ? 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.' : 'Automation strategy berhasil diupdate.']);
     }
 
     public function updateStatusAutomation(
@@ -593,29 +611,51 @@ class T4JamController extends Controller
     ): JsonResponse {
         $task = AutomationTask::where('user_id', Auth::id())->with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
         $isActive = $request->input('status', 'true') === 'true';
-        $metaResult = $this->pushMetaStatus($task, $isActive, $metaSync);
-        if (! $metaResult['ok']) {
-            return response()->json(['status' => 422, 'text' => $metaResult['text']], 422);
-        }
+        $outcome = $this->runManualTaskMutation($task, function (AutomationTask $task, Campaign|AdSet|null $target) use ($isActive, $metaSync): array {
+            if (! $target instanceof Campaign && ! $target instanceof AdSet) {
+                return ['ok' => false, 'text' => 'Target campaign/ad set tidak ditemukan.'];
+            }
+            if ($isActive && $this->taskMutations->hasPendingPause($task)) {
+                return ['ok' => false, 'text' => 'Pause otomatis masih menunggu konfirmasi Meta. Resume ditunda agar proteksi CPR tidak tertimpa.'];
+            }
 
-        $baseMessage = 'Status automation berhasil diperbarui';
-        $successMessage = $baseMessage.'; Meta berhasil diupdate.';
+            $desiredStatus = $isActive ? 'ACTIVE' : 'PAUSED';
+            $metaPushed = false;
+            if ($target->status !== $desiredStatus) {
+                $metaResult = $this->pushMetaStatus($task, $isActive, $metaSync, $target);
+                if (! $metaResult['ok']) {
+                    return ['ok' => false, 'text' => $metaResult['text']];
+                }
+                $metaPushed = ! ($metaResult['noop'] ?? false);
+            }
 
-        DB::transaction(function () use ($task, $isActive, $successMessage): void {
-            $target = $this->taskMetricTarget($task);
-            $target?->update(['status' => $isActive ? 'ACTIVE' : 'PAUSED', 'effective_status' => $isActive ? 'ACTIVE' : 'PAUSED']);
-            $task->update([
-                'is_active' => $isActive,
-                'last_log' => $successMessage,
-                'last_checked_at' => $isActive ? null : now(),
-                'meta_verification_due_at' => $this->automationVerificationDueAt(),
-                'last_budget_action' => $isActive ? 'manual_resume' : 'manual_pause',
-            ]);
-            AutomationLog::create([
-                'automation_task_id' => $task->id,
-                'messages' => [$successMessage],
-            ]);
+            $successMessage = $metaPushed
+                ? 'Status automation berhasil diperbarui; Meta berhasil diupdate.'
+                : 'Status automation sudah sesuai.';
+            DB::transaction(function () use ($task, $target, $isActive, $successMessage): void {
+                $target->update(['status' => $isActive ? 'ACTIVE' : 'PAUSED', 'effective_status' => $isActive ? 'ACTIVE' : 'PAUSED']);
+                $task->update([
+                    'is_active' => $isActive,
+                    'last_log' => $successMessage,
+                    'last_checked_at' => $isActive ? null : now(),
+                    'meta_verification_due_at' => $this->automationVerificationDueAt(),
+                    'last_budget_action' => $isActive ? 'manual_resume' : 'manual_pause',
+                ]);
+                AutomationLog::create([
+                    'automation_task_id' => $task->id,
+                    'messages' => [$successMessage],
+                ]);
+            });
+
+            return ['ok' => true, 'meta_pushed' => $metaPushed];
         });
+
+        if ($outcome === false) {
+            return $this->taskMutationBusyResponse();
+        }
+        if (! $outcome['ok']) {
+            return response()->json(['status' => 422, 'text' => $outcome['text']], 422);
+        }
 
         $verificationCompleted = true;
         if ($isActive) {
@@ -694,47 +734,55 @@ class T4JamController extends Controller
     public function turunBudget(Request $request, MetaAdsSyncService $metaSync): JsonResponse
     {
         $task = AutomationTask::where('user_id', Auth::id())->with(['campaign', 'adSet'])->findOrFail($request->input('automation_id'));
-        $target = $task->level === 'adset'
-            ? ($task->adSet ?? $task->ad_set_external_id)
-            : ($task->campaign ?? $task->campaign_external_id);
-        $budget = max(1000, (int) $task->starting_budget);
-
-        if ($budget < 1000) {
-            return response()->json(['status' => 422, 'text' => 'Budget minimal adalah Rp. 1.000,-.'], 422);
-        }
-
-        $metaResult = $this->pushMetaBudget($target, $budget, $task->level, $metaSync);
-        if (! $metaResult['ok']) {
-            return response()->json(['status' => 422, 'text' => $metaResult['text']], 422);
-        }
-
-        $baseMessage = 'Menurunkan budget manual berhasil';
-        $successMessage = $baseMessage.'; Meta berhasil diupdate.';
-
-        DB::transaction(function () use ($target, $budget, $task, $successMessage): void {
-            $this->persistLocalBudget($target, $budget, $task->level);
-
-            $updates = [
-                'current_budget' => $task->starting_budget,
-                'last_log' => $successMessage,
-                'last_checked_at' => now(),
-                'meta_verification_due_at' => $this->automationVerificationDueAt(),
-                'last_budget_changed_at' => now(),
-                'last_budget_before' => $task->current_budget,
-            ];
-
-            if ($task->is_active) {
-                $updates['last_budget_action'] = 'manual_budget_decrease';
+        $outcome = $this->runManualTaskMutation($task, function (AutomationTask $task, Campaign|AdSet|null $target) use ($metaSync): array {
+            if (! $target instanceof Campaign && ! $target instanceof AdSet) {
+                return ['ok' => false, 'text' => 'Target campaign/ad set tidak ditemukan.'];
+            }
+            $budget = max(1000, (int) $task->starting_budget);
+            if ($this->taskMutations->hasPendingPause($task)) {
+                return ['ok' => false, 'text' => 'Pause otomatis masih menunggu konfirmasi Meta. Perubahan budget ditunda agar proteksi CPR tidak tertimpa.'];
+            }
+            if ((int) $target->daily_budget === $budget) {
+                return ['ok' => true, 'noop' => true];
             }
 
-            $task->update($updates);
-            AutomationLog::create([
-                'automation_task_id' => $task->id,
-                'messages' => [$successMessage],
-            ]);
+            $metaResult = $this->pushMetaBudget($target, $budget, $task->level, $metaSync);
+            if (! $metaResult['ok']) {
+                return ['ok' => false, 'text' => $metaResult['text']];
+            }
+
+            $successMessage = 'Menurunkan budget manual berhasil; Meta berhasil diupdate.';
+            DB::transaction(function () use ($target, $budget, $task, $successMessage): void {
+                $this->persistLocalBudget($target, $budget, $task->level);
+                $updates = [
+                    'current_budget' => $task->starting_budget,
+                    'last_log' => $successMessage,
+                    'last_checked_at' => now(),
+                    'meta_verification_due_at' => $this->automationVerificationDueAt(),
+                    'last_budget_changed_at' => now(),
+                    'last_budget_before' => $task->current_budget,
+                ];
+                if ($task->is_active) {
+                    $updates['last_budget_action'] = 'manual_budget_decrease';
+                }
+                $task->update($updates);
+                AutomationLog::create([
+                    'automation_task_id' => $task->id,
+                    'messages' => [$successMessage],
+                ]);
+            });
+
+            return ['ok' => true, 'noop' => false];
         });
 
-        return response()->json(['status' => 200, 'text' => 'Budget berhasil diturunkan manual dan Meta berhasil diupdate.']);
+        if ($outcome === false) {
+            return $this->taskMutationBusyResponse();
+        }
+        if (! $outcome['ok']) {
+            return response()->json(['status' => 422, 'text' => $outcome['text']], 422);
+        }
+
+        return response()->json(['status' => 200, 'text' => $outcome['noop'] ? 'Budget Meta sudah sesuai.' : 'Budget berhasil diturunkan manual dan Meta berhasil diupdate.']);
     }
 
     public function getInterest(Request $request): JsonResponse
@@ -1132,9 +1180,24 @@ class T4JamController extends Controller
         return ['ok' => true, 'profile_id' => $profile->id];
     }
 
-    private function shouldRefreshMetaBudget(): bool
+    private function runManualTaskMutation(AutomationTask $task, \Closure $callback): mixed
     {
-        return (bool) config('services.meta.enable_writes') && $this->metaCredentialProfile()->hasAccessToken();
+        return $this->taskMutations->runLocked($task, function () use ($task, $callback): mixed {
+            $task->refresh();
+            $task->load(['campaign', 'adSet']);
+            $target = $this->taskMetricTarget($task);
+            $target?->refresh();
+
+            return $callback($task, $target);
+        });
+    }
+
+    private function taskMutationBusyResponse(): JsonResponse
+    {
+        return response()->json([
+            'status' => 409,
+            'text' => 'Perubahan automation sedang diproses. Coba lagi beberapa saat.',
+        ], 409);
     }
 
     private function pushMetaBudget(Campaign|AdSet|string|null $target, int $budget, string $level, MetaAdsSyncService $metaSync): array
@@ -1156,6 +1219,10 @@ class T4JamController extends Controller
             ]);
 
             return ['ok' => false, 'text' => 'Target campaign/ad set tidak ditemukan.'];
+        }
+
+        if (($target instanceof Campaign || $target instanceof AdSet) && (int) $target->daily_budget === $budget) {
+            return ['ok' => true, 'noop' => true];
         }
 
         $readiness = $this->metaWriteReadiness('Budget belum dikirim ke Meta karena write mode belum aktif.');
@@ -1186,13 +1253,13 @@ class T4JamController extends Controller
             return ['ok' => false, 'text' => $this->metaAutomationErrorMessage($exception)];
         }
 
-        return ['ok' => true];
+        return ['ok' => true, 'pushed' => true];
     }
 
-    private function pushMetaStatus(AutomationTask $task, bool $active, MetaAdsSyncService $metaSync): array
+    private function pushMetaStatus(AutomationTask $task, bool $active, MetaAdsSyncService $metaSync, Campaign|AdSet|null $target = null): array
     {
         $targetId = $task->level === 'adset' ? $task->ad_set_external_id : $task->campaign_external_id;
-        $target = $this->taskMetricTarget($task);
+        $target ??= $this->taskMetricTarget($task);
 
         if ($target && ! $this->editableMetaTarget($target)) {
             return ['ok' => false, 'text' => ucfirst($task->level).' ini sudah dihapus/diarsipkan di Meta. Klik Reload lalu pilih target aktif.'];
@@ -1206,6 +1273,10 @@ class T4JamController extends Controller
             ]);
 
             return ['ok' => false, 'text' => 'Target campaign/ad set tidak ditemukan.'];
+        }
+
+        if ($target && $target->status === ($active ? 'ACTIVE' : 'PAUSED')) {
+            return ['ok' => true, 'noop' => true];
         }
 
         $readiness = $this->metaWriteReadiness('Status belum dikirim ke Meta karena write mode belum aktif.');
@@ -1237,7 +1308,7 @@ class T4JamController extends Controller
             return ['ok' => false, 'text' => $this->metaAutomationErrorMessage($exception)];
         }
 
-        return ['ok' => true];
+        return ['ok' => true, 'pushed' => true];
     }
 
     private function persistLocalBudget(Campaign|AdSet|string|null $target, int $budget, string $level): void

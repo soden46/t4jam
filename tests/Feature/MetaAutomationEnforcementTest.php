@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\PushMetaAutomationTaskUpdate;
 use App\Jobs\SyncMetaAdsAccount;
 use App\Models\AutomationTask;
 use App\Models\Campaign;
@@ -943,7 +944,7 @@ class MetaAutomationEnforcementTest extends TestCase
         $this->assertSame('pause', $task->fresh()->last_budget_action);
     }
 
-    public function test_active_task_marks_manual_budget_decrease_after_manual_budget_decrease(): void
+    public function test_manual_budget_noop_preserves_action_when_target_already_has_requested_budget(): void
     {
         [, $task] = $this->automationFixture();
         $task->update([
@@ -953,7 +954,7 @@ class MetaAutomationEnforcementTest extends TestCase
 
         $this->postManualBudgetDecrease($task)->assertOk();
 
-        $this->assertSame('manual_budget_decrease', $task->fresh()->last_budget_action);
+        $this->assertSame('manual', $task->fresh()->last_budget_action);
     }
 
     public function test_schedule_pause_ignores_period_when_outside_window(): void
@@ -1108,6 +1109,101 @@ class MetaAutomationEnforcementTest extends TestCase
         $this->assertNotNull(collect($response->json('data'))->firstWhere('id', $task->id));
 
         Http::assertNotSent(fn ($request) => str_contains($request->url(), 'graph.facebook.com'));
+    }
+
+    public function test_manual_status_mutation_skips_when_task_lock_is_held(): void
+    {
+        [, $task] = $this->automationFixture();
+        $this->prepareManualActivation($task);
+        Http::fake(['*' => Http::response(['success' => true])]);
+
+        Cache::lock('automation-task-mutation:'.$task->id, 120)->get(function () use ($task): void {
+            $this->activateTask($task)->assertStatus(409);
+        });
+
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame('PAUSED', $task->campaign->fresh()->status);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_manual_budget_mutation_skips_when_task_lock_is_held(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->campaign->update(['daily_budget' => 100000]);
+        $task->update(['starting_budget' => 50000, 'current_budget' => 100000]);
+        Http::fake(['*' => Http::response(['success' => true])]);
+
+        Cache::lock('automation-task-mutation:'.$task->id, 120)->get(function () use ($task): void {
+            $this->postManualBudgetDecrease($task)->assertStatus(409);
+        });
+
+        $this->assertSame(100000, $task->campaign->fresh()->daily_budget);
+        $this->assertSame(100000, $task->fresh()->current_budget);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_manual_resume_preserves_pending_pause_safety_state(): void
+    {
+        [, $task] = $this->automationFixture();
+        $this->prepareManualActivation($task);
+        $task->update([
+            'pending_meta_action' => 'pause',
+            'last_log' => 'Pending pause (rate limited). CPR masih di atas batas.',
+        ]);
+        Http::fake(['*' => Http::response(['success' => true])]);
+
+        $this->activateTask($task)->assertStatus(422);
+
+        $fresh = $task->fresh();
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame('pause', $fresh->pending_meta_action);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_duplicate_manual_status_requests_do_not_post_to_meta(): void
+    {
+        [, $task] = $this->automationFixture();
+        Http::fake(['*' => Http::response(['success' => true])]);
+        $this->actingAs(User::firstOrFail())->postJson('/update-status-automation-tasks/', [
+            'automation_id' => $task->id,
+            'status' => 'true',
+        ])->assertOk();
+
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+        $task->update(['is_active' => false]);
+        $this->actingAs(User::firstOrFail())->postJson('/update-status-automation-tasks/', [
+            'automation_id' => $task->id,
+            'status' => 'false',
+        ])->assertOk();
+
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_duplicate_manual_budget_request_does_not_post_to_meta(): void
+    {
+        [, $task] = $this->automationFixture();
+        $task->campaign->update(['daily_budget' => 100000]);
+        $task->update(['starting_budget' => 100000, 'current_budget' => 100000]);
+        Http::fake(['*' => Http::response(['success' => true])]);
+
+        $this->postManualBudgetDecrease($task)->assertOk()->assertJsonPath('text', 'Budget Meta sudah sesuai.');
+
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_stale_queued_budget_mutation_cannot_overwrite_newer_budget(): void
+    {
+        [$profile, $task] = $this->automationFixture();
+        $task->campaign->update(['daily_budget' => 80000]);
+        $task->update(['starting_budget' => 80000, 'current_budget' => 80000]);
+        Http::fake(['*' => Http::response(['success' => true])]);
+
+        (new PushMetaAutomationTaskUpdate($profile->id, $task->id, 'budget', 'Update', budget: 60000))
+            ->handle(app(MetaAdsSyncService::class));
+
+        $this->assertSame(80000, $task->campaign->fresh()->daily_budget);
+        $this->assertSame(80000, $task->fresh()->current_budget);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
     private function automationFixture(bool $writesEnabled = true, string $level = 'campaign'): array
