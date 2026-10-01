@@ -102,11 +102,12 @@ class MetaAutomationReconciliationService
         $freshAfter = now()->subSeconds($this->freshSeconds());
         $notDue = (clone $query)->where('meta_verification_due_at', '>', $now)->count();
         $fresh = (clone $query)
-            ->where('is_active', true)
             ->whereNull('pending_meta_action')
             ->whereNull('metrics_unavailable_at')
             ->whereNull('meta_verification_due_at')
             ->where('last_metrics_synced_at', '>', $freshAfter)
+            ->get()
+            ->filter(fn (AutomationTask $task) => $this->hasSyncableTarget($task))
             ->count();
 
         $tasks = $query
@@ -119,16 +120,15 @@ class MetaAutomationReconciliationService
                     ->orWhereNotNull('metrics_unavailable_at')
                     ->orWhereNotNull('meta_verification_due_at')
                     ->orWhere(function (Builder $stale) use ($freshAfter): void {
-                        $stale->where('is_active', true)
-                            ->where(function (Builder $metrics) use ($freshAfter): void {
-                                $metrics->whereNull('last_metrics_synced_at')
-                                    ->orWhere('last_metrics_synced_at', '<=', $freshAfter);
-                            });
+                        $stale->where(function (Builder $metrics) use ($freshAfter): void {
+                            $metrics->whereNull('last_metrics_synced_at')
+                                ->orWhere('last_metrics_synced_at', '<=', $freshAfter);
+                        });
                     });
             })
             ->orderByRaw('CASE WHEN pending_meta_action IS NOT NULL THEN 0 WHEN meta_verification_due_at IS NOT NULL THEN 1 WHEN metrics_unavailable_at IS NOT NULL THEN 2 ELSE 3 END')
             ->get()
-            ->filter(fn (AutomationTask $task) => $this->target($task) !== null)
+            ->filter(fn (AutomationTask $task) => $this->hasSyncableTarget($task))
             ->values();
 
         return [
@@ -446,6 +446,15 @@ class MetaAutomationReconciliationService
     private function target(AutomationTask $task): Campaign|AdSet|null
     {
         return $task->level === 'adset' ? $task->adSet : $task->campaign;
+    }
+
+    private function hasSyncableTarget(AutomationTask $task): bool
+    {
+        $target = $this->target($task);
+
+        return $target !== null
+            && ! in_array(strtoupper((string) $target->status), ['ARCHIVED', 'DELETED'], true)
+            && ! in_array(strtoupper((string) $target->effective_status), ['ARCHIVED', 'DELETED'], true);
     }
 
     private function normalizeAdAccountId(string $id): string

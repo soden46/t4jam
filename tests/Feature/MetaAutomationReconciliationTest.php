@@ -7,6 +7,7 @@ use App\Models\AutomationTask;
 use App\Models\T4JamProfile;
 use App\Models\User;
 use App\Services\MetaAdsSyncService;
+use App\Services\MetaAutomationReconciliationService;
 use App\Services\MetaRateLimitService;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -46,12 +47,13 @@ class MetaAutomationReconciliationTest extends TestCase
 
     public function test_fresh_active_task_is_not_reconciled_again(): void
     {
-        [, $task] = $this->fixture();
+        [$profile, $task] = $this->fixture();
         $task->update(['last_metrics_synced_at' => now(), 'metrics_unavailable_at' => null, 'meta_verification_due_at' => null]);
         Http::fake();
 
-        $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
+        $summary = app(MetaAutomationReconciliationService::class)->reconcileProfile($profile);
 
+        $this->assertSame(1, $summary['skipped_fresh']);
         Http::assertNothingSent();
     }
 
@@ -244,27 +246,24 @@ class MetaAutomationReconciliationTest extends TestCase
         $this->assertNoFullSyncRequests();
     }
 
-    public function test_reconciliation_calls_meta_only_for_relevant_active_task_accounts(): void
+    public function test_paused_task_with_fresh_metrics_is_skipped_as_fresh(): void
     {
-        [, $task] = $this->fixture();
-        $task->update(['maximum_budget' => 100000]);
-        $inactive = $task->replicate();
-        $inactive->id = (string) str()->uuid();
-        $inactive->campaign_external_id = 'inactive-campaign';
-        $inactive->campaign_name = 'Inactive campaign';
-        $inactive->is_active = false;
-        $inactive->pending_meta_action = null;
-        $inactive->metrics_unavailable_at = null;
-        $inactive->meta_verification_due_at = null;
-        $inactive->save();
-        $this->fakeReconciliation($task, 'ACTIVE', 100000, 10000, 1);
+        [$profile, $task] = $this->fixture();
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+        $task->update([
+            'is_active' => false,
+            'last_budget_action' => 'manual_pause',
+            'last_metrics_synced_at' => now(),
+            'pending_meta_action' => null,
+            'metrics_unavailable_at' => null,
+            'meta_verification_due_at' => null,
+        ]);
+        Http::fake();
 
-        $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
+        $summary = app(MetaAutomationReconciliationService::class)->reconcileProfile($profile);
 
-        Http::assertNotSent(fn ($request) => str_contains($request->url(), 'inactive-campaign'));
-        Http::assertSentCount(2);
-        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign_external_id.'?'));
-        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign_external_id.'/insights'));
+        $this->assertSame(1, $summary['skipped_fresh']);
+        Http::assertNothingSent();
     }
 
     public function test_pending_pause_is_prioritized_and_target_limit_bounds_the_profile_batch(): void
@@ -376,41 +375,75 @@ class MetaAutomationReconciliationTest extends TestCase
         Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
-    public function test_paused_task_syncs_valid_current_day_metric(): void
+    public function test_paused_task_with_stale_metrics_is_selected_for_reconciliation(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $task->update([
+            'is_active' => false,
+            'counter_cpr' => false,
+            'last_budget_action' => 'manual_pause',
+            'current_spend' => 25976,
+            'current_result' => 1,
+            'last_metrics_synced_at' => now()->subMinutes(4),
+            'pending_meta_action' => null,
+            'metrics_unavailable_at' => null,
+            'meta_verification_due_at' => null,
+        ]);
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+        $this->fakeReconciliation($task, 'PAUSED', 100000, 18259, 0);
+
+        $summary = app(MetaAutomationReconciliationService::class)->reconcileProfile($profile);
+
+        $this->assertSame(1, $summary['groups']);
+        $this->assertGreaterThanOrEqual(2, $summary['api_calls']);
+        $this->assertSame(1, $summary['updated']);
+        $this->assertSame(18259, $task->fresh()->current_spend);
+        $this->assertSame(0, $task->fresh()->current_result);
+        $this->assertNull($task->fresh()->metrics_unavailable_at);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_paused_task_syncs_valid_current_day_metric_without_pending_flags(): void
     {
         [, $task] = $this->fixture();
         $task->update([
             'is_active' => false,
-            'counter_cpr' => true,
+            'counter_cpr' => false,
             'last_budget_action' => 'pause',
-            'pause_cpr_cap' => 10000,
             'current_spend' => 25976,
             'current_result' => 1,
             'last_metrics_synced_at' => now()->subMinutes(4),
-            'metrics_unavailable_at' => now()->subMinute(),
+            'pending_meta_action' => null,
+            'metrics_unavailable_at' => null,
+            'meta_verification_due_at' => null,
         ]);
         $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
         $this->fakeReconciliation($task, 'PAUSED', 100000, 18259, 0);
 
         $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
 
-        $this->assertSame(18259, $task->fresh()->current_spend);
-        $this->assertSame(0, $task->fresh()->current_result);
-        $this->assertNull($task->fresh()->metrics_unavailable_at);
+        $fresh = $task->fresh();
+        $this->assertSame(18259, $fresh->current_spend);
+        $this->assertSame(0, $fresh->current_result);
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame('pause', $fresh->last_budget_action);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
-    public function test_paused_task_keeps_last_known_metric_when_meta_returns_no_row(): void
+    public function test_paused_task_empty_insight_preserves_last_known_metric_without_pending_flags(): void
     {
         [, $task] = $this->fixture();
         $syncedAt = now()->subMinutes(4)->startOfSecond();
         $task->update([
             'is_active' => false,
+            'counter_cpr' => false,
+            'last_budget_action' => 'manual_pause',
             'current_spend' => 18259,
             'current_result' => 0,
             'last_metrics_synced_at' => $syncedAt,
-            'metrics_unavailable_at' => now()->subMinute(),
-            'pending_meta_action' => 'pause',
-            'meta_verification_due_at' => now()->subSecond(),
+            'pending_meta_action' => null,
+            'metrics_unavailable_at' => null,
+            'meta_verification_due_at' => null,
         ]);
         $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
         $this->fakeEmptyInsightReconciliation($task, 'PAUSED');
@@ -422,6 +455,51 @@ class MetaAutomationReconciliationTest extends TestCase
         $this->assertSame(0, $fresh->current_result);
         $this->assertTrue($fresh->last_metrics_synced_at->equalTo($syncedAt));
         $this->assertNotNull($fresh->metrics_unavailable_at);
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame('manual_pause', $fresh->last_budget_action);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_paused_manual_task_metric_sync_does_not_auto_resume(): void
+    {
+        $this->assertPausedTaskMetricSyncDoesNotResume('manual_pause');
+    }
+
+    public function test_paused_schedule_task_metric_sync_does_not_auto_resume(): void
+    {
+        $this->assertPausedTaskMetricSyncDoesNotResume('schedule_pause');
+    }
+
+    public function test_paused_meta_sync_task_metric_sync_does_not_auto_resume(): void
+    {
+        $this->assertPausedTaskMetricSyncDoesNotResume('meta_sync');
+    }
+
+    public function test_terminal_paused_target_is_not_reconciled(): void
+    {
+        [, $task] = $this->fixture();
+        $task->update(['is_active' => false, 'last_metrics_synced_at' => now()->subMinutes(4)]);
+        $task->campaign->update(['status' => 'ARCHIVED', 'effective_status' => 'ARCHIVED']);
+        Http::fake();
+
+        $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
+
+        Http::assertNothingSent();
+    }
+
+    public function test_paused_task_with_missing_target_is_not_reconciled(): void
+    {
+        [, $task] = $this->fixture();
+        $task->update([
+            'is_active' => false,
+            'campaign_id' => null,
+            'last_metrics_synced_at' => now()->subMinutes(4),
+        ]);
+        Http::fake();
+
+        $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
+
+        Http::assertNothingSent();
     }
 
     public function test_existing_full_sync_and_five_minute_enforcement_schedules_remain_registered(): void
@@ -509,6 +587,33 @@ class MetaAutomationReconciliationTest extends TestCase
 
             return Http::response([], 404);
         });
+    }
+
+    private function assertPausedTaskMetricSyncDoesNotResume(string $lastBudgetAction): void
+    {
+        [, $task] = $this->fixture();
+        $task->update([
+            'is_active' => false,
+            'counter_cpr' => false,
+            'last_budget_action' => $lastBudgetAction,
+            'current_spend' => 25976,
+            'current_result' => 1,
+            'last_metrics_synced_at' => now()->subMinutes(4),
+            'pending_meta_action' => null,
+            'metrics_unavailable_at' => null,
+            'meta_verification_due_at' => null,
+        ]);
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+        $this->fakeReconciliation($task, 'PAUSED', 100000, 18259, 0);
+
+        $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertFalse($fresh->is_active);
+        $this->assertSame($lastBudgetAction, $fresh->last_budget_action);
+        $this->assertSame(18259, $fresh->current_spend);
+        $this->assertSame(0, $fresh->current_result);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
     private function duplicateTask(AutomationTask $task, string $campaignExternalId): AutomationTask
