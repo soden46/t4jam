@@ -783,6 +783,11 @@ class AutomationBudgetService
             }
 
             $metrics = $this->metricSnapshot($insights);
+
+            if ($metrics === null) {
+                continue;
+            }
+
             $target->update($this->insightPayload($metrics));
             $freshTargets[$targetKey] = $metrics;
         }
@@ -859,8 +864,20 @@ class AutomationBudgetService
                         }
                     }
 
-                    // A direct successful response with no rows means the target has no
-                    // delivery in this period. Provider failures above remain unavailable.
+                    if ($insights === []) {
+                        MetaFlowLog::info('automation target insight unavailable', [
+                            'profile_id' => $profile->id,
+                            'automation_task_id' => $targetData['tasks'][0]->id,
+                            'ad_account_id' => $adAccountId,
+                            'level' => $level,
+                            'target_id' => $target->external_id,
+                            'date_preset' => $datePreset,
+                            'has_insight_row' => false,
+                        ]);
+
+                        continue;
+                    }
+
                     $freshInsights[$targetKey] = $insights;
                 }
             }
@@ -1223,8 +1240,12 @@ class AutomationBudgetService
             ->all();
     }
 
-    public function metricSnapshot(array $insights): array
+    public function metricSnapshot(array $insights): ?array
     {
+        if ($insights === []) {
+            return null;
+        }
+
         $actions = collect($insights['actions'] ?? []);
         $costs = collect($insights['cost_per_action_type'] ?? []);
 

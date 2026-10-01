@@ -204,12 +204,27 @@ class MetaAutomationReconciliationService
             return $this->groupFailure($profile, $targetId, $level, $source, $exception, $apiCalls, $updated);
         }
 
+        if ($insights === []) {
+            $this->logMetricsUnavailable($profile, $tasks, $targetId, $level, $datePreset);
+            $this->markMetricsUnavailable($tasks, $profile);
+
+            return ['api_calls' => $apiCalls, 'updated' => $updated, 'paused' => 0, 'rate_limited' => false];
+        }
+
+        $metrics = $this->automation->metricSnapshot($insights);
+
+        if ($metrics === null) {
+            $this->logMetricsUnavailable($profile, $tasks, $targetId, $level, $datePreset);
+            $this->markMetricsUnavailable($tasks, $profile);
+
+            return ['api_calls' => $apiCalls, 'updated' => $updated, 'paused' => 0, 'rate_limited' => false];
+        }
+
         $freshTargets = [];
 
-        DB::transaction(function () use ($tasks, $insights, &$freshTargets): void {
+        DB::transaction(function () use ($tasks, $metrics, &$freshTargets): void {
             foreach ($tasks as $task) {
                 $target = $this->target($task);
-                $metrics = $this->automation->metricSnapshot($insights);
                 $target->update($this->automation->insightPayload($metrics));
                 $freshTargets[$task->level.':'.$target->external_id] = $metrics;
                 $changes = [
@@ -228,6 +243,8 @@ class MetaAutomationReconciliationService
                 $task->update($changes);
             }
         });
+
+        $this->logMetricsSynced($profile, $tasks, $targetId, $level, $datePreset, $insights, $metrics);
 
         $campaignIds = $level === 'campaign' ? $tasks->pluck('campaign_external_id')->filter()->values()->all() : [];
         $adSetIds = $level === 'adset' ? $tasks->pluck('ad_set_external_id')->filter()->values()->all() : [];
@@ -305,9 +322,10 @@ class MetaAutomationReconciliationService
         ];
     }
 
-    private function markMetricsUnavailable(Collection $tasks, T4JamProfile $profile, MetaAdsException $exception): void
+    private function markMetricsUnavailable(Collection $tasks, T4JamProfile $profile, ?MetaAdsException $exception = null): void
     {
-        $rateLimited = $this->rateLimit->isRateLimitCode($exception->metaCode, $exception->httpStatus);
+        $rateLimited = $exception !== null
+            && $this->rateLimit->isRateLimitCode($exception->metaCode, $exception->httpStatus);
 
         $tasks->each(function (AutomationTask $task) use ($profile, $rateLimited): void {
             $attempt = max(1, (int) $task->meta_reconciliation_failure_count + 1);
@@ -319,6 +337,48 @@ class MetaAutomationReconciliationService
                 'metrics_unavailable_at' => now(),
                 'meta_verification_due_at' => $dueAt,
                 'meta_reconciliation_failure_count' => $rateLimited ? $task->meta_reconciliation_failure_count : min(3, $attempt),
+            ]);
+        });
+    }
+
+    private function logMetricsSynced(
+        T4JamProfile $profile,
+        Collection $tasks,
+        string $targetId,
+        string $level,
+        string $datePreset,
+        array $insights,
+        array $metrics,
+    ): void {
+        $tasks->each(function (AutomationTask $task) use ($profile, $targetId, $level, $datePreset, $insights, $metrics): void {
+            MetaFlowLog::info('automation metric synced', [
+                'profile_id' => $profile->id,
+                'automation_task_id' => $task->id,
+                'target_id' => $targetId,
+                'level' => $level,
+                'date_preset' => $datePreset,
+                'has_insight_row' => true,
+                'raw_spend' => $insights['spend'] ?? null,
+                'spend' => $metrics['spend'],
+                'conversion' => $task->conversion,
+                'conversion_result' => $metrics['results'][$task->conversion] ?? 0,
+                'date_start' => $insights['date_start'] ?? null,
+                'date_stop' => $insights['date_stop'] ?? null,
+            ]);
+        });
+    }
+
+    private function logMetricsUnavailable(T4JamProfile $profile, Collection $tasks, string $targetId, string $level, string $datePreset): void
+    {
+        $tasks->each(function (AutomationTask $task) use ($profile, $targetId, $level, $datePreset): void {
+            MetaFlowLog::info('automation metric unavailable', [
+                'profile_id' => $profile->id,
+                'automation_task_id' => $task->id,
+                'target_id' => $targetId,
+                'level' => $level,
+                'date_preset' => $datePreset,
+                'has_insight_row' => false,
+                'conversion' => $task->conversion,
             ]);
         });
     }

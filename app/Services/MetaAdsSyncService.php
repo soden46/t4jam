@@ -293,8 +293,14 @@ class MetaAdsSyncService
 
     private function insightPayload(array $insights): array
     {
+        $metrics = app(AutomationBudgetService::class)->metricSnapshot($insights);
+
+        if ($metrics === null) {
+            return [];
+        }
+
         return app(AutomationBudgetService::class)->insightPayload(
-            app(AutomationBudgetService::class)->metricSnapshot($insights),
+            $metrics,
         );
     }
 

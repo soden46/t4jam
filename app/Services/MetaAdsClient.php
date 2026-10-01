@@ -75,7 +75,7 @@ class MetaAdsClient
     public function campaignInsights(string $campaignId, ?string $datePreset = null): array
     {
         $response = $this->get("/{$campaignId}/insights", [
-            'fields' => 'spend,reach,actions,cost_per_action_type,inline_link_clicks',
+            'fields' => 'spend,reach,actions,cost_per_action_type,inline_link_clicks,date_start,date_stop',
             'date_preset' => $datePreset ?? config('services.meta.insights_date_preset', 'last_30d'),
             'level' => 'campaign',
             'use_unified_attribution_setting' => true,
@@ -116,7 +116,7 @@ class MetaAdsClient
     public function adSetInsights(string $adSetId, ?string $datePreset = null): array
     {
         $response = $this->get("/{$adSetId}/insights", [
-            'fields' => 'spend,reach,actions,cost_per_action_type,inline_link_clicks',
+            'fields' => 'spend,reach,actions,cost_per_action_type,inline_link_clicks,date_start,date_stop',
             'date_preset' => $datePreset ?? config('services.meta.insights_date_preset', 'last_30d'),
             'level' => 'adset',
             'use_unified_attribution_setting' => true,
@@ -244,7 +244,7 @@ class MetaAdsClient
     private function accountInsights(string $adAccountId, string $level, string $idField, ?string $datePreset): array
     {
         return $this->paginate("/{$adAccountId}/insights", [
-            'fields' => implode(',', [$idField, 'spend', 'reach', 'actions', 'cost_per_action_type', 'inline_link_clicks']),
+            'fields' => implode(',', [$idField, 'spend', 'reach', 'actions', 'cost_per_action_type', 'inline_link_clicks', 'date_start', 'date_stop']),
             'date_preset' => $datePreset ?? config('services.meta.insights_date_preset', 'last_30d'),
             'level' => $level,
             'use_unified_attribution_setting' => true,

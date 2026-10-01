@@ -311,6 +311,119 @@ class MetaAutomationReconciliationTest extends TestCase
         $this->assertTrue($fresh->meta_verification_due_at->gte(now()->addSeconds(59)));
     }
 
+    public function test_empty_insight_row_keeps_previous_metrics_stale_without_cpr_mutation(): void
+    {
+        [, $task] = $this->fixture();
+        $syncedAt = now()->subMinutes(4)->startOfSecond();
+        $task->update([
+            'current_spend' => 25976,
+            'current_result' => 1,
+            'cpr_cap' => 25000,
+            'last_metrics_synced_at' => $syncedAt,
+            'last_checked_at' => $syncedAt,
+        ]);
+
+        $this->fakeEmptyInsightReconciliation($task);
+
+        $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertSame(25976, $fresh->current_spend);
+        $this->assertSame(1, $fresh->current_result);
+        $this->assertTrue($fresh->last_metrics_synced_at->equalTo($syncedAt));
+        $this->assertTrue($fresh->last_checked_at->equalTo($syncedAt));
+        $this->assertNotNull($fresh->metrics_unavailable_at);
+        $this->assertTrue($fresh->meta_verification_due_at->gte(now()->addSeconds(59)));
+        $this->assertTrue($fresh->is_active);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_explicit_zero_insight_row_is_synced_and_does_not_pause_active_task(): void
+    {
+        [, $task] = $this->fixture();
+        $task->update(['current_spend' => 25976, 'current_result' => 1, 'cpr_cap' => 25000]);
+        $this->fakeReconciliation($task, 'ACTIVE', 100000, 0, 0);
+
+        $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertSame(0, $fresh->current_spend);
+        $this->assertSame(0, $fresh->current_result);
+        $this->assertNotNull($fresh->last_metrics_synced_at);
+        $this->assertNull($fresh->metrics_unavailable_at);
+        $this->assertTrue($fresh->is_active);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_reconciliation_syncs_known_today_metric_without_pausing_below_cap(): void
+    {
+        [, $task] = $this->fixture();
+        $task->update([
+            'conversion' => 'initiate_checkout',
+            'cpr_cap' => 25000,
+            'current_spend' => 0,
+            'current_result' => 0,
+        ]);
+        $this->fakeReconciliation($task, 'ACTIVE', 100000, 18259, 0);
+
+        $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertSame(18259, $fresh->current_spend);
+        $this->assertSame(0, $fresh->current_result);
+        $this->assertSame(18259, $fresh->current_result > 0 ? (int) round($fresh->current_spend / $fresh->current_result) : $fresh->current_spend);
+        $this->assertTrue($fresh->is_active);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_paused_task_syncs_valid_current_day_metric(): void
+    {
+        [, $task] = $this->fixture();
+        $task->update([
+            'is_active' => false,
+            'counter_cpr' => true,
+            'last_budget_action' => 'pause',
+            'pause_cpr_cap' => 10000,
+            'current_spend' => 25976,
+            'current_result' => 1,
+            'last_metrics_synced_at' => now()->subMinutes(4),
+            'metrics_unavailable_at' => now()->subMinute(),
+        ]);
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+        $this->fakeReconciliation($task, 'PAUSED', 100000, 18259, 0);
+
+        $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
+
+        $this->assertSame(18259, $task->fresh()->current_spend);
+        $this->assertSame(0, $task->fresh()->current_result);
+        $this->assertNull($task->fresh()->metrics_unavailable_at);
+    }
+
+    public function test_paused_task_keeps_last_known_metric_when_meta_returns_no_row(): void
+    {
+        [, $task] = $this->fixture();
+        $syncedAt = now()->subMinutes(4)->startOfSecond();
+        $task->update([
+            'is_active' => false,
+            'current_spend' => 18259,
+            'current_result' => 0,
+            'last_metrics_synced_at' => $syncedAt,
+            'metrics_unavailable_at' => now()->subMinute(),
+            'pending_meta_action' => 'pause',
+            'meta_verification_due_at' => now()->subSecond(),
+        ]);
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+        $this->fakeEmptyInsightReconciliation($task, 'PAUSED');
+
+        $this->artisan('t4jam:reconcile-meta-automation')->assertSuccessful();
+
+        $fresh = $task->fresh();
+        $this->assertSame(18259, $fresh->current_spend);
+        $this->assertSame(0, $fresh->current_result);
+        $this->assertTrue($fresh->last_metrics_synced_at->equalTo($syncedAt));
+        $this->assertNotNull($fresh->metrics_unavailable_at);
+    }
+
     public function test_existing_full_sync_and_five_minute_enforcement_schedules_remain_registered(): void
     {
         $events = collect(app(Schedule::class)->events());
@@ -371,6 +484,26 @@ class MetaAutomationReconciliationTest extends TestCase
                     'status' => $status,
                     'effective_status' => $status,
                     'daily_budget' => (string) $budget,
+                ]);
+            }
+
+            return Http::response([], 404);
+        });
+    }
+
+    private function fakeEmptyInsightReconciliation(AutomationTask $task, string $status = 'ACTIVE'): void
+    {
+        Http::fake(function ($request) use ($task, $status) {
+            if (str_contains($request->url(), '/'.$task->campaign_external_id.'/insights')) {
+                return Http::response(['data' => []]);
+            }
+
+            if (str_contains($request->url(), '/'.$task->campaign_external_id)) {
+                return Http::response([
+                    'id' => $task->campaign_external_id,
+                    'status' => $status,
+                    'effective_status' => $status,
+                    'daily_budget' => '100000',
                 ]);
             }
 
