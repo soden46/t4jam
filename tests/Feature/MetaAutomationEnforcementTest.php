@@ -1080,8 +1080,8 @@ class MetaAutomationEnforcementTest extends TestCase
         $this->assertSame(31980, $row['current_spend']);
         $this->assertSame(1, $row['current_hasil']);
         $this->assertSame(100000, $row['current_budget']);
-        $this->assertTrue($row['metrics_available']);
-        $this->assertFalse($row['metrics_stale']);
+        $this->assertFalse($row['metrics_available']);
+        $this->assertTrue($row['metrics_stale']);
 
         Http::assertNotSent(fn ($request) => str_contains($request->url(), 'graph.facebook.com'));
     }

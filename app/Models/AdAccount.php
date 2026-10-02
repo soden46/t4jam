@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-#[Fillable(['account_id', 'external_id', 'name', 'currency', 'account_status'])]
+#[Fillable(['account_id', 'external_id', 'name', 'currency', 'account_status', 'timezone_name'])]
 class AdAccount extends Model
 {
     public function campaigns(): HasMany

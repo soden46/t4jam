@@ -1088,8 +1088,9 @@ class T4JamController extends Controller
         $result = max(0, (int) $task->current_result);
         $metricsUnavailableAt = $task->metrics_unavailable_at;
         $lastMetricsSyncedAt = $task->last_metrics_synced_at;
-        $metricsStale = $metricsUnavailableAt !== null
-            && ($lastMetricsSyncedAt === null || $metricsUnavailableAt->gte($lastMetricsSyncedAt));
+        $metricsStale = $lastMetricsSyncedAt === null
+            || $lastMetricsSyncedAt->lte(now()->subSeconds(max(30, (int) config('services.meta.automation_reconcile_fresh_seconds', 180))))
+            || ($metricsUnavailableAt !== null && $metricsUnavailableAt->gte($lastMetricsSyncedAt));
         $metricsAvailable = $lastMetricsSyncedAt !== null && ! $metricsStale;
 
         return [

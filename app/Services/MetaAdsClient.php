@@ -25,7 +25,7 @@ class MetaAdsClient
     public function adAccounts(): array
     {
         $accounts = $this->paginate('/me/adaccounts', [
-            'fields' => 'account_id,id,name,currency,account_status',
+            'fields' => 'account_id,id,name,currency,account_status,timezone_name',
             'limit' => 100,
         ]);
 
@@ -82,6 +82,10 @@ class MetaAdsClient
             'limit' => 1,
         ]);
 
+        if (! isset($response['data']) || ! is_array($response['data'])) {
+            throw new MetaAdsException('Respons Insights Meta tidak valid.');
+        }
+
         return $response['data'][0] ?? [];
     }
 
@@ -122,6 +126,10 @@ class MetaAdsClient
             'use_unified_attribution_setting' => true,
             'limit' => 1,
         ]);
+
+        if (! isset($response['data']) || ! is_array($response['data'])) {
+            throw new MetaAdsException('Respons Insights Meta tidak valid.');
+        }
 
         return $response['data'][0] ?? [];
     }
@@ -222,7 +230,7 @@ class MetaAdsClient
     {
         try {
             return $this->paginate("/{$businessId}/{$edge}", [
-                'fields' => 'account_id,id,name,currency,account_status',
+                'fields' => 'account_id,id,name,currency,account_status,timezone_name',
                 'limit' => 100,
             ]);
         } catch (MetaAdsException $exception) {
@@ -444,7 +452,7 @@ class MetaAdsClient
     public function adAccount(string $adAccountId): array
     {
         return $this->get("/{$adAccountId}", [
-            'fields' => 'account_id,id,name,currency,account_status',
+            'fields' => 'account_id,id,name,currency,account_status,timezone_name',
         ]);
     }
 }

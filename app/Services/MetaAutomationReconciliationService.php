@@ -148,7 +148,7 @@ class MetaAutomationReconciliationService
             : null;
 
         return AutomationTask::query()
-            ->with(['campaign.adAccount', 'adSet.adAccount'])
+            ->with(['campaign.adAccount', 'adSet.adAccount', 'adAccount'])
             ->where('user_id', $profile->user_id)
             ->when($adAccountExternalId, fn (Builder $query) => $account ? $query->where('ad_account_id', $account->id) : $query->whereRaw('1 = 0'))
             ->when($campaignIds !== [] || $adSetIds !== [], function (Builder $query) use ($campaignIds, $adSetIds): void {
@@ -202,6 +202,10 @@ class MetaAutomationReconciliationService
             $this->markMetricsUnavailable($tasks, $profile, $exception);
 
             return $this->groupFailure($profile, $targetId, $level, $source, $exception, $apiCalls, $updated);
+        }
+
+        if ($insights === []) {
+            $insights = $this->automation->emptyDailyInsights($tasks);
         }
 
         if ($insights === []) {
@@ -281,6 +285,7 @@ class MetaAutomationReconciliationService
                         'pending_meta_action' => null,
                         'meta_verification_due_at' => null,
                         'last_budget_action' => 'pause',
+                        'cpr_paused_at' => now(),
                         'last_log' => 'Pending pause telah terkonfirmasi dari Meta Ads Manager.',
                     ];
                 } elseif ($task->pending_meta_action === null) {

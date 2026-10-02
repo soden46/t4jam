@@ -11,6 +11,7 @@ use App\Models\Campaign;
 use App\Models\T4JamProfile;
 use App\Support\MetaFlowLog;
 use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -60,9 +61,9 @@ class AutomationBudgetService
 
     public function automationInsightsDatePreset(): string
     {
-        $datePreset = trim((string) config('services.meta.automation_insights_date_preset', 'last_30d'));
+        $datePreset = trim((string) config('services.meta.automation_insights_date_preset', 'today'));
 
-        return $datePreset !== '' ? $datePreset : 'last_30d';
+        return $datePreset !== '' ? $datePreset : 'today';
     }
 
     public function pauseTasksOverCprCap(T4JamProfile $profile, MetaAdsClient $client, bool $refreshMetrics = false, ?array $syncedTargets = null, string $source = 'scheduler'): int
@@ -221,7 +222,7 @@ class AutomationBudgetService
             ? AdAccount::query()->where('external_id', $adAccountExternalId)->first()
             : null;
         $tasks = AutomationTask::query()
-            ->with(['campaign', 'adSet'])
+            ->with(['campaign', 'adSet', 'adAccount'])
             ->where('user_id', $profile->user_id)
             ->when($adAccountExternalId, function ($query) use ($account): void {
                 if ($account) {
@@ -254,7 +255,6 @@ class AutomationBudgetService
                     ->orWhere(function ($pausedQuery): void {
                         $pausedQuery
                             ->where('is_active', false)
-                            ->where('counter_cpr', true)
                             ->where(function ($pauseStateQuery): void {
                                 $pauseStateQuery
                                     ->where('last_budget_action', 'pause');
@@ -279,7 +279,7 @@ class AutomationBudgetService
                 ->filter(function (AutomationTask $task) use ($profile, $client, $forceDue, $source): bool {
                     $scheduleContinued = $this->applyScheduledStatusIfNeeded($task, $client, $profile, $source);
 
-                    if (! $forceDue && ! $this->isDue($task)) {
+                    if (! $forceDue && ! $this->isDue($task) && ! $this->isDailyResumeDue($task)) {
                         return false;
                     }
 
@@ -349,6 +349,14 @@ class AutomationBudgetService
                     }
 
                     $metrics = $freshTargets[$targetKey] ?? null;
+                    if ($metrics !== null && $this->automationInsightsDatePreset() === 'today'
+                        && isset($metrics['date_stop'])
+                        && $metrics['date_stop'] !== $this->automationDayStart($task)->toDateString()) {
+                        $reason = 'insight_unavailable';
+                        $task->update(['metrics_unavailable_at' => now()]);
+
+                        return;
+                    }
                     $spend = (int) ($metrics['spend'] ?? $task->current_spend);
                     $result = $metrics !== null
                         ? max(0, (int) ($metrics['results'][$task->conversion] ?? 0))
@@ -368,7 +376,7 @@ class AutomationBudgetService
                         if ((int) $task->pause_cpr_cap >= (int) $task->cpr_cap) {
                             $reason = 'invalid_recovery_threshold';
                         }
-                        $this->resumeTaskIfEligible($task, $target, $client, $profile, $result, $cpr);
+                        $this->resumeTaskIfEligible($task, $target, $client, $profile, $result, $cpr, $metrics !== null);
 
                         return;
                     }
@@ -480,6 +488,7 @@ class AutomationBudgetService
                                 'last_log' => $message,
                                 'last_checked_at' => now(),
                                 'last_budget_action' => 'pause',
+                                'cpr_paused_at' => now(),
                             ]);
                             AutomationLog::create([
                                 'automation_task_id' => $task->id,
@@ -529,7 +538,7 @@ class AutomationBudgetService
 
                     return;
                 } finally {
-                    $action = ($task->last_budget_action !== $beforeAction || ($task->last_budget_action === 'increase' && $beforeLog !== $task->last_log)) && in_array($task->last_budget_action, ['pause', 'resume', 'increase', 'schedule_pause', 'schedule_resume', 'manual_pause', 'manual_resume', 'manual_budget_decrease'], true) ? $task->last_budget_action : 'none';
+                    $action = ($task->last_budget_action !== $beforeAction || ($task->last_budget_action === 'increase' && $beforeLog !== $task->last_log)) && in_array($task->last_budget_action, ['pause', 'resume', 'daily_resume', 'increase', 'schedule_pause', 'schedule_resume', 'manual_pause', 'manual_resume', 'manual_budget_decrease'], true) ? $task->last_budget_action : 'none';
                     $this->logEvaluation($profile, $task, $action, $action === 'none' ? $reason : null, $source);
                 }
             });
@@ -682,36 +691,57 @@ class AutomationBudgetService
         T4JamProfile $profile,
         int $result,
         int $cpr,
+        bool $metricsFresh,
     ): void {
         $recoveryCap = (int) $task->pause_cpr_cap;
+        $dailyResume = $metricsFresh && $this->isDailyResumeDue($task) && $cpr < (int) $task->cpr_cap;
+        $counterResume = $task->counter_cpr && $recoveryCap > 0 && $recoveryCap < (int) $task->cpr_cap
+            && $result > 0 && $cpr <= $recoveryCap;
 
-        if (! $task->counter_cpr || $task->last_budget_action !== 'pause' || $target->status !== 'PAUSED'
-            || $recoveryCap >= (int) $task->cpr_cap
-            || ! config('services.meta.enable_writes') || $result <= 0 || $recoveryCap <= 0 || $cpr > $recoveryCap) {
+        if ((! $dailyResume && ! $counterResume) || $task->last_budget_action !== 'pause' || $target->status !== 'PAUSED'
+            || ! config('services.meta.enable_writes')) {
             return;
         }
 
-        $this->taskMutationLock($task)->get(function () use ($task, $target, $client, $profile, $result, $cpr, $recoveryCap): void {
+        $this->taskMutationLock($task)->get(function () use ($task, $target, $client, $profile, $metricsFresh): void {
             $task->refresh();
             $target->refresh();
+            $result = (int) $task->current_result;
+            $cpr = $result > 0 ? (int) round($task->current_spend / $result) : (int) $task->current_spend;
+            $recoveryCap = (int) $task->pause_cpr_cap;
+            $dailyResume = $metricsFresh && $this->isDailyResumeDue($task)
+                && $task->last_metrics_synced_at?->gte($this->automationDayStart($task))
+                && $task->metrics_unavailable_at === null && $cpr < (int) $task->cpr_cap;
+            $counterResume = $task->counter_cpr && $recoveryCap > 0 && $recoveryCap < (int) $task->cpr_cap
+                && $result > 0 && $cpr <= $recoveryCap;
 
             // A CPR recovery candidate is intentionally inactive until Meta accepts
             // the ACTIVE mutation. Do not reject that expected state.
-            if ($task->is_active || ! $task->counter_cpr || $task->last_budget_action !== 'pause' || $target->status !== 'PAUSED'
-                || $recoveryCap >= (int) $task->cpr_cap || ! config('services.meta.enable_writes')
-                || $result <= 0 || $recoveryCap <= 0 || $cpr > $recoveryCap || ! $this->writableMetaTarget($target)) {
+            if ($task->is_active || (! $dailyResume && ! $counterResume) || $task->last_budget_action !== 'pause' || $target->status !== 'PAUSED'
+                || ! config('services.meta.enable_writes') || ! $this->isWithinAutomationWindow($task)
+                || ! $this->writableMetaTarget($target)) {
                 return;
             }
 
-            if (! $this->assertNoPendingMetaAction($task)) {
+            if ($task->pending_meta_action !== null || ! $this->assertNoPendingMetaAction($task)) {
                 return;
             }
 
             try {
+                if ($dailyResume) {
+                    $remote = $task->level === 'adset' ? $client->adSet($target->external_id) : $client->campaign($target->external_id);
+                    if (($remote['id'] ?? null) !== $target->external_id || ($remote['status'] ?? null) !== 'PAUSED'
+                        || in_array($remote['effective_status'] ?? null, ['DELETED', 'ARCHIVED'], true)) {
+                        return;
+                    }
+                }
                 if ($task->level === 'adset') {
-                    $client->updateAdSetStatus($target->external_id, true);
+                    $response = $client->updateAdSetStatus($target->external_id, true);
                 } else {
-                    $client->updateCampaignStatus($target->external_id, true);
+                    $response = $client->updateCampaignStatus($target->external_id, true);
+                }
+                if (($response['success'] ?? false) !== true) {
+                    throw new MetaAdsException('Meta belum mengonfirmasi aktivasi automation.');
                 }
             } catch (MetaAdsException $exception) {
                 MetaFlowLog::warning('automation cpr recovery failed', [
@@ -727,13 +757,13 @@ class AutomationBudgetService
                 return;
             }
 
-            $message = sprintf(
+            $message = $dailyResume ? 'Campaign otomatis diaktifkan kembali pada hari baru setelah pause CPR.' : sprintf(
                 'Campaign otomatis diaktifkan kembali karena CPR Rp. %s sudah di bawah batas recovery Rp. %s.',
                 number_format($cpr, 0, ',', '.'),
                 number_format($recoveryCap, 0, ',', '.'),
             );
 
-            DB::transaction(function () use ($task, $target, $message): void {
+            DB::transaction(function () use ($task, $target, $message, $dailyResume): void {
                 $target->update([
                     'status' => 'ACTIVE',
                     'effective_status' => 'ACTIVE',
@@ -742,7 +772,8 @@ class AutomationBudgetService
                     'is_active' => true,
                     'last_log' => $message,
                     'last_checked_at' => now(),
-                    'last_budget_action' => 'resume',
+                    'last_budget_action' => $dailyResume ? 'daily_resume' : 'resume',
+                    'cpr_paused_at' => null,
                 ]);
                 AutomationLog::create([
                     'automation_task_id' => $task->id,
@@ -752,6 +783,43 @@ class AutomationBudgetService
 
             $this->clearPendingPause($task);
         });
+    }
+
+    public function automationDayStart(AutomationTask $task): Carbon
+    {
+        $timezone = $task->adAccount?->timezone_name ?: 'Asia/Jakarta';
+
+        return now($timezone)->startOfDay();
+    }
+
+    private function isDailyResumeDue(AutomationTask $task): bool
+    {
+        return $this->automationInsightsDatePreset() === 'today'
+            && ! $task->is_active && $task->last_budget_action === 'pause'
+            && (int) $task->cpr_cap > 0
+            && $task->cpr_paused_at !== null
+            && $task->cpr_paused_at->lt($this->automationDayStart($task));
+    }
+
+    public function emptyDailyInsights(Collection $tasks): array
+    {
+        if ($this->automationInsightsDatePreset() !== 'today' || $tasks->isEmpty()) {
+            return [];
+        }
+
+        // Only a successful, empty target response may start a new day's totals.
+        // Preserve known positive totals from today if Meta temporarily omits them.
+        foreach ($tasks as $task) {
+            if ($task->last_metrics_synced_at === null && ! $this->isDailyResumeDue($task)) {
+                return [];
+            }
+            if ($task->last_metrics_synced_at?->gte($this->automationDayStart($task))
+                && ((int) $task->current_spend > 0 || (int) $task->current_result > 0)) {
+                return [];
+            }
+        }
+
+        return ['spend' => '0', 'actions' => []];
     }
 
     private function refreshMetrics(Collection $tasks, MetaAdsClient $client, T4JamProfile $profile, ?string $datePreset = null): array
@@ -862,6 +930,10 @@ class AutomationBudgetService
 
                             continue;
                         }
+                    }
+
+                    if ($insights === []) {
+                        $insights = $this->emptyDailyInsights(collect($targetData['tasks']));
                     }
 
                     if ($insights === []) {
@@ -1214,6 +1286,7 @@ class AutomationBudgetService
                 'last_log' => $message,
                 'last_checked_at' => now(),
                 'last_budget_action' => 'pause',
+                'cpr_paused_at' => now(),
             ]);
             AutomationLog::create([
                 'automation_task_id' => $task->id,
@@ -1267,6 +1340,7 @@ class AutomationBudgetService
             'results' => $results,
             'costs' => $conversionCosts,
             'insights_synced_at' => now(),
+            'date_stop' => $insights['date_stop'] ?? null,
         ];
     }
 

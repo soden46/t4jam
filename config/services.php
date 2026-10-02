@@ -38,7 +38,7 @@ return [
         'insights_date_preset' => env('META_GRAPH_INSIGHTS_DATE_PRESET', 'last_30d'),
         'automation_insights_date_preset' => env(
             'META_GRAPH_AUTOMATION_INSIGHTS_DATE_PRESET',
-            env('META_GRAPH_INSIGHTS_DATE_PRESET', 'last_30d'),
+            'today',
         ),
         'automation_reconcile_fresh_seconds' => (int) env('META_AUTOMATION_RECONCILE_FRESH_SECONDS', 180),
         'automation_reconcile_max_targets' => (int) env('META_AUTOMATION_RECONCILE_MAX_TARGETS', 25),

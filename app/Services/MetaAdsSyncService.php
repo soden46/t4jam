@@ -232,6 +232,7 @@ class MetaAdsSyncService
                 'name' => $accountData['name'] ?? $accountData['id'],
                 'currency' => $accountData['currency'] ?? 'IDR',
                 'account_status' => $accountData['account_status'] ?? null,
+                ...isset($accountData['timezone_name']) ? ['timezone_name' => $accountData['timezone_name']] : [],
             ],
         );
 

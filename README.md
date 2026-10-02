@@ -118,11 +118,22 @@ Formula automation budget yang dipakai:
 
 - Pause: `CPR >= CPR Cap` dan toggle pause aktif.
 - Recovery: `0 < Resume CPR < CPR Cap` wajib; konfigurasi invalid ditolak pada form dan tidak diresume oleh service. Jika `counter_cpr` aktif dan pause sebelumnya dilakukan automation, aktifkan kembali saat `CPR <= Resume CPR` dan ada minimal satu conversion.
+- Recovery hari berikutnya: task dengan alasan pause CPR dapat ON kembali meskipun `counter_cpr` mati atau conversion hari ini masih nol. Wajib sudah berganti hari, berada dalam jam ON/OFF yang diatur, Insights hari ini berhasil dibaca, CPR hari ini di bawah cap, tidak ada perubahan Meta yang pending, dan Meta mengonfirmasi aktivasi. Pause manual/Meta tidak menjadi kandidat aturan harian ini.
 - Scale: jika `CPR <= 80% x CPR Cap`, minimal ada 3 conversion, dan sudah 72 jam sejak perubahan budget terakhir, naikkan budget `15%`.
 - Batas: budget baru tidak boleh melewati `Maximum Increasing Budget`; nilai `0` berarti tidak dibatasi.
 - Jam kerja: bila `use_on_off` aktif, bot hanya mengevaluasi task di antara jam ON dan OFF. Perubahan budget dicatat sebagai baseline, manual, increase, pause, atau resume.
 
 Angka 15%, 72 jam, 3 conversion, dan ambang 80% adalah kebijakan konservatif aplikasi yang disintesis dari praktik scaling; Meta menyediakan metrik serta endpoint perubahan budget, tetapi tidak menetapkan satu formula universal untuk semua akun.
+
+### Spend harian dan kesegaran dashboard
+
+`META_GRAPH_AUTOMATION_INSIGHTS_DATE_PRESET=today` adalah default automation, terpisah dari default Insights umum `last_30d`. Tampilan, rekonsiliasi, full sync metrik automation, dan pemeriksaan CPR menggunakan periode automation yang sama. Override periode selain `today` menonaktifkan recovery harian. Budget/spend mencapai batas budget tidak memicu auto-pause; maximum budget hanya membatasi kenaikan.
+
+Rekonsiliasi `t4jam:reconcile-meta-automation` dijadwalkan setiap menit, dengan interval kesegaran default 180 detik, termasuk untuk task paused. Dashboard membaca database setiap 5 detik dan menandai data yang melewati interval itu sebagai stale. Jika cron server tidak berjalan, polling dashboard tidak mengambil data baru dari Meta.
+
+Respons target Insights kosong yang berhasil pada hari baru memulai spend/hasil dari nol. Respons kosong tidak menghapus angka positif yang sudah tersinkron hari ini. Error API tetap mempertahankan data terakhir dan menandainya unavailable. Pergantian hari mengikuti `timezone_name` akun yang disimpan saat sync akun; akun lama tanpa timezone memakai `Asia/Jakarta`. Jam ON/OFF tetap menggunakan `Asia/Jakarta`.
+
+Deploy perubahan recovery harian memerlukan migration `2026_10_02_000001_add_automation_daily_recovery_state` dan konfigurasi automation `today`, lalu refresh config cache sesuai proses deployment. Waktu pause CPR disimpan dalam `cpr_paused_at`, terpisah dari waktu pemeriksaan metrik. Task CPR lama yang tidak memiliki catatan waktu pause mulai menghitung pergantian hari dari waktu migration; migration tidak menyalakan iklan. Pastikan scheduler dan sync akun berjalan untuk mendapatkan timezone akun yang sebenarnya.
 
 Agar scheduler berjalan otomatis di server, aktifkan Laravel scheduler melalui cron:
 
