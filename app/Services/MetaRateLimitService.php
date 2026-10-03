@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Exceptions\MetaAdsException;
 use App\Models\T4JamProfile;
+use DateTimeInterface;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 
 class MetaRateLimitService
@@ -20,35 +22,65 @@ class MetaRateLimitService
     public function record(T4JamProfile $profile, ?int $retryAfter): void
     {
         $seconds = $this->normalizeSeconds($retryAfter);
+        $until = now()->addSeconds($seconds);
 
         Cache::put(
             $this->cooldownKey($profile),
-            now()->addSeconds($seconds),
-            now()->addSeconds($seconds)->addSeconds(1),
+            $until->getTimestamp(),
+            $until->copy()->addSecond(),
         );
     }
 
     public function isRateLimited(T4JamProfile $profile): bool
     {
-        $until = Cache::get($this->cooldownKey($profile));
+        $until = $this->cooldownUntil($profile);
 
         return $until !== null && $until->isFuture();
     }
 
     public function remainingSeconds(T4JamProfile $profile): int
     {
-        $until = Cache::get($this->cooldownKey($profile));
+        $until = $this->cooldownUntil($profile);
 
         if (! $until) {
             return 0;
         }
 
-        return max(0, now()->diffInSeconds($until, false));
+        return max(0, (int) ceil(now()->diffInSeconds($until, false)));
     }
 
-    public function cooldownUntil(T4JamProfile $profile): mixed
+    public function cooldownUntil(T4JamProfile $profile): ?Carbon
     {
-        return Cache::get($this->cooldownKey($profile));
+        $until = Cache::get($this->cooldownKey($profile));
+
+        if ($until === null) {
+            return null;
+        }
+
+        if (is_int($until)) {
+            return Carbon::createFromTimestamp($until, now()->getTimezone());
+        }
+
+        if ($until instanceof DateTimeInterface) {
+            return Carbon::instance($until);
+        }
+
+        // Preserve existing Carbon deadlines when cache class deserialization is disabled.
+        if ($until instanceof \__PHP_Incomplete_Class) {
+            $properties = (array) $until;
+
+            if (is_string($properties['date'] ?? null) && is_string($properties['timezone'] ?? null)) {
+                try {
+                    return Carbon::parse($properties['date'], $properties['timezone']);
+                } catch (\InvalidArgumentException) {
+                    // Unreadable cache entries still need a bounded cooldown.
+                }
+            }
+        }
+
+        $this->record($profile, self::DEFAULT_COOLDOWN_SECONDS);
+
+        return now()->startOfSecond()->addSeconds(self::DEFAULT_COOLDOWN_SECONDS);
     }
 
     public function clear(T4JamProfile $profile): void
