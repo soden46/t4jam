@@ -38,7 +38,7 @@
     </div>
     <div class="stat-row">
         <div><span id="total_ad_spend">-</span><small>Total Spend</small></div>
-        <div><span id="total_ad_result">-</span><small>Total Hasil</small></div>
+        <div><span id="total_ad_result">-</span><small>Total Hasil Konversi</small></div>
         <div><span id="avg_ad_cpr">-</span><small>Average CPR</small></div>
     </div>
     <div class="table-wrap">
@@ -70,7 +70,7 @@
                         </details> --}}
                     </th>
                     <th class="num">Spend</th>
-                    <th class="num">Hasil</th>
+                    <th class="num">Hasil Konversi</th>
                     <th class="num">CPR</th>
                     <th class="num">
                         CPR PAUSE LIMIT

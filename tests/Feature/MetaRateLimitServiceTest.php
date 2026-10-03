@@ -102,7 +102,8 @@ class MetaRateLimitServiceTest extends TestCase
         $profile = (new T4JamProfile)->forceFill(['id' => 1]);
         $service = app(MetaRateLimitService::class);
 
-        foreach ([[null, 60], [0, 60], [-1, 60], [7200, 3600]] as [$retryAfter, $expected]) {
+        foreach ([[null, 300], [0, 300], [-1, 300], [7200, 3600]] as [$retryAfter, $expected]) {
+            $service->clear($profile);
             $service->record($profile, $retryAfter);
             $this->assertSame($expected, $service->remainingSeconds($profile));
         }
@@ -115,9 +116,59 @@ class MetaRateLimitServiceTest extends TestCase
         Cache::put($service->cooldownKey($profile), ['invalid' => true], 300);
 
         $this->assertTrue($service->isRateLimited($profile));
-        $this->assertSame(60, $service->remainingSeconds($profile));
+        $this->assertSame(300, $service->remainingSeconds($profile));
 
-        $this->travel(60)->seconds();
+        $this->travel(300)->seconds();
         $this->assertFalse($service->isRateLimited($profile));
+    }
+
+    public function test_repeated_provider_limits_back_off_after_deadline_expiration_and_reset_after_quiet_period(): void
+    {
+        $profile = (new T4JamProfile)->forceFill(['id' => 1]);
+        $service = app(MetaRateLimitService::class);
+
+        foreach ([300, 600, 1200, 2400, 3600, 3600] as $seconds) {
+            $service->record($profile, null);
+            $this->assertSame($seconds, $service->remainingSeconds($profile));
+            $this->travel($seconds)->seconds();
+            $this->assertFalse($service->isRateLimited($profile));
+        }
+
+        $this->travel(2)->hours();
+        $service->record($profile, null);
+        $this->assertSame(300, $service->remainingSeconds($profile));
+    }
+
+    public function test_later_shorter_provider_delay_never_shortens_active_cooldown(): void
+    {
+        $profile = (new T4JamProfile)->forceFill(['id' => 1]);
+        $service = app(MetaRateLimitService::class);
+        $service->record($profile, 1800);
+        $this->travel(100)->seconds();
+        $service->record($profile, 30);
+
+        $this->assertSame(1700, $service->remainingSeconds($profile));
+    }
+
+    public function test_local_cooldown_exception_does_not_extend_deadline_or_escalate_backoff(): void
+    {
+        $profile = (new T4JamProfile)->forceFill(['id' => 1]);
+        $service = app(MetaRateLimitService::class);
+        $service->record($profile, null);
+        $this->travel(100)->seconds();
+
+        try {
+            $service->assertNotRateLimited($profile);
+        } catch (MetaAdsException $exception) {
+            $service->handleException($profile, $exception);
+        }
+
+        $this->assertSame(200, $service->remainingSeconds($profile));
+        $this->travel(200)->seconds();
+        $service->record($profile, null);
+        $this->assertSame(600, $service->remainingSeconds($profile));
+        $service->clear($profile);
+        $service->record($profile, null);
+        $this->assertSame(300, $service->remainingSeconds($profile));
     }
 }

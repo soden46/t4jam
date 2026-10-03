@@ -284,7 +284,9 @@ class MetaAdsClient
         $next = $response['paging']['next'] ?? null;
 
         while ($next) {
-            $response = $this->send('GET', $next);
+            // HTTP query options replace the URL query; keep Meta's pagination cursor.
+            parse_str(parse_url($next, PHP_URL_QUERY) ?? '', $nextQuery);
+            $response = $this->send('GET', $next, $nextQuery);
             $rows = array_merge($rows, $response['data'] ?? []);
             $next = $response['paging']['next'] ?? null;
         }
@@ -382,7 +384,14 @@ class MetaAdsClient
                 'meta_code' => $metaCode,
                 'meta_type' => $metaType,
                 'retry_after_seconds' => $retryAfter,
+                'profile_id' => $profile?->id,
+                'meta_subcode' => $metaSubcode,
+                'cooldown_seconds' => $profile ? $rateLimit->remainingSeconds($profile) : null,
             ]);
+
+            if ($profile) {
+                $retryAfter = max($retryAfter ?? 0, $rateLimit->remainingSeconds($profile));
+            }
         }
 
         throw new MetaAdsException(
@@ -438,11 +447,16 @@ class MetaAdsClient
         if ($businessUsage) {
             $decoded = json_decode($businessUsage, true);
             if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                $seconds = 0;
                 foreach ($decoded as $usages) {
-                    if (isset($usages[0]['estimated_time_to_regain_access'])) {
-                        return min(3600, max(0, (int) $usages[0]['estimated_time_to_regain_access'] * 60));
+                    foreach (is_array($usages) ? $usages : [] as $usage) {
+                        if (is_array($usage)) {
+                            $seconds = max($seconds, (int) ($usage['estimated_time_to_regain_access'] ?? 0) * 60);
+                        }
                     }
                 }
+
+                return $seconds > 0 ? min(3600, $seconds) : null;
             }
         }
 

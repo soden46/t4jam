@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Cache;
 
 class MetaRateLimitService
 {
-    private const DEFAULT_COOLDOWN_SECONDS = 60;
+    private const DEFAULT_COOLDOWN_SECONDS = 300;
 
     private const MAX_COOLDOWN_SECONDS = 3600;
 
@@ -21,14 +21,22 @@ class MetaRateLimitService
 
     public function record(T4JamProfile $profile, ?int $retryAfter): void
     {
-        $seconds = $this->normalizeSeconds($retryAfter);
-        $until = now()->addSeconds($seconds);
+        Cache::lock($this->cooldownKey($profile).':lock', 5)->block(3, function () use ($profile, $retryAfter): void {
+            $attemptKey = $this->cooldownKey($profile).':attempts';
+            $attempt = min(5, (int) Cache::get($attemptKey, 0) + 1);
+            Cache::put($attemptKey, $attempt, now()->addHours(2));
 
-        Cache::put(
-            $this->cooldownKey($profile),
-            $until->getTimestamp(),
-            $until->copy()->addSecond(),
-        );
+            $seconds = $retryAfter !== null && $retryAfter > 0
+                ? min(self::MAX_COOLDOWN_SECONDS, $retryAfter)
+                : min(self::MAX_COOLDOWN_SECONDS, self::DEFAULT_COOLDOWN_SECONDS * (2 ** ($attempt - 1)));
+            $until = now()->addSeconds(max($seconds, $this->remainingSeconds($profile)));
+
+            Cache::put(
+                $this->cooldownKey($profile),
+                $until->getTimestamp(),
+                $until->copy()->addSecond(),
+            );
+        });
     }
 
     public function isRateLimited(T4JamProfile $profile): bool
@@ -78,7 +86,7 @@ class MetaRateLimitService
             }
         }
 
-        $this->record($profile, self::DEFAULT_COOLDOWN_SECONDS);
+        Cache::put($this->cooldownKey($profile), now()->addSeconds(self::DEFAULT_COOLDOWN_SECONDS)->getTimestamp(), self::DEFAULT_COOLDOWN_SECONDS + 1);
 
         return now()->startOfSecond()->addSeconds(self::DEFAULT_COOLDOWN_SECONDS);
     }
@@ -86,6 +94,7 @@ class MetaRateLimitService
     public function clear(T4JamProfile $profile): void
     {
         Cache::forget($this->cooldownKey($profile));
+        Cache::forget($this->cooldownKey($profile).':attempts');
     }
 
     public function assertNotRateLimited(T4JamProfile $profile): void
@@ -104,7 +113,7 @@ class MetaRateLimitService
 
     public function handleException(T4JamProfile $profile, MetaAdsException $exception): void
     {
-        if (! $this->isRateLimitCode($exception->metaCode, $exception->httpStatus)) {
+        if ($exception->metaType === 'RateLimit' || ! $this->isRateLimitCode($exception->metaCode, $exception->httpStatus)) {
             return;
         }
 
@@ -118,14 +127,5 @@ class MetaRateLimitService
         }
 
         return $httpStatus === 429 || in_array($metaCode, [4, 17, 80000, 80001, 80002, 80003, 80004], true);
-    }
-
-    private function normalizeSeconds(?int $retryAfter): int
-    {
-        if ($retryAfter && $retryAfter > 0) {
-            return min(self::MAX_COOLDOWN_SECONDS, $retryAfter);
-        }
-
-        return self::DEFAULT_COOLDOWN_SECONDS;
     }
 }

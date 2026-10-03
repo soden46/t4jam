@@ -1291,7 +1291,7 @@ class ExampleTest extends TestCase
                     ['id' => 'cmp_1', 'name' => 'Meta Campaign', 'status' => 'ACTIVE', 'effective_status' => 'ACTIVE', 'daily_budget' => '150000', 'objective' => 'OUTCOME_SALES'],
                 ],
             ]),
-            'graph.facebook.com/*/cmp_1/adsets?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/act_123/adsets?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_123/insights?*' => Http::response([
                 'data' => [[
                     'campaign_id' => 'cmp_1',
@@ -1355,7 +1355,7 @@ class ExampleTest extends TestCase
                     ['id' => 'cmp_456', 'name' => 'Manual Campaign', 'status' => 'ACTIVE', 'daily_budget' => '250000'],
                 ],
             ]),
-            'graph.facebook.com/*/cmp_456/adsets?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/act_456/adsets?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_456/insights?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/insights?*' => Http::response(['data' => []]),
         ]);
@@ -1653,7 +1653,7 @@ class ExampleTest extends TestCase
                     ['id' => 'cmp_321', 'name' => 'Scheduled Campaign', 'status' => 'ACTIVE', 'daily_budget' => '250000'],
                 ],
             ]),
-            'graph.facebook.com/*/cmp_321/adsets?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/act_321/adsets?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_321/insights?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/insights?*' => Http::response(['data' => []]),
         ]);
@@ -1696,7 +1696,7 @@ class ExampleTest extends TestCase
                     ['id' => $task->campaign->external_id, 'name' => $task->campaign->name, 'status' => 'ACTIVE', 'daily_budget' => '75000'],
                 ],
             ]),
-            'graph.facebook.com/*/'.$task->campaign->external_id.'/adsets?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/adsets?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
                 'data' => [[
                     'campaign_id' => $task->campaign->external_id,
@@ -2135,7 +2135,7 @@ class ExampleTest extends TestCase
                     ['id' => 'cmp_789', 'name' => 'Rate Limited Campaign', 'status' => 'ACTIVE', 'daily_budget' => '300000'],
                 ],
             ]),
-            'graph.facebook.com/*/cmp_789/adsets?*' => Http::response(['data' => []]),
+            'graph.facebook.com/*/act_789/adsets?*' => Http::response(['data' => []]),
             'graph.facebook.com/*/act_789/insights?*' => Http::response([
                 'error' => [
                     'message' => 'User request limit reached',

@@ -301,6 +301,7 @@ class ProductionSafetyTest extends TestCase
         $job->assertReleased(60);
         $job = new SyncMetaAdsProfile($profile->id);
         $queueJob = \Mockery::mock(Job::class);
+        $queueJob->shouldReceive('getJobId')->andReturn('test-job');
         $queueJob->shouldReceive('attempts')->andReturn(3);
         $queueJob->shouldReceive('fail')->once()->with(\Mockery::type(MetaAdsException::class));
         $queueJob->shouldNotReceive('release');

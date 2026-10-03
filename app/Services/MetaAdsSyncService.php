@@ -100,34 +100,28 @@ class MetaAdsSyncService
         return collect($client->adAccounts())
             ->map(function (array $accountData) use ($client): array {
                 $accountId = $accountData['id'] ?? null;
-                $campaigns = $accountId
-                    ? collect($this->optionalMetaRequest(
-                        fn () => $client->campaigns($accountId),
-                        'Meta campaign lookup skipped',
-                        ['ad_account_id' => $accountId],
-                    ))
-                        ->map(function (array $campaignData) use ($client): array {
-                            $campaignId = $campaignData['id'] ?? null;
+                $campaigns = $accountId ? $this->optionalMetaRequest(
+                    fn () => $client->campaigns($accountId),
+                    'Meta campaign lookup skipped',
+                    ['ad_account_id' => $accountId],
+                ) : [];
+                $adSetsByCampaign = $campaigns !== [] ? collect($this->optionalMetaRequest(
+                    fn () => $client->accountAdSets($accountId),
+                    'Meta ad set lookup skipped',
+                    ['ad_account_id' => $accountId],
+                ))->groupBy('campaign_id') : collect();
+                $campaigns = collect($campaigns)
+                    ->map(function (array $campaignData) use ($adSetsByCampaign): array {
+                        $campaignId = $campaignData['id'] ?? null;
 
-                            return $campaignData + [
-                                '_adsets' => $campaignId ? $this->prefetchAdSets($client, $campaignId) : [],
-                            ];
-                        })
-                        ->all()
-                    : [];
+                        return $campaignData + [
+                            '_adsets' => $campaignId ? $adSetsByCampaign->get($campaignId, collect())->all() : [],
+                        ];
+                    })
+                    ->all();
 
                 return $accountData + ['_campaigns' => $campaigns];
             })
-            ->all();
-    }
-
-    private function prefetchAdSets(MetaAdsClient $client, string $campaignId): array
-    {
-        return collect($this->optionalMetaRequest(
-            fn () => $client->adSets($campaignId),
-            'Meta ad set lookup skipped',
-            ['campaign_id' => $campaignId],
-        ))
             ->all();
     }
 
