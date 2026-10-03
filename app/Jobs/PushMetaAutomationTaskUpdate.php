@@ -36,6 +36,7 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
         private readonly ?int $budget = null,
         private readonly ?bool $active = null,
     ) {
+        $this->initializeMetaRetries();
         $this->onQueue('meta');
     }
 
@@ -154,7 +155,7 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
                     'retry_after_seconds' => self::LOCK_CONTENTION_DELAY_SECONDS,
                 ]);
 
-                $this->release(self::LOCK_CONTENTION_DELAY_SECONDS);
+                $this->releaseMetaRetry(self::LOCK_CONTENTION_DELAY_SECONDS);
 
                 return;
             }
@@ -162,12 +163,12 @@ class PushMetaAutomationTaskUpdate implements ShouldQueue
                 return;
             }
         } catch (MetaAdsException $exception) {
-            if ($exception->retryable() && $this->attempts() < $this->tries) {
-                $this->markPendingRetry($task, $exception->retryDelay($this->attempts()));
+            $delay = $this->retryOrFail($exception);
+            if ($delay !== null) {
+                $this->markPendingRetry($task, $delay);
             } else {
                 $this->markFailed($task, $this->metaErrorMessage($exception), $exception);
             }
-            $this->retryOrFail($exception);
 
             return;
         } catch (Throwable $exception) {

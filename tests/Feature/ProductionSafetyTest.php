@@ -2,7 +2,6 @@
 
 namespace Tests\Feature;
 
-use App\Exceptions\MetaAdsException;
 use App\Jobs\PushMetaAutomationTaskUpdate;
 use App\Jobs\SyncMetaAdsProfile;
 use App\Models\AutomationTask;
@@ -11,7 +10,6 @@ use App\Models\User;
 use App\Services\AutomationBudgetService;
 use App\Services\MetaAdsSyncService;
 use Illuminate\Auth\Notifications\ResetPassword;
-use Illuminate\Contracts\Queue\Job;
 use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -299,14 +297,13 @@ class ProductionSafetyTest extends TestCase
         $job = (new SyncMetaAdsProfile($profile->id))->withFakeQueueInteractions();
         $job->handle(app(MetaAdsSyncService::class));
         $job->assertReleased(60);
-        $job = new SyncMetaAdsProfile($profile->id);
-        $queueJob = \Mockery::mock(Job::class);
-        $queueJob->shouldReceive('getJobId')->andReturn('test-job');
-        $queueJob->shouldReceive('attempts')->andReturn(3);
-        $queueJob->shouldReceive('fail')->once()->with(\Mockery::type(MetaAdsException::class));
-        $queueJob->shouldNotReceive('release');
-        $job->setJob($queueJob);
+        $job->withFakeQueueInteractions();
         $job->handle(app(MetaAdsSyncService::class));
+        $job->assertReleased(180);
+        $job->withFakeQueueInteractions();
+        $job->handle(app(MetaAdsSyncService::class));
+        $job->assertFailed()->assertNotReleased();
+        Http::assertSentCount(3);
     }
 
     #[DataProvider('failures')]

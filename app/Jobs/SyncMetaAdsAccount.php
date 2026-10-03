@@ -6,6 +6,7 @@ use App\Exceptions\MetaAdsException;
 use App\Jobs\Concerns\RetriesMetaRequests;
 use App\Models\T4JamProfile;
 use App\Services\MetaAdsSyncService;
+use App\Services\MetaRateLimitService;
 use App\Support\MetaFlowLog;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -30,6 +31,7 @@ class SyncMetaAdsAccount implements ShouldBeUnique, ShouldQueue
         public readonly array $adSetIds = [],
         public readonly array $fields = [],
     ) {
+        $this->initializeMetaRetries();
         $this->onQueue('meta');
     }
 
@@ -57,6 +59,7 @@ class SyncMetaAdsAccount implements ShouldBeUnique, ShouldQueue
         }
 
         try {
+            app(MetaRateLimitService::class)->assertNotRateLimited($profile);
             $metaSync->syncAccountFromWebhook($profile, $this->adAccountExternalId, $this->campaignIds, $this->adSetIds);
         } catch (MetaAdsException $exception) {
             $profile->update(['last_meta_error' => $exception->getMessage()]);

@@ -83,6 +83,24 @@ class MetaFullSyncRateLimitTest extends TestCase
         Log::shouldNotHaveReceived('info', [\Mockery::on(fn ($message) => str_contains($message, 'full sync job started')), \Mockery::any()]);
     }
 
+    public function test_provider_type_rate_limit_still_counts_actual_request_failures(): void
+    {
+        $this->freezeSecond();
+        $profile = $this->profile();
+        $job = new SyncMetaAdsProfile($profile->id);
+        Http::fake(['*' => Http::response(['error' => ['code' => 17, 'type' => 'RateLimit']], 400,
+            ['Retry-After' => 60])]);
+
+        foreach ([60, 180] as $delay) {
+            $job->withFakeQueueInteractions()->handle(app(MetaAdsSyncService::class));
+            $job->assertReleased($delay)->assertNotFailed();
+            $this->travel($delay)->seconds();
+        }
+        $job->withFakeQueueInteractions()->handle(app(MetaAdsSyncService::class));
+        $job->assertFailed()->assertNotReleased();
+        Http::assertSentCount(3);
+    }
+
     public function test_provider_limit_without_retry_after_releases_job_until_adaptive_cooldown_expires(): void
     {
         $this->freezeSecond();

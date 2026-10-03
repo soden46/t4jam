@@ -510,9 +510,9 @@ class T4JamController extends Controller
             $resolvesPendingPause = ! $requestedActive && $this->taskMutations->hasPendingPause($task);
             $deferBudgetMutation = $resolvesPendingPause && $requestedBudget !== (int) $target->daily_budget;
             $budgetChanged = ! $deferBudgetMutation && $requestedBudget !== (int) $task->starting_budget;
-            $budgetNeedsMetaWrite = ! $deferBudgetMutation && $requestedBudget !== (int) $target->daily_budget;
+            $budgetNeedsMetaWrite = $budgetChanged && $requestedBudget !== (int) $target->daily_budget;
             $budgetNeedsLocalNormalization = ! $deferBudgetMutation
-                && ! $budgetNeedsMetaWrite
+                && $requestedBudget === (int) $target->daily_budget
                 && (int) $task->current_budget !== $requestedBudget;
 
             if ($this->taskMutations->hasPendingPause($task) && $requestedActive) {
@@ -521,7 +521,7 @@ class T4JamController extends Controller
 
             $manualAction = $statusChanged
                 ? ($requestedActive ? 'manual_resume' : 'manual_pause')
-                : ($budgetChanged ? 'manual_budget_decrease' : 'manual');
+                : ($budgetChanged ? 'manual_budget_decrease' : $task->last_budget_action);
             $metaBudgetPushed = false;
             $metaStatusPushed = false;
 

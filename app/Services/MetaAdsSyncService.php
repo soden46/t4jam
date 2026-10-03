@@ -376,10 +376,13 @@ class MetaAdsSyncService
             'webhook',
         );
 
-        $profile->update([
-            'last_meta_sync_at' => now(),
-            'last_meta_error' => $counts['rate_limited'] ? 'Meta reconciliation ditunda karena rate limit.' : null,
-        ]);
+        if ($counts['rate_limited'] || ($counts['failed_groups'] ?? 0) > 0) {
+            $profile->update(['last_meta_error' => $counts['rate_limited']
+                ? 'Meta reconciliation ditunda karena rate limit.'
+                : 'Sinkronisasi perubahan Meta belum berhasil. Metrik akan diperiksa ulang oleh scheduler.']);
+        } elseif ($counts['skip_reason'] === null) {
+            $profile->update(['last_meta_sync_at' => now(), 'last_meta_error' => null]);
+        }
 
         return $counts;
     }

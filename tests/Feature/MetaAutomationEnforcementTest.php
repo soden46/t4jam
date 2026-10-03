@@ -1556,6 +1556,48 @@ class MetaAutomationEnforcementTest extends TestCase
         Http::assertSent(fn ($request) => $request->method() === 'POST' && $request['status'] === 'PAUSED');
     }
 
+    public function test_rule_edit_preserves_scaled_budget_without_meta_write(): void
+    {
+        [$profile, $task] = $this->automationFixture(false);
+        $changedAt = now()->subDay()->startOfSecond();
+        $task->campaign->update(['daily_budget' => 115000]);
+        $task->update(['starting_budget' => 100000, 'current_budget' => 115000,
+            'last_budget_action' => 'increase', 'last_budget_changed_at' => $changedAt]);
+        Http::fake();
+
+        $this->actingAs(User::firstOrFail())->postJson('/update-automation-tasks/', [
+            'automation_id' => $task->id, 'starting_budget' => 100000,
+            'automation_activation' => 'active', 'cpr_cap' => 45000,
+        ])->assertOk();
+
+        $this->assertSame(45000, $task->fresh()->cpr_cap);
+        $this->assertSame(115000, $task->fresh()->current_budget);
+        $this->assertSame(115000, $task->campaign->fresh()->daily_budget);
+        $this->assertSame('increase', $task->fresh()->last_budget_action);
+        $this->assertTrue($task->fresh()->last_budget_changed_at->equalTo($changedAt));
+        Http::assertNothingSent();
+    }
+
+    public function test_rule_edit_preserves_cpr_pause_provenance(): void
+    {
+        [$profile, $task] = $this->automationFixture(false);
+        $pausedAt = now()->subDay()->startOfSecond();
+        $task->campaign->update(['status' => 'PAUSED', 'effective_status' => 'PAUSED']);
+        $task->update(['is_active' => false, 'last_budget_action' => 'pause',
+            'cpr_paused_at' => $pausedAt, 'starting_budget' => 100000]);
+        Http::fake();
+
+        $this->actingAs(User::firstOrFail())->postJson('/update-automation-tasks/', [
+            'automation_id' => $task->id, 'starting_budget' => 100000,
+            'automation_activation' => 'pause', 'cpr_cap' => 45000,
+        ])->assertOk();
+
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertSame('pause', $task->fresh()->last_budget_action);
+        $this->assertTrue($task->fresh()->cpr_paused_at->equalTo($pausedAt));
+        Http::assertNothingSent();
+    }
+
     private function automationFixture(bool $writesEnabled = true, string $level = 'campaign'): array
     {
         Cache::flush();

@@ -26,6 +26,7 @@ class SyncMetaAdsProfile implements ShouldBeUnique, ShouldQueue
 
     public function __construct(private readonly int $profileId)
     {
+        $this->initializeMetaRetries();
         $this->onQueue('meta');
     }
 
@@ -70,7 +71,7 @@ class SyncMetaAdsProfile implements ShouldBeUnique, ShouldQueue
                 'has_warning' => isset($counts['warning']),
             ]);
         } catch (MetaAdsException $exception) {
-            if ($exception->metaType === 'RateLimit') {
+            if ($exception->cooldownActive) {
                 MetaFlowLog::info('full sync job deferred during cooldown', [
                     'profile_id' => $this->profileId,
                     'job_id' => $this->job?->getJobId(),

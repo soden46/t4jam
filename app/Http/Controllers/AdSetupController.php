@@ -161,7 +161,7 @@ class AdSetupController extends Controller
                 return redirect()->route('ad-setups.index')->withErrors(['meta' => $message]);
             }
 
-            PublishMetaAdSetup::dispatch($setup->id, $profile->id)->afterResponse();
+            PublishMetaAdSetup::dispatch($setup->id, $profile->id);
             MetaFlowLog::info('ad setup publish queued', [
                 'user_id' => Auth::id(),
                 'profile_id' => $profile->id,

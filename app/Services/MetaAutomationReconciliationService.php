@@ -45,7 +45,7 @@ class MetaAutomationReconciliationService
             return $this->logSummary($profile, $source, $empty);
         }
 
-        return Cache::lock('meta-automation-reconcile:'.$profile->id, 55)->get(function () use ($profile, $adAccountExternalId, $campaignIds, $adSetIds, $source, $empty): array {
+        $result = Cache::lock('meta-automation-reconcile:'.$profile->id, 55)->get(function () use ($profile, $adAccountExternalId, $campaignIds, $adSetIds, $source, $empty): array {
             $selection = $this->selectTasks($profile, $adAccountExternalId, $campaignIds, $adSetIds, $source);
             $counts = array_replace($empty, $selection['counts']);
 
@@ -75,6 +75,7 @@ class MetaAutomationReconciliationService
                 $counts['api_calls'] += $result['api_calls'];
                 $counts['updated'] += $result['updated'];
                 $counts['paused'] += $result['paused'];
+                $counts['failed_groups'] += $result['failed_groups'] ?? 0;
 
                 if ($result['rate_limited']) {
                     $counts['rate_limited'] = true;
@@ -84,7 +85,10 @@ class MetaAutomationReconciliationService
             }
 
             return $this->logSummary($profile, $source, $counts);
-        }) ?? $empty;
+        });
+
+        return is_array($result) ? $result : $this->logSummary($profile, $source,
+            array_replace($empty, ['skip_reason' => 'lock_busy']));
     }
 
     private function selectTasks(T4JamProfile $profile, ?string $adAccountExternalId, array $campaignIds, array $adSetIds, string $source): array
@@ -272,14 +276,15 @@ class MetaAutomationReconciliationService
 
                 $target->update([
                     'status' => $remote['status'] ?? $remote['effective_status'] ?? $target->status,
-                    'effective_status' => $remote['effective_status'] ?? $target->effective_status,
+                    'effective_status' => $remote['effective_status'] ?? $remote['status'] ?? $target->effective_status,
                     'daily_budget' => (int) ($remote['daily_budget'] ?? $target->daily_budget),
                 ]);
 
                 $changes = ['current_budget' => (int) $target->daily_budget];
                 $active = strtoupper((string) ($target->effective_status ?: $target->status)) === 'ACTIVE';
 
-                if ($this->taskMutations->hasPendingPause($task) && ! $active) {
+                $pauseConfirmed = strtoupper((string) ($remote['status'] ?? $remote['effective_status'] ?? '')) === 'PAUSED';
+                if ($this->taskMutations->hasPendingPause($task) && $pauseConfirmed) {
                     $changes += [
                         'is_active' => false,
                         'pending_meta_action' => null,
@@ -324,6 +329,7 @@ class MetaAutomationReconciliationService
             'updated' => $updated,
             'paused' => 0,
             'rate_limited' => $this->rateLimit->isRateLimitCode($exception->metaCode, $exception->httpStatus),
+            'failed_groups' => 1,
         ];
     }
 
@@ -392,6 +398,7 @@ class MetaAutomationReconciliationService
     {
         return [
             'groups' => 0,
+            'failed_groups' => 0,
             'eligible_tasks' => 0,
             'processed_targets' => 0,
             'skipped_fresh' => 0,

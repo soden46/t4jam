@@ -230,6 +230,83 @@ supervisorctl restart t4jam-meta-worker:*
 
 Sesuaikan `user` dengan user web server di server masing-masing.
 
+### Worker permanen Digmartools
+
+Config siap pakai untuk `/var/www/demo-digmartools.prosesin.id` tersedia di
+`deploy/supervisor/t4jam-meta-worker.conf`. Config ini memakai `www-data`, antrean
+`meta,default`, timeout 700 detik, dan stopwait 750 detik. Pastikan `/usr/bin/php`
+adalah PHP CLI project. `DB_QUEUE_RETRY_AFTER=900` harus lebih besar daripada
+timeout worker dan seluruh job (job full sync: 650 detik).
+
+Setelah kode baru terpasang, jalankan dari direktori project:
+
+```bash
+sudo -u www-data php artisan config:cache
+sudo -u www-data php artisan t4jam:queue-status
+sudo -u www-data php artisan queue:failed
+```
+
+`queue-status` membaca konfigurasi dan antrean tanpa menjalankan job atau
+memanggil Meta. Output mencantumkan jenis job, jumlah, attempt, dan waktu
+available/reserved; payload dan credential tidak dicetak. Exit code bukan nol
+menandakan driver/timing tidak sesuai. Periksa jenis job sebelum menyalakan
+worker: `PublishMetaAdSetup` dapat membuat iklan, dan job automation dapat
+mengubah budget/status jika writes aktif. Perintah ini tidak membuktikan worker
+OS hidup; proses dan Supervisor tetap diperiksa terpisah.
+
+Di `sudo crontab -e`, hapus hanya baris worker Digmartools berikut:
+
+```cron
+* * * * * cd /var/www/demo-digmartools.prosesin.id && php artisan queue:work --stop-when-empty >> /dev/null 2>&1
+```
+
+Pertahankan baris `schedule:run` Digmartools dan seluruh cron aplikasi lain.
+Kemudian hentikan worker manual Digmartools bila masih ada; jangan hentikan
+worker Fortindo/Proton. `queue:restart` memberi sinyal worker aplikasi ini
+untuk keluar setelah job yang sedang berjalan selesai:
+
+```bash
+sudo -u www-data php artisan queue:restart
+ps -eo pid,user,args | grep -E '[a]rtisan (queue:work|queue:listen|horizon)'
+```
+
+Setelah worker lama Digmartools keluar, pasang program Supervisor ini:
+
+```bash
+sudo install -m 0644 deploy/supervisor/t4jam-meta-worker.conf /etc/supervisor/conf.d/t4jam-meta-worker.conf
+sudo supervisorctl reread
+sudo supervisorctl update t4jam-meta-worker
+sudo supervisorctl status t4jam-meta-worker:*
+sudo -u www-data php artisan t4jam:queue-status
+sudo -u www-data php artisan queue:failed
+tail -n 50 storage/logs/queue-worker.log
+```
+
+Pada deploy berikutnya, gunakan `php artisan queue:restart`; Supervisor
+menjalankan worker kembali setelah job aktif selesai. Config juga merotasi log
+dan mengganti proses worker setiap satu jam.
+
+Job yang sudah tersimpan sebelum perubahan retry tetap mengikuti payload lama
+sampai operator melakukan retry eksplisit (`queue:retry UUID`). Retry eksplisit
+memulai window dan hitungan kegagalan baru tanpa mengubah argumen/ID objek Meta.
+Job baru mempunyai batas waktu retry empat jam; penundaan cooldown lokal/lock
+tidak menghabiskan jatah tiga kegagalan request Meta. Job gagal lama tidak
+otomatis di-retry; periksa penyebab dan hasil Meta, lalu retry hanya UUID yang
+telah diverifikasi. Jangan menjalankan `queue:retry all` untuk job publish
+dengan hasil create yang belum pasti.
+
+Publish memakai antrean yang dikonfigurasi (`meta` pada koneksi database server).
+Job after-response yang tertahan cooldown atau lock menyimpan retry ke antrean
+worker; retry tersebut tidak hilang saat request web selesai. Jika worker
+menggagalkan publish karena timeout atau batas retry, status lokal menjadi
+`failed` sambil mempertahankan ID Meta dan `pending_meta_step` untuk rekonsiliasi.
+
+Reconciliation melaporkan `skip_reason=lock_busy` saat pemeriksaan lain masih
+berjalan dan `failed_groups` saat request Meta gagal. Kedua kondisi tersebut
+tidak memperbarui timestamp sukses sync profil. Pending pause baru terkonfirmasi
+ketika status target dari Meta adalah `PAUSED`; status seperti
+`CAMPAIGN_PAUSED` pada ad set tidak menjadi bukti pause target berhasil.
+
 ## Rate Limit Meta
 
 Meta dapat mengembalikan rate limit, misalnya:
@@ -238,7 +315,7 @@ Meta dapat mengembalikan rate limit, misalnya:
 Meta rate limit hit {"meta_code":17,"meta_type":"OAuthException"}
 ```
 
-Queue sync, publish, dan update automation mencoba maksimal 3 kali. Rate limit, network error, dan 5xx dijeda minimal 60/180/300 detik, mengikuti `Retry-After` sampai 3600 detik. Token invalid/permission gagal permanen. HTTP client tidak melakukan retry cepat tersembunyi. `last_meta_error` menyimpan pesan aman, tanpa raw response/token.
+Queue sync, publish, dan update automation membatasi kegagalan request Meta maksimal 3 kali. Job baru boleh menunggu cooldown lokal atau lock hingga batas waktu empat jam sejak dibuat; penantian sebelum request tidak dihitung sebagai kegagalan provider. Rate limit provider, network error, dan 5xx dijeda minimal 60/180/300 detik, mengikuti `Retry-After` sampai 3600 detik. Token invalid/permission gagal permanen. HTTP client tidak melakukan retry cepat tersembunyi. `last_meta_error` menyimpan pesan aman, tanpa raw response/token. Batas retry membutuhkan cache bersama yang persisten; jangan memakai cache `array` untuk worker server.
 
 Publish menyimpan `meta_campaign_id`, `meta_adset_id`, `meta_creative_id`, dan `meta_ad_id` segera setelah setiap sukses, kemudian melanjutkan step yang belum selesai. Status: draft ? publishing ? published, atau failed. Bila create timeout/5xx atau tidak mengembalikan ID, `pending_meta_step` menahan create ulang: periksa Meta Ads Manager, isi ID yang sudah dibuat pada field terkait, lalu kosongkan `pending_meta_step` setelah hasil diverifikasi. Jangan kosongkan marker atau mengulang create sebelum rekonsiliasi.
 
@@ -279,7 +356,7 @@ App\Models\AutomationTask::whereKey('TASK_UUID')->whereNull('user_id')->update([
 
 Token setiap user wajib disimpan pada profile sendiri. Schema akun/campaign/adset masih global; tabel pivot `meta_ad_account_profiles` dipakai untuk mengarahkan event webhook ke credential profile yang memang pernah menyinkronkan account tersebut. Isolasi penuh katalog masih merupakan follow-up. Task baru dan job automation/publish sudah memeriksa owner. Tidak ada fallback credential lintas user.
 
-Dashboard menyimpan hasil per conversion dari full sync; jalankan full sync profile setelah migration untuk mengisi hasil Lead/ATC/Checkout/WhatsApp. Data lama hanya punya Purchase generic. Dashboard dan Automation memakai polling database lokal 5 detik; tab hidden/modal terbuka menunda polling. Initial Automation load tetap boleh menyegarkan insights dari Meta, sedangkan polling background mengirim `local=1` dan tidak melakukan Meta call.
+Dashboard menyimpan hasil per conversion dari full sync; jalankan full sync profile setelah migration untuk mengisi hasil Lead/ATC/Checkout/WhatsApp. Data lama hanya punya Purchase generic. Dashboard dan Automation memakai polling database lokal 5 detik; tab hidden/modal terbuka menunda polling. Endpoint daftar Automation selalu membaca database, termasuk initial load dan `local=0`; scheduler reconciliation bertugas memperbarui metrik dari Meta.
 
 ### Manual server check
 

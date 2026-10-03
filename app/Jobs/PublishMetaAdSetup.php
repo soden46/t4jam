@@ -28,6 +28,7 @@ class PublishMetaAdSetup implements ShouldBeUnique, ShouldQueue
         private readonly int $adSetupId,
         private readonly int $profileId,
     ) {
+        $this->initializeMetaRetries();
         $this->onQueue('meta');
     }
 
@@ -109,6 +110,21 @@ class PublishMetaAdSetup implements ShouldBeUnique, ShouldQueue
         }
 
         return 'Publish ke Meta belum berhasil. Coba lagi beberapa saat atau cek koneksi Meta di Profile.';
+    }
+
+    public function failed(?Throwable $exception): void
+    {
+        $setup = AdSetup::query()->find($this->adSetupId);
+        $profile = T4JamProfile::query()->find($this->profileId);
+        if (! $setup || ! $profile || $setup->user_id !== $profile->user_id || $setup->status === 'published') {
+            return;
+        }
+
+        // Worker timeouts/retry expiry can fail before handle() gets a chance to update the UI.
+        $message = $setup->pending_meta_step
+            ? 'Hasil create Meta belum dapat dipastikan. Rekonsiliasi ID Meta sebelum publish ulang.'
+            : ($setup->last_error ?: 'Publish ke Meta berhenti sebelum selesai. Periksa status Meta sebelum publish ulang.');
+        $setup->update(['status' => 'failed', 'last_error' => $message]);
     }
 
     private function reportFailure(MetaAdsException $exception, AdSetup $setup): void

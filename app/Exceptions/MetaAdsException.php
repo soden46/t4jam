@@ -16,6 +16,7 @@ class MetaAdsException extends RuntimeException
         public readonly bool $outcomeUnknown = false,
         public readonly ?int $metaSubcode = null,
         public readonly ?string $providerMessage = null,
+        public readonly bool $cooldownActive = false,
     ) {
         parent::__construct($message);
     }

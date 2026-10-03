@@ -533,7 +533,7 @@ class ExampleTest extends TestCase
 
         $row = collect($response->json('data'))->firstWhere('id', $task->id);
 
-        $this->assertSame('local_only', $response->json('meta_sync.reason'));
+        $this->assertSame('db_only', $response->json('meta_sync.reason'));
         $this->assertSame(0, $response->json('meta_sync.updated'));
         $this->assertSame(42000, $row['current_spend']);
         $this->assertSame(2, $row['current_hasil']);
@@ -545,7 +545,7 @@ class ExampleTest extends TestCase
         Http::assertNothingSent();
     }
 
-    public function test_automation_task_endpoint_refreshes_metrics_when_not_local(): void
+    public function test_automation_task_endpoint_preserves_local_snapshot_even_with_local_zero(): void
     {
         $this->seed(TestDataSeeder::class);
         Cache::flush();
@@ -579,26 +579,25 @@ class ExampleTest extends TestCase
         $response = $this
             ->getJson('/get-automation-task/?acc=all&level=all&funnel=all&local=0')
             ->assertOk()
-            ->assertJsonPath('meta_sync.attempted', true)
-            ->assertJsonPath('meta_sync.updated', 1)
-            ->assertJsonPath('meta_sync.reason', 'refreshed')
-            ->assertJsonPath('summary.total_spend', 37210);
+            ->assertJsonPath('meta_sync.attempted', false)
+            ->assertJsonPath('meta_sync.updated', 0)
+            ->assertJsonPath('meta_sync.reason', 'db_only')
+            ->assertJsonPath('summary.total_spend', 75919);
 
         $row = collect($response->json('data'))->firstWhere('id', $task->id);
 
-        $this->assertSame(37210, $row['current_spend']);
+        $this->assertSame(75919, $row['current_spend']);
         $this->assertSame(1, $row['current_hasil']);
-        $this->assertSame(37210, $row['current_cpr']);
-        $this->assertTrue($row['metrics_available']);
-        $this->assertFalse($row['metrics_stale']);
-        $this->assertSame(37210, $task->fresh()->current_spend);
+        $this->assertSame(75919, $row['current_cpr']);
+        $this->assertFalse($row['metrics_available']);
+        $this->assertTrue($row['metrics_stale']);
+        $this->assertSame(75919, $task->fresh()->current_spend);
         $this->assertSame(1, $task->fresh()->current_result);
         $this->assertNull($task->fresh()->metrics_unavailable_at);
-        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$account->external_id.'/insights')
-            && $request['level'] === 'campaign');
+        Http::assertNothingSent();
     }
 
-    public function test_automation_task_endpoint_marks_metrics_stale_when_fresh_refresh_fails(): void
+    public function test_automation_task_endpoint_marks_old_metrics_stale_without_meta_request(): void
     {
         $this->seed(TestDataSeeder::class);
         Cache::flush();
@@ -622,9 +621,9 @@ class ExampleTest extends TestCase
         $response = $this
             ->getJson('/get-automation-task/?acc=all&level=all&funnel=all')
             ->assertOk()
-            ->assertJsonPath('meta_sync.attempted', true)
+            ->assertJsonPath('meta_sync.attempted', false)
             ->assertJsonPath('meta_sync.updated', 0)
-            ->assertJsonPath('meta_sync.reason', 'meta_error');
+            ->assertJsonPath('meta_sync.reason', 'db_only');
 
         $row = collect($response->json('data'))->firstWhere('id', $task->id);
 
@@ -633,8 +632,8 @@ class ExampleTest extends TestCase
         $this->assertTrue($row['metrics_stale']);
         $this->assertFalse($row['metrics_available']);
         $this->assertSame(75919, $task->fresh()->current_spend);
-        $this->assertNotNull($task->fresh()->metrics_unavailable_at);
-        Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign->adAccount->external_id.'/insights'));
+        $this->assertNull($task->fresh()->metrics_unavailable_at);
+        Http::assertNothingSent();
     }
 
     public function test_automation_task_endpoint_preserves_metrics_when_meta_returns_no_insight_row(): void
@@ -763,7 +762,7 @@ class ExampleTest extends TestCase
         Http::assertSent(fn ($request) => str_contains($request->url(), '/'.$task->campaign_external_id.'/insights'));
     }
 
-    public function test_automation_task_fresh_refresh_is_scoped_to_authenticated_user(): void
+    public function test_automation_task_database_snapshot_is_scoped_to_authenticated_user(): void
     {
         $this->seed(TestDataSeeder::class);
         Cache::flush();
@@ -833,10 +832,10 @@ class ExampleTest extends TestCase
 
         $this->assertNotNull(collect($rows)->firstWhere('id', $task->id));
         $this->assertNull(collect($rows)->firstWhere('id', $otherTask->id));
-        $this->assertSame(37210, $task->fresh()->current_spend);
+        $this->assertSame(75919, $task->fresh()->current_spend);
         $this->assertSame(88888, $otherTask->fresh()->current_spend);
         $this->assertNull($otherTask->fresh()->metrics_unavailable_at);
-        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/'.$otherAccount->external_id.'/insights'));
+        Http::assertNothingSent();
     }
 
     public function test_automation_task_endpoint_filters_local_rows_without_meta_calls(): void
@@ -1202,7 +1201,7 @@ class ExampleTest extends TestCase
         $this->assertSame('lead', $task->conversion);
     }
 
-    public function test_rule_update_refreshes_meta_budget_when_writes_are_enabled(): void
+    public function test_rule_update_does_not_resend_unchanged_meta_budget(): void
     {
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
@@ -1230,11 +1229,9 @@ class ExampleTest extends TestCase
             'period' => 15,
             'automation_activation' => 'active',
         ])->assertOk()
-            ->assertJsonPath('text', 'Automation strategy berhasil diupdate dan budget Meta berhasil diupdate.');
+            ->assertJsonPath('text', 'Automation strategy berhasil diupdate.');
 
-        Http::assertSent(fn ($request) => $request->method() === 'POST'
-            && str_contains($request->url(), $task->campaign->external_id)
-            && ($request->data()['daily_budget'] ?? null) === 999988);
+        Http::assertNothingSent();
     }
 
     public function test_update_automation_task_updates_meta_immediately(): void
@@ -1496,7 +1493,7 @@ class ExampleTest extends TestCase
 
         $this->getJson('/get-automation-task/?acc=all&level=all&funnel=all&local=1')
             ->assertOk()
-            ->assertJsonPath('meta_sync.reason', 'local_only');
+            ->assertJsonPath('meta_sync.reason', 'db_only');
 
         Http::assertNothingSent();
     }
@@ -1899,7 +1896,7 @@ class ExampleTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign->external_id,
                     'spend' => '31929',
-                    'actions' => [['action_type' => 'purchase', 'value' => '2']],
+                    'actions' => [['action_type' => 'purchase', 'value' => '3']],
                     'cost_per_action_type' => [['action_type' => 'purchase', 'value' => '15965']],
                 ]],
             ]),

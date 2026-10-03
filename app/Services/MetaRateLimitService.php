@@ -107,13 +107,14 @@ class MetaRateLimitService
                 'RateLimit',
                 $this->remainingSeconds($profile),
                 true,
+                cooldownActive: true,
             );
         }
     }
 
     public function handleException(T4JamProfile $profile, MetaAdsException $exception): void
     {
-        if ($exception->metaType === 'RateLimit' || ! $this->isRateLimitCode($exception->metaCode, $exception->httpStatus)) {
+        if ($exception->cooldownActive || ! $this->isRateLimitCode($exception->metaCode, $exception->httpStatus)) {
             return;
         }
 

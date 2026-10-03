@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Jobs\SyncMetaAdsAccount;
+use App\Models\AdSet;
 use App\Models\AutomationTask;
 use App\Models\T4JamProfile;
 use App\Models\User;
@@ -509,6 +510,83 @@ class MetaAutomationReconciliationTest extends TestCase
         $this->assertTrue($events->contains(fn ($event) => str_contains($event->command, 't4jam:sync-meta-ads') && $event->expression === '0 0-23/5 * * *'));
         $this->assertTrue($events->contains(fn ($event) => str_contains($event->command, 't4jam:enforce-automation') && $event->expression === '*/5 * * * *'));
         $this->assertTrue($events->contains(fn ($event) => str_contains($event->command, 't4jam:reconcile-meta-automation') && $event->expression === '* * * * *'));
+    }
+
+    public function test_failed_webhook_reconciliation_preserves_previous_sync_time_and_reports_failure(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $syncedAt = now()->subHour()->startOfSecond();
+        $profile->update(['last_meta_sync_at' => $syncedAt]);
+        Http::fake(['*' => Http::response(['error' => ['code' => 100]], 400)]);
+
+        $counts = app(MetaAdsSyncService::class)->syncAccountFromWebhook($profile,
+            $task->campaign->adAccount->external_id, [$task->campaign_external_id]);
+
+        $this->assertSame(1, $counts['failed_groups'] ?? 0);
+        $this->assertTrue($profile->fresh()->last_meta_sync_at->equalTo($syncedAt));
+        $this->assertNotNull($profile->fresh()->last_meta_error);
+    }
+
+    public function test_busy_reconciliation_lock_does_not_mark_profile_as_synced(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $syncedAt = now()->subHour()->startOfSecond();
+        $profile->update(['last_meta_sync_at' => $syncedAt, 'last_meta_error' => 'Previous provider error']);
+        Http::fake();
+
+        Cache::lock('meta-automation-reconcile:'.$profile->id, 55)->get(function () use ($profile, $task): void {
+            $counts = app(MetaAdsSyncService::class)->syncAccountFromWebhook($profile,
+                $task->campaign->adAccount->external_id, [$task->campaign_external_id]);
+            $this->assertSame('lock_busy', $counts['skip_reason']);
+        });
+
+        $this->assertTrue($profile->fresh()->last_meta_sync_at->equalTo($syncedAt));
+        $this->assertSame('Previous provider error', $profile->fresh()->last_meta_error);
+        Http::assertNothingSent();
+    }
+
+    public function test_parent_paused_status_does_not_falsely_confirm_target_pause(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $adSet = AdSet::where('campaign_id', $task->campaign_id)->firstOrFail();
+        $adSet->update(['status' => 'ACTIVE', 'effective_status' => 'ACTIVE']);
+        $task->update(['level' => 'adset', 'ad_set_id' => $adSet->id, 'ad_set_external_id' => $adSet->external_id,
+            'pending_meta_action' => 'pause', 'meta_verification_due_at' => now(),
+            'last_budget_action' => 'manual_resume']);
+        Http::fake([
+            '*/'.$adSet->external_id.'?*' => Http::response([
+                'id' => $adSet->external_id, 'status' => 'ACTIVE',
+                'effective_status' => 'CAMPAIGN_PAUSED', 'daily_budget' => '100000',
+            ]),
+            '*/'.$adSet->external_id.'/insights?*' => Http::response(['error' => ['code' => 100]], 400),
+        ]);
+
+        app(MetaAutomationReconciliationService::class)->reconcileProfile($profile);
+
+        $this->assertSame('pause', $task->fresh()->pending_meta_action);
+        $this->assertNotSame('pause', $task->fresh()->last_budget_action);
+        $this->assertNull($task->fresh()->cpr_paused_at);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_actual_paused_status_confirms_pending_pause_even_without_effective_status(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $task->update(['pending_meta_action' => 'pause', 'meta_verification_due_at' => now()]);
+        Http::fake([
+            '*/'.$task->campaign_external_id.'?*' => Http::response([
+                'id' => $task->campaign_external_id, 'status' => 'PAUSED', 'daily_budget' => '100000',
+            ]),
+            '*/'.$task->campaign_external_id.'/insights?*' => Http::response(['error' => ['code' => 100]], 400),
+        ]);
+
+        app(MetaAutomationReconciliationService::class)->reconcileProfile($profile);
+
+        $this->assertFalse($task->fresh()->is_active);
+        $this->assertNull($task->fresh()->pending_meta_action);
+        $this->assertSame('pause', $task->fresh()->last_budget_action);
+        $this->assertNotNull($task->fresh()->cpr_paused_at);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
     private function fixture(): array
