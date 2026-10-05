@@ -33,7 +33,7 @@
                         <option value="lwa">LWA</option>
                     </select>
                 </label>
-                <label>Mode Automation
+                <label id="automation-mode-field" hidden>Mode Automation
                     <select name="mode_automation" id="mode_automation">
                         <option value="default">Default T4Jam</option>
                         <option value="hybrid">Hybrid</option>
@@ -59,20 +59,20 @@
                 </label>
                 <label>Starting Budget <span class="currency">IDR</span>
                     <input type="number" name="starting_budget" id="starting_budget" value="100000">
-                    {{-- <small>Budget ini akan digunakan untuk reset ke budget awal.</small> --}}
+                    <small>Budget ini digunakan saat reset ke budget awal.</small>
                 </label>
                 <label>Maximum Budget <span class="currency">IDR</span>
                     <input type="number" name="maximum_budget" id="maximum_budget" value="0">
-                    {{-- <small>Batas maksimum kenaikan budget otomatis. Campaign tidak dipause ketika batas ini tercapai.</small> --}}
+                    <small>Batas kenaikan budget. Isi 0 untuk tidak dibatasi.</small>
                 </label>
-                <label>CPR Pause Limit <span class="currency">IDR</span>
+                <label>CPR Cap <span class="currency">IDR</span>
                     <input type="number" name="cpr_cap" id="cpr_cap" value="7000">
-                    {{-- <small>Campaign dipause jika CPR &gt;= nilai ini.</small> --}}
+                    <small>Batas CPR untuk kenaikan budget saat hasil bertambah.</small>
                 </label>
                 <label>Running Period
                     <select name="period" id="period">
-                        <option value="5">Setiap 5 Menit</option>
-                        <option value="10" selected>Setiap 10 Menit (Recomended for Lp - Form)</option>
+                        <option value="5" selected>Setiap 5 Menit</option>
+                        <option value="10">Setiap 10 Menit (Recomended for Lp - Form)</option>
                         <option value="15">Setiap 15 Menit</option>
                         <option value="30">Setiap 30 Menit</option>
                         <option value="45">Setiap 45 Menit</option>
@@ -87,9 +87,9 @@
                 <label class="switch-row"><input type="checkbox" name="use_on_off" id="use_on_off"> <span>Terapkan On/Off BOT T4Jam?</span></label>
             </div>
             <div class="grid-3">
-                <label>Resume CPR
-                    <input type="number" name="pause_cpr_cap" id="pause_cpr_cap" value="5000">
-                    <small>Harus lebih rendah dari CPR Cap. Recovery hanya untuk iklan yang dipause automation.</small>
+                <label id="automation-pause-limit-field" hidden>Pause CPR Cap
+                    <input type="number" name="pause_cpr_limit" id="pause_cpr_limit" value="70000" min="1">
+                    <small>Iklan dipause saat CPR mencapai batas ini. Aktifkan Lagi memeriksa CPR Cap dan memastikan ambang pause sudah aman.</small>
                 </label>
                 <label>Jam "ON" BOT T4Jam
                     <input type="time" name="on_time" id="on_time" value="01:00">

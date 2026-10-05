@@ -52,6 +52,7 @@ Route::middleware('t4jam.auth')->group(function () {
     Route::post('/update-automation-tasks/', [T4JamController::class, 'updateAutomationTask']);
     Route::post('/delete-automation-tasks/', [T4JamController::class, 'deleteAutomationTask']);
     Route::post('/turun-budget-manual/', [T4JamController::class, 'turunBudget']);
+    Route::post('/change-hybrid-budget/', [T4JamController::class, 'changeHybridBudget']);
     Route::get('/api/get-interest/', [T4JamController::class, 'getInterest']);
     Route::get('/api/get-produk/', [T4JamController::class, 'getProducts']);
     Route::get('/api/get-category-product/', [T4JamController::class, 'getCategoryProducts']);

@@ -102,13 +102,13 @@ class MetaAutomationEnforcementTest extends TestCase
         $fresh = $task->fresh();
         $this->assertTrue($fresh->is_active);
         $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
-        $this->assertSame(58000, $fresh->current_budget);
-        $this->assertSame(58000, $task->campaign->fresh()->daily_budget);
+        $this->assertSame(100000, $fresh->current_budget);
+        $this->assertSame(100000, $task->campaign->fresh()->daily_budget);
         $this->assertSame('increase', $fresh->last_budget_action);
-        $this->assertStringContainsString('CPR Rp. 10.000 masih di bawah atau sama dengan 80% batas CPR Rp. 25.000', $fresh->last_log);
+        $this->assertStringContainsString('CPR Rp. 10.000 di bawah CPR Cap Rp. 25.000', $fresh->last_log);
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $task->campaign_external_id)
-            && (int) $request['daily_budget'] === 58000);
+            && (int) $request['daily_budget'] === 100000);
         Http::assertNotSent(fn ($request) => $request->method() === 'POST'
             && ($request->data()['status'] ?? null) === 'PAUSED');
     }
@@ -158,7 +158,7 @@ class MetaAutomationEnforcementTest extends TestCase
         Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
-    public function test_cpr_below_cap_but_above_scale_margin_keeps_campaign_active_without_increase(): void
+    public function test_cpr_below_cap_can_scale_without_an_extra_eighty_percent_margin(): void
     {
         [, $task] = $this->automationFixture();
         $task->campaign->update(['daily_budget' => 50000]);
@@ -170,14 +170,14 @@ class MetaAutomationEnforcementTest extends TestCase
             'last_checked_at' => now()->subMinutes(11),
         ]);
 
-        $this->fakeEnforcementInsights($task, 66000, 3, includeStatusPost: false);
+        $this->fakeEnforcementInsights($task, 66000, 3, includeStatusPost: true);
 
         $this->artisan('t4jam:enforce-automation')->assertSuccessful();
 
         $this->assertTrue($task->fresh()->is_active);
-        $this->assertSame(50000, $task->fresh()->current_budget);
+        $this->assertSame(100000, $task->fresh()->current_budget);
         $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
-        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        Http::assertSent(fn ($request) => (int) ($request->data()['daily_budget'] ?? 0) === 100000);
     }
 
     public function test_healthy_cpr_with_too_few_results_does_not_increase_budget(): void
@@ -192,7 +192,7 @@ class MetaAutomationEnforcementTest extends TestCase
             'last_checked_at' => now()->subMinutes(11),
         ]);
 
-        $this->fakeEnforcementInsights($task, 30000, 2, includeStatusPost: false);
+        $this->fakeEnforcementInsights($task, 15000, 1, includeStatusPost: false);
 
         $this->artisan('t4jam:enforce-automation')->assertSuccessful();
 
@@ -219,12 +219,12 @@ class MetaAutomationEnforcementTest extends TestCase
 
         $fresh = $task->fresh();
         $this->assertTrue($fresh->is_active);
-        $this->assertSame(58000, $fresh->current_budget);
-        $this->assertSame(58000, $task->campaign->fresh()->daily_budget);
+        $this->assertSame(100000, $fresh->current_budget);
+        $this->assertSame(100000, $task->campaign->fresh()->daily_budget);
         $this->assertSame('increase', $fresh->last_budget_action);
     }
 
-    public function test_budget_increase_cooldown_keeps_healthy_campaign_active(): void
+    public function test_results_already_used_for_scaling_keep_healthy_campaign_active(): void
     {
         [, $task] = $this->automationFixture();
         $changedAt = now()->subHour()->startOfSecond();
@@ -235,6 +235,9 @@ class MetaAutomationEnforcementTest extends TestCase
             'cpr_cap' => 25000,
             'last_budget_changed_at' => $changedAt,
             'last_budget_action' => 'increase',
+            'scaled_result_count' => 3,
+            'scaled_conversion' => 'purchase',
+            'scaling_period' => 'today:'.now('Asia/Jakarta')->toDateString(),
             'last_checked_at' => now()->subMinutes(11),
         ]);
 
@@ -249,7 +252,7 @@ class MetaAutomationEnforcementTest extends TestCase
         Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
-    public function test_budget_increase_cooldown_allows_scale_after_72_hours(): void
+    public function test_new_results_allow_another_scale_after_twenty_minutes(): void
     {
         [, $task] = $this->automationFixture();
         $task->campaign->update(['daily_budget' => 50000]);
@@ -257,7 +260,7 @@ class MetaAutomationEnforcementTest extends TestCase
             'current_budget' => 50000,
             'maximum_budget' => 100000,
             'cpr_cap' => 25000,
-            'last_budget_changed_at' => now()->subHours(73),
+            'last_budget_changed_at' => now()->subMinutes(20),
             'last_checked_at' => now()->subMinutes(11),
         ]);
 
@@ -265,7 +268,7 @@ class MetaAutomationEnforcementTest extends TestCase
 
         $this->artisan('t4jam:enforce-automation')->assertSuccessful();
 
-        $this->assertSame(58000, $task->fresh()->current_budget);
+        $this->assertSame(100000, $task->fresh()->current_budget);
         $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
     }
 

@@ -112,18 +112,21 @@ Pemeriksaan CPR cap berjalan setiap 5 menit melalui command berikut. Command ini
 php artisan t4jam:enforce-automation
 ```
 
-CPR dihitung sebagai spend / hasil (atau spend jika hasil nol), dari action conversion yang dipilih pada automation (misalnya `purchase`, `lead`, atau `add_to_cart`) dan action tersebut dibaca langsung dari insight Meta. Jika toggle `Pause Campaign saat CPR Boncos` aktif dan CPR sudah mencapai atau melewati `CPR Cap`, target akan dipause di Meta setelah write mode aktif. Kegagalan membaca insight tidak dianggap sebagai pemeriksaan berhasil, sehingga percobaan berikutnya tetap berjalan.
+CPR dihitung sebagai spend / hasil, dibulatkan ke bawah (atau spend jika hasil nol), dari event conversion yang dipilih dan Insights Meta yang segar. Kegagalan membaca Insights tidak dianggap sebagai pemeriksaan berhasil.
 
-Formula automation budget yang dipakai:
+Flow automation budget:
 
-- Pause: `CPR >= CPR Cap` dan toggle pause aktif.
-- Recovery: `0 < Resume CPR < CPR Cap` wajib; konfigurasi invalid ditolak pada form dan tidak diresume oleh service. Jika `counter_cpr` aktif dan pause sebelumnya dilakukan automation, aktifkan kembali saat `CPR <= Resume CPR` dan ada minimal satu conversion.
-- Recovery hari berikutnya: task dengan alasan pause CPR dapat ON kembali meskipun `counter_cpr` mati atau conversion hari ini masih nol. Wajib sudah berganti hari, berada dalam jam ON/OFF yang diatur, Insights hari ini berhasil dibaca, CPR hari ini di bawah cap, tidak ada perubahan Meta yang pending, dan Meta mengonfirmasi aktivasi. Pause manual/Meta tidak menjadi kandidat aturan harian ini.
-- Scale: jika `CPR <= 80% x CPR Cap`, minimal ada 3 conversion, dan sudah 72 jam sejak perubahan budget terakhir, naikkan budget `15%`.
-- Batas: budget baru tidak boleh melewati `Maximum Increasing Budget`; nilai `0` berarti tidak dibatasi.
-- Jam kerja: bila `use_on_off` aktif, bot hanya mengevaluasi task di antara jam ON dan OFF. Perubahan budget dicatat sebagai baseline, manual, increase, pause, atau resume.
+- Scale: hasil bertambah dibanding hasil yang sudah dipakai untuk kenaikan, minimal dua hasil, dan `CPR < CPR Cap`. Tidak ada cooldown wajib 72 jam. Hasil yang sama tidak menaikkan budget dua kali.
+- Besaran kenaikan: dua level 20%, dengan minimum budget level pertama 100.000; angka ini merupakan inferensi yang dipisahkan di `config/automation.php`, bukan formula backend referensi yang sudah terverifikasi.
+- Hold: Default memerlukan spend >= budget; No Hold X3 memakai spend x 3 >= budget; Loss Doll tanpa gerbang spend. Kondisi numerik Hold ini masih inferensi.
+- Hybrid: kontrol manual naik/turun dua level; perlindungan CPR tetap otomatis. Perilaku otomatis Hybrid referensi belum diketahui.
+- Pause: `CPR >= Pause CPR Cap` dan toggle pause aktif. Budget/spend mencapai batas budget tidak menjadi trigger pause.
+- Recovery: jika Aktifkan Lagi aktif dan pause berasal dari automation, CPR harus memenuhi CPR Cap sekaligus aman di bawah ambang pause, dengan minimal satu hasil. Task lama tetap memakai Resume CPR lama sampai diedit melalui form baru.
+- Recovery hari berikutnya: tetap memerlukan provenance pause CPR, pergantian hari akun, jam ON/OFF, Insights hari ini yang segar, CPR sehat, dan konfirmasi aktivasi Meta. Pause manual tidak ikut aturan ini.
+- Maximum Budget membatasi kenaikan; nol berarti unlimited. Starting Budget menjadi batas bawah kontrol turun Hybrid dan nilai reset budget.
+- Penanda hasil baru disimpan setelah Meta mengonfirmasi write. Polling dan refresh metrik tidak mengonsumsi hasil. Perubahan conversion mereset penanda; reset budget manual tidak mengizinkan hasil lama dipakai lagi.
 
-Angka 15%, 72 jam, 3 conversion, dan ambang 80% adalah kebijakan konservatif aplikasi yang disintesis dari praktik scaling; Meta menyediakan metrik serta endpoint perubahan budget, tetapi tidak menetapkan satu formula universal untuk semua akun.
+Bukti referensi, asumsi yang belum terverifikasi, kompatibilitas task lama, serta langkah migrasi ada di [audit flow automation](docs/automation-reference-parity.md). Jalankan migrasi sebelum worker memakai kode baru.
 
 ### Spend harian dan kesegaran dashboard
 

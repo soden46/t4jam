@@ -14,6 +14,7 @@ use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\T4JamProfile;
 use App\Services\AutomationBudgetService;
+use App\Services\AutomationScalingPolicy;
 use App\Services\AutomationTaskMutationService;
 use App\Services\MetaAdsClient;
 use App\Services\MetaAdsSyncService;
@@ -591,6 +592,11 @@ class T4JamController extends Controller
                 if (($taskData['conversion'] ?? $task->conversion) !== $task->conversion) {
                     $taskData['current_result'] = 0;
                     $taskData['current_spend'] = 0;
+                    $taskData['scaled_result_count'] = null;
+                    $taskData['scaling_period'] = null;
+                    $taskData['scaled_conversion'] = null;
+                    $taskData['scaling_observed_at'] = null;
+                    $taskData['last_metrics_synced_at'] = null;
                 }
                 $task->update($taskData);
                 if ($resolvesPendingPause) {
@@ -816,6 +822,58 @@ class T4JamController extends Controller
         return response()->json(['status' => 200, 'text' => $outcome['noop'] ? 'Budget Meta sudah sesuai.' : 'Budget berhasil diturunkan manual dan Meta berhasil diupdate.']);
     }
 
+    public function changeHybridBudget(Request $request, MetaAdsSyncService $metaSync, AutomationScalingPolicy $policy): JsonResponse
+    {
+        $request->validate(['direction' => ['required', Rule::in(['up', 'down'])]]);
+        $task = AutomationTask::where('user_id', Auth::id())->findOrFail($request->input('automation_id'));
+        $up = $request->input('direction') === 'up';
+        $outcome = $this->runManualTaskMutation($task, function (AutomationTask $task, Campaign|AdSet|null $target) use ($metaSync, $policy, $up): array {
+            if ($task->mode !== 'hybrid' || ! $target) {
+                return ['ok' => false, 'text' => 'Perubahan level hanya tersedia untuk automation Hybrid.'];
+            }
+            if ($this->taskMutations->hasPendingPause($task) || $task->pending_meta_action !== null) {
+                return ['ok' => false, 'text' => 'Tunggu perubahan Meta yang masih pending selesai.'];
+            }
+            if ($up && (! $task->is_active || $target->status !== 'ACTIVE')) {
+                return ['ok' => false, 'text' => 'Aktifkan automation dan target sebelum menaikkan budget.'];
+            }
+            $before = (int) $target->daily_budget;
+            if ($up && (int) $task->maximum_budget > 0 && $before >= (int) $task->maximum_budget) {
+                return ['ok' => true, 'text' => 'Maximum budget sudah tercapai.'];
+            }
+            $budget = $up ? $policy->nextBudget($before, (int) $task->maximum_budget)
+                : min($before, $policy->previousBudget($before, (int) $task->starting_budget));
+            if ($budget === $before) {
+                return ['ok' => true, 'text' => 'Budget sudah berada pada batas yang diatur.'];
+            }
+            $result = $this->pushMetaBudget($target, $budget, $task->level, $metaSync);
+            if (! $result['ok']) {
+                return $result;
+            }
+            $message = 'Budget Hybrid '.($up ? 'dinaikkan' : 'diturunkan').' 2 level menjadi Rp. '.number_format($budget, 0, ',', '.').'.';
+            DB::transaction(function () use ($task, $target, $before, $budget, $message, $up): void {
+                $this->persistLocalBudget($target, $budget, $task->level);
+                $task->update([
+                    'current_budget' => $budget,
+                    'last_budget_before' => $before,
+                    'last_budget_changed_at' => now(),
+                    'last_budget_action' => $task->is_active ? ($up ? 'manual_budget_increase' : 'manual_budget_decrease') : $task->last_budget_action,
+                    'last_log' => $message,
+                    'meta_verification_due_at' => $this->automationVerificationDueAt(),
+                ]);
+                AutomationLog::create(['automation_task_id' => $task->id, 'messages' => [$message]]);
+            });
+
+            return ['ok' => true, 'text' => $message];
+        });
+
+        if ($outcome === false) {
+            return $this->taskMutationBusyResponse();
+        }
+
+        return response()->json(['text' => $outcome['text']], $outcome['ok'] ? 200 : 422);
+    }
+
     public function getInterest(Request $request): JsonResponse
     {
         $keyword = (string) $request->query('keyword');
@@ -1004,20 +1062,24 @@ class T4JamController extends Controller
             'budget_conversion' => ['sometimes', Rule::in(AutomationBudgetService::conversions())],
             'cpr_cap' => ['sometimes', 'integer', 'min:1'],
             'pause_cpr_cap' => ['sometimes', 'integer', 'min:1'],
+            'pause_cpr_limit' => ['sometimes', 'integer', 'min:1'],
+            'budget_funnel_lp' => ['sometimes', Rule::in(['lp_to_wa', 'lp_to_form', 'lwa'])],
+            'mode_automation' => ['sometimes', Rule::in(['default', 'hybrid'])],
+            'hold_spend' => ['sometimes', Rule::in(['onhold', 'bypass', 'loss'])],
             'starting_budget' => ['sometimes', 'integer', 'min:1000'],
             'maximum_budget' => ['sometimes', 'integer', 'min:0'],
             'period' => ['sometimes', 'integer', 'min:5', 'max:1440'],
             'on_time' => ['sometimes', 'date_format:H:i'],
             'off_time' => ['sometimes', 'date_format:H:i'],
         ]);
-        if ($request->boolean('counter_cpr') && (int) $request->input('pause_cpr_cap', 5000) >= (int) $request->input('cpr_cap', 7000)) {
+        if (! $request->has('pause_cpr_limit') && $request->boolean('counter_cpr') && (int) $request->input('pause_cpr_cap', 5000) >= (int) $request->input('cpr_cap', 7000)) {
             throw ValidationException::withMessages(['pause_cpr_cap' => 'Resume CPR harus lebih rendah dari CPR Cap.']);
         }
     }
 
     private function automationPayload(Request $request): array
     {
-        return [
+        return ($request->has('pause_cpr_limit') ? ['pause_cpr_limit' => (int) $request->input('pause_cpr_limit')] : []) + [
             'event_flow' => $request->input('budget_funnel_lp', 'lp_to_wa'),
             'mode' => $request->input('mode_automation', 'default'),
             'system_flow' => $request->input('hold_spend', 'onhold'),
@@ -1025,7 +1087,7 @@ class T4JamController extends Controller
             'starting_budget' => (int) $request->input('starting_budget', 100000),
             'maximum_budget' => (int) $request->input('maximum_budget', 0),
             'cpr_cap' => (int) $request->input('cpr_cap', 7000),
-            'period' => (int) $request->input('period', 10),
+            'period' => (int) $request->input('period', 5),
             'pause_cpr_cap' => (int) $request->input('pause_cpr_cap', 5000),
             'pause_when_cpr_loss' => $request->boolean('cpr_pause'),
             'counter_cpr' => $request->boolean('counter_cpr'),
@@ -1100,7 +1162,7 @@ class T4JamController extends Controller
             'adset_id' => $task->ad_set_external_id,
             'current_budget' => $budget,
             'current_spend' => $spend,
-            'current_cpr' => $result > 0 ? round($spend / $result) : $spend,
+            'current_cpr' => $result > 0 ? intdiv((int) $spend, $result) : $spend,
             'current_hasil' => $result,
             'event_flow' => $task->event_flow,
             'system_flow' => $task->system_flow,
@@ -1127,6 +1189,7 @@ class T4JamController extends Controller
             'starting_budget' => $task->starting_budget,
             'maximum_budget' => $task->maximum_budget,
             'pause_cpr_cap' => $task->pause_cpr_cap,
+            'pause_cpr_limit' => $task->pauseCprLimit(),
             'period' => $task->period,
             'on_time' => substr((string) $task->on_time, 0, 5),
             'off_time' => substr((string) $task->off_time, 0, 5),
@@ -1267,9 +1330,12 @@ class T4JamController extends Controller
             $client = $metaSync->client($profile);
 
             if ($level === 'adset') {
-                $client->updateAdSetBudget($targetId, $budget);
+                $response = $client->updateAdSetBudget($targetId, $budget);
             } else {
-                $client->updateCampaignBudget($targetId, $budget);
+                $response = $client->updateCampaignBudget($targetId, $budget);
+            }
+            if (($response['success'] ?? false) !== true) {
+                throw new MetaAdsException('Meta belum mengonfirmasi perubahan budget.');
             }
 
             MetaFlowLog::info('budget pushed to meta', [

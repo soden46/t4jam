@@ -469,7 +469,7 @@ function renderAutomationTable(rows, summary = null) {
 
     qs('#automation_table tbody').innerHTML = rows.map((row) => {
         const currentCpr = Number(row.current_cpr || 0);
-        const cprCap = Number(row.cpr_cap || 0);
+        const cprCap = Number(row.pause_cpr_limit ?? row.cpr_cap ?? 0);
         const metricsStale = Boolean(row.metrics_stale);
         const isOverLimit = cprCap > 0 && currentCpr >= cprCap;
         const staleMetricTitle = metricsStale
@@ -493,7 +493,7 @@ function renderAutomationTable(rows, summary = null) {
                 <td class="num"><strong${staleMetricTitle}>${rupiah(row.current_spend)}</strong></td>
                 <td class="num center"><strong>${number(row.current_hasil)}</strong></td>
                 <td class="num ${isOverLimit ? 'text-danger' : ''}"><strong${staleMetricTitle}>${rupiah(row.current_cpr)}</strong></td>
-                <td class="num"><strong>${rupiah(row.cpr_cap)}</strong></td>
+                <td class="num"><strong>${rupiah(row.cpr_cap)}</strong><small class="campaign-sub">Pause: ${row.cpr_pause ? rupiah(cprCap) : 'Off'}</small></td>
                 <td class="log-cell">
                     <span class="log-text">${escapeHtml(row.log || '-')}</span>
                     <span class="log-time">${escapeHtml(row.metrics_synced_at || row.last_update || '-')}</span>
@@ -502,6 +502,7 @@ function renderAutomationTable(rows, summary = null) {
                     <button class="action-btn action-btn-log" data-history="${escapeHtml(row.id)}" type="button">Log</button>
                     <button class="action-btn action-btn-update" data-edit="${escapeHtml(row.id)}" type="button">Update</button>
                     <button class="action-btn action-btn-budget" data-budget-down="${escapeHtml(row.id)}" type="button">Turun Budget</button>
+                    ${row.mode === 'hybrid' ? `<button class="action-btn" data-hybrid="${escapeHtml(row.id)}" data-direction="up" type="button">Naik 2 Level</button><button class="action-btn" data-hybrid="${escapeHtml(row.id)}" data-direction="down" type="button">Turun 2 Level</button>` : ''}
                     <button class="action-btn action-btn-pause ${automationActive ? 'active' : ''}" data-toggle-task="${escapeHtml(row.id)}" data-status="${automationActive ? 'false' : 'true'}" type="button">${automationActive ? 'Pause' : 'Aktifkan'}</button>
                     <button class="action-btn action-btn-delete" data-delete-task="${escapeHtml(row.id)}" data-campaign="${escapeHtml(row.campaign_name)}" type="button">Hapus</button>
                 </td>
@@ -527,6 +528,17 @@ function renderAutomationTable(rows, summary = null) {
     }));
     qsa('[data-edit]').forEach((button) => button.addEventListener('click', () => editTask(button.dataset.edit)));
     qsa('[data-history]').forEach((button) => button.addEventListener('click', () => historyTask(button.dataset.history)));
+    qsa('[data-hybrid]').forEach((button) => button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+            const response = await request('/change-hybrid-budget/', { method: 'POST', body: formBody({ automation_id: button.dataset.hybrid, direction: button.dataset.direction }) });
+            toast(response.text);
+            await loadAutomationTasks();
+        } catch (error) {
+            toast(error.message, 'danger');
+            button.disabled = false;
+        }
+    }));
     qsa('[data-budget-down]').forEach((button) => button.addEventListener('click', async () => {
         const originalText = button.textContent;
         button.disabled = true;
@@ -609,7 +621,7 @@ async function editTask(id) {
         maximum_budget: task.maximum_budget,
         cpr_cap: task.cpr_cap,
         period: task.period,
-        pause_cpr_cap: task.pause_cpr_cap,
+        pause_cpr_limit: task.pause_cpr_limit ?? task.cpr_cap,
         on_time: task.on_time,
         off_time: task.off_time,
     }).forEach(([id, value]) => { const el = qs(`#${id}`); if (el) el.value = value ?? ''; });
@@ -619,6 +631,7 @@ async function editTask(id) {
     qs('#automation_activation').checked = task.status === 'true';
     qs('#automation-modal-title').textContent = 'Update Automation Budget';
     qs('#automation-submit-label').textContent = 'Update';
+    syncAutomationRuleFields();
     openModal('#automation-modal');
 }
 
@@ -635,6 +648,19 @@ function resetAutomationForm() {
     qs('#automation_id').value = '';
     qs('#modal_level').value = 'campaign';
     hideAutomationTargetFields();
+    syncAutomationRuleFields();
+}
+
+function syncAutomationRuleFields(changeFunnel = false) {
+    const isForm = qs('#budget_funnel_lp')?.value === 'lp_to_form';
+    const modeField = qs('#automation-mode-field');
+    if (modeField) modeField.hidden = !isForm;
+    if (changeFunnel) {
+        qs('#cpr_cap').value = isForm ? 36000 : 7000;
+        if (!isForm) qs('#mode_automation').value = 'default';
+    }
+    const pauseField = qs('#automation-pause-limit-field');
+    if (pauseField) pauseField.hidden = !qs('#cpr_pause')?.checked;
 }
 
 async function loadAutomationTargetAccounts() {
@@ -714,6 +740,8 @@ function bindAutomationForm(defaultMode, refreshAfterSuccess = null) {
     if (!form || form.dataset.bound) return;
     form.dataset.bound = '1';
     bindAutomationTargetFields();
+    qs('#budget_funnel_lp')?.addEventListener('change', () => syncAutomationRuleFields(true));
+    qs('#cpr_pause')?.addEventListener('change', () => syncAutomationRuleFields());
     form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const isUpdate = qs('#automation_id').value;

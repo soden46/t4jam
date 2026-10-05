@@ -18,21 +18,14 @@ use Illuminate\Support\Facades\DB;
 
 class AutomationBudgetService
 {
-    private const BUDGET_INCREASE_RATIO = 0.15;
-
-    private const BUDGET_INCREASE_COOLDOWN_HOURS = 72;
-
-    private const MIN_RESULTS_FOR_BUDGET_INCREASE = 3;
-
-    private const BUDGET_SCALE_CPR_RATIO = 0.80;
-
-    private const BUDGET_INCREASE_LOCK_SECONDS = 120;
-
     private array $statusCache = [];
 
     private bool $stopBatch = false;
 
-    public function __construct(private readonly AutomationTaskMutationService $taskMutations) {}
+    public function __construct(
+        private readonly AutomationTaskMutationService $taskMutations,
+        private readonly AutomationScalingPolicy $scalingPolicy,
+    ) {}
 
     private const CONVERSION_ACTION_TYPES = [
         'purchase' => ['purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase', 'onsite_conversion.purchase'],
@@ -312,7 +305,6 @@ class AutomationBudgetService
                 }
 
                 $beforeAction = $task->last_budget_action;
-                $beforeLog = $task->last_log;
                 $reason = 'rules_not_met';
                 $cpr = null;
                 $targetId = null;
@@ -361,7 +353,7 @@ class AutomationBudgetService
                     $result = $metrics !== null
                         ? max(0, (int) ($metrics['results'][$task->conversion] ?? 0))
                         : max(0, (int) $task->current_result);
-                    $cpr = $result > 0 ? (int) round($spend / $result) : $spend;
+                    $cpr = $result > 0 ? intdiv($spend, $result) : $spend;
 
                     $task->update([
                         'current_spend' => $spend,
@@ -373,7 +365,7 @@ class AutomationBudgetService
                     ]);
 
                     if (! $task->is_active) {
-                        if ((int) $task->pause_cpr_cap >= (int) $task->cpr_cap) {
+                        if ($task->pause_cpr_limit === null && (int) $task->pause_cpr_cap >= (int) $task->cpr_cap) {
                             $reason = 'invalid_recovery_threshold';
                         }
                         $this->resumeTaskIfEligible($task, $target, $client, $profile, $result, $cpr, $metrics !== null);
@@ -387,18 +379,18 @@ class AutomationBudgetService
                         return;
                     }
 
-                    if ($cpr < (int) $task->cpr_cap) {
-                        $reason = $this->increaseBudgetIfEligible(
+                    if (! $task->pause_when_cpr_loss || $cpr < $task->pauseCprLimit()) {
+                        $this->logPendingPauseCancellation($task);
+                        $this->clearPendingPause($task);
+                        $reason = $cpr < (int) $task->cpr_cap ? $this->increaseBudgetIfEligible(
                             $task,
                             $target,
                             $client,
                             $profile,
                             $result,
                             $cpr,
-                            $metrics !== null,
-                        );
-                        $this->logPendingPauseCancellation($task);
-                        $this->clearPendingPause($task);
+                            $metrics,
+                        ) : 'cpr_not_below_cap';
 
                         return;
                     }
@@ -440,7 +432,7 @@ class AutomationBudgetService
                             return;
                         }
 
-                        if ((int) $task->cpr_cap <= 0 || ! $task->pause_when_cpr_loss || $cpr < (int) $task->cpr_cap) {
+                        if ($task->pauseCprLimit() <= 0 || ! $task->pause_when_cpr_loss || $cpr < $task->pauseCprLimit()) {
                             return;
                         }
 
@@ -467,7 +459,7 @@ class AutomationBudgetService
                                 $client->updateCampaignStatus($targetId, false);
                             }
                         } catch (MetaAdsException $exception) {
-                            $this->handlePauseFailure($task, $profile, $exception, $cpr, $task->cpr_cap, $targetId, $reason, $message);
+                            $this->handlePauseFailure($task, $profile, $exception, $cpr, $task->pauseCprLimit(), $targetId, $reason, $message);
 
                             return;
                         }
@@ -475,7 +467,7 @@ class AutomationBudgetService
                         $message = sprintf(
                             'Campaign otomatis dipause karena CPR Rp. %s mencapai batas Rp. %s.',
                             number_format($cpr, 0, ',', '.'),
-                            number_format((int) $task->cpr_cap, 0, ',', '.'),
+                            number_format($task->pauseCprLimit(), 0, ',', '.'),
                         );
 
                         DB::transaction(function () use ($task, $target, $message): void {
@@ -538,7 +530,7 @@ class AutomationBudgetService
 
                     return;
                 } finally {
-                    $action = ($task->last_budget_action !== $beforeAction || ($task->last_budget_action === 'increase' && $beforeLog !== $task->last_log)) && in_array($task->last_budget_action, ['pause', 'resume', 'daily_resume', 'increase', 'schedule_pause', 'schedule_resume', 'manual_pause', 'manual_resume', 'manual_budget_decrease'], true) ? $task->last_budget_action : 'none';
+                    $action = ($task->last_budget_action !== $beforeAction || ($reason === 'budget_increased')) && in_array($task->last_budget_action, ['pause', 'resume', 'daily_resume', 'increase', 'schedule_pause', 'schedule_resume', 'manual_pause', 'manual_resume', 'manual_budget_decrease'], true) ? $task->last_budget_action : 'none';
                     $this->logEvaluation($profile, $task, $action, $action === 'none' ? $reason : null, $source);
                 }
             });
@@ -693,9 +685,9 @@ class AutomationBudgetService
         int $cpr,
         bool $metricsFresh,
     ): void {
-        $recoveryCap = (int) $task->pause_cpr_cap;
-        $dailyResume = $metricsFresh && $this->isDailyResumeDue($task) && $cpr < (int) $task->cpr_cap;
-        $counterResume = $task->counter_cpr && $recoveryCap > 0 && $recoveryCap < (int) $task->cpr_cap
+        $recoveryCap = $task->recoveryCprLimit();
+        $dailyResume = $metricsFresh && $this->isDailyResumeDue($task) && $cpr < min((int) $task->cpr_cap, $task->pauseCprLimit());
+        $counterResume = $task->counter_cpr && $recoveryCap > 0 && ($task->pause_cpr_limit !== null || $recoveryCap < (int) $task->cpr_cap)
             && $result > 0 && $cpr <= $recoveryCap;
 
         if ((! $dailyResume && ! $counterResume) || $task->last_budget_action !== 'pause' || $target->status !== 'PAUSED'
@@ -707,12 +699,12 @@ class AutomationBudgetService
             $task->refresh();
             $target->refresh();
             $result = (int) $task->current_result;
-            $cpr = $result > 0 ? (int) round($task->current_spend / $result) : (int) $task->current_spend;
-            $recoveryCap = (int) $task->pause_cpr_cap;
+            $cpr = $result > 0 ? intdiv((int) $task->current_spend, $result) : (int) $task->current_spend;
+            $recoveryCap = $task->recoveryCprLimit();
             $dailyResume = $metricsFresh && $this->isDailyResumeDue($task)
                 && $task->last_metrics_synced_at?->gte($this->automationDayStart($task))
-                && $task->metrics_unavailable_at === null && $cpr < (int) $task->cpr_cap;
-            $counterResume = $task->counter_cpr && $recoveryCap > 0 && $recoveryCap < (int) $task->cpr_cap
+                && $task->metrics_unavailable_at === null && $cpr < min((int) $task->cpr_cap, $task->pauseCprLimit());
+            $counterResume = $task->counter_cpr && $recoveryCap > 0 && ($task->pause_cpr_limit !== null || $recoveryCap < (int) $task->cpr_cap)
                 && $result > 0 && $cpr <= $recoveryCap;
 
             // A CPR recovery candidate is intentionally inactive until Meta accepts
@@ -970,7 +962,7 @@ class AutomationBudgetService
             'conversion' => $task->conversion,
             'spend' => $task->current_spend,
             'result' => $result,
-            'cpr' => $result > 0 ? (int) round($task->current_spend / $result) : $task->current_spend,
+            'cpr' => $result > 0 ? intdiv((int) $task->current_spend, $result) : $task->current_spend,
             'cpr_cap' => $task->cpr_cap,
             'target_status' => $target?->status,
             'action' => $action,
@@ -1100,16 +1092,18 @@ class AutomationBudgetService
         T4JamProfile $profile,
         int $result,
         int $cpr,
-        bool $hasFreshMetrics,
+        ?array $metrics,
     ): string {
-        if (! $hasFreshMetrics) {
+        if ($metrics === null) {
             return 'metrics_not_fresh';
         }
 
+        $conversion = $task->conversion;
+        $observedAt = Carbon::parse($metrics['insights_synced_at'] ?? now());
         $lock = $this->taskMutationLock($task);
-        $reason = $lock->get(function () use ($task, $target, $client, $profile, $result, $cpr): string {
+        $reason = $lock->get(function () use ($task, $target, $client, $profile, $result, $cpr, $metrics, $conversion, $observedAt): string {
             // Re-read after acquiring the task-level lock so a concurrent trigger cannot
-            // calculate its next increase from a stale local budget or cooldown value.
+            // calculate its next increase from a stale budget or consumed result count.
             $task->refresh();
             $target->refresh();
 
@@ -1121,7 +1115,7 @@ class AutomationBudgetService
                 return 'target_not_eligible';
             }
 
-            if (! $this->assertNoPendingMetaAction($task)) {
+            if ($task->pending_meta_action !== null || ! $this->assertNoPendingMetaAction($task)) {
                 return 'pending_meta_action';
             }
 
@@ -1129,22 +1123,38 @@ class AutomationBudgetService
                 return 'target_not_eligible';
             }
 
-            if ($result < self::MIN_RESULTS_FOR_BUDGET_INCREASE) {
-                return 'minimum_results_not_met';
+            if ($task->conversion !== $conversion || ! $this->isWithinAutomationWindow($task)
+                || ($task->scaling_observed_at && $observedAt->lt($task->scaling_observed_at))) {
+                return 'scaling_snapshot_outdated';
             }
 
             $cprTarget = (int) $task->cpr_cap;
-            if ($cprTarget <= 0 || $cpr >= $cprTarget) {
+            if ($cprTarget <= 0 || $cpr >= $cprTarget
+                || ($task->pause_when_cpr_loss && $cpr >= $task->pauseCprLimit())) {
                 return 'cpr_not_below_cap';
             }
 
-            $scaleCprLimit = (int) floor($cprTarget * self::BUDGET_SCALE_CPR_RATIO);
-            if ($cpr > $scaleCprLimit) {
-                return 'cpr_not_healthy_enough_for_scale';
+            $preset = $this->automationInsightsDatePreset();
+            $period = $preset === 'today' ? 'today:'.$this->automationDayStart($task)->toDateString() : $preset;
+            if ($preset === 'today' && $observedAt->lt($this->automationDayStart($task))) {
+                return 'scaling_snapshot_outdated';
+            }
+            $previousResult = $task->scaling_period === $period && $task->scaled_conversion === $conversion
+                ? (int) $task->scaled_result_count : 0;
+            $task->update(['scaling_observed_at' => $observedAt]);
+
+            if ($result <= $previousResult) {
+                $this->recordScalingDecision($task, "Tidak ada penambahan hasil. last result: {$previousResult} - current result: {$result}.");
+
+                return 'results_not_increased';
             }
 
-            if ($task->last_budget_changed_at?->gt(now()->subHours(self::BUDGET_INCREASE_COOLDOWN_HOURS))) {
-                return 'budget_increase_cooldown';
+            if ($result < (int) config('automation.scaling.minimum_results', 2)) {
+                return 'minimum_results_not_met';
+            }
+
+            if ($task->mode === 'hybrid') {
+                return 'hybrid_manual_scaling';
             }
 
             $currentBudget = (int) $target->daily_budget > 0
@@ -1160,22 +1170,25 @@ class AutomationBudgetService
                 return 'maximum_budget_reached';
             }
 
-            $nextBudget = (int) (round(($currentBudget * (1 + self::BUDGET_INCREASE_RATIO)) / 1000) * 1000);
-            $nextBudget = max($currentBudget + 1000, $nextBudget);
+            if (! $this->scalingPolicy->spendAllowsIncrease($task, $currentBudget, (int) $metrics['spend'])) {
+                $this->recordScalingDecision($task, 'Kenaikan budget ditahan oleh pengaturan Hold Budget Spend.');
 
-            if ($maximumBudget > 0) {
-                $nextBudget = min($nextBudget, $maximumBudget);
+                return 'budget_spend_on_hold';
             }
 
+            $nextBudget = $this->scalingPolicy->nextBudget($currentBudget, $maximumBudget);
             if ($nextBudget <= $currentBudget) {
                 return 'maximum_budget_reached';
             }
 
             try {
                 if ($task->level === 'adset') {
-                    $client->updateAdSetBudget($target->external_id, $nextBudget);
+                    $response = $client->updateAdSetBudget($target->external_id, $nextBudget);
                 } else {
-                    $client->updateCampaignBudget($target->external_id, $nextBudget);
+                    $response = $client->updateCampaignBudget($target->external_id, $nextBudget);
+                }
+                if (($response['success'] ?? false) !== true) {
+                    throw new MetaAdsException('Meta belum mengonfirmasi kenaikan budget.');
                 }
             } catch (MetaAdsException $exception) {
                 MetaFlowLog::warning('automation budget increase failed', [
@@ -1192,14 +1205,16 @@ class AutomationBudgetService
             }
 
             $message = sprintf(
-                'Budget otomatis dinaikkan dari Rp. %s menjadi Rp. %s karena CPR Rp. %s masih di bawah atau sama dengan 80%% batas CPR Rp. %s.',
+                'Budget otomatis dinaikkan dari Rp. %s menjadi Rp. %s; hasil %s menjadi %s, CPR Rp. %s di bawah CPR Cap Rp. %s.',
                 number_format($currentBudget, 0, ',', '.'),
                 number_format($nextBudget, 0, ',', '.'),
+                $previousResult,
+                $result,
                 number_format($cpr, 0, ',', '.'),
                 number_format($cprTarget, 0, ',', '.'),
             );
 
-            DB::transaction(function () use ($task, $target, $currentBudget, $nextBudget, $message): void {
+            DB::transaction(function () use ($task, $target, $currentBudget, $nextBudget, $message, $result, $period, $conversion): void {
                 $target->update(['daily_budget' => $nextBudget]);
                 $task->update([
                     'current_budget' => $nextBudget,
@@ -1207,6 +1222,9 @@ class AutomationBudgetService
                     'last_budget_before' => $currentBudget,
                     'last_budget_action' => 'increase',
                     'last_log' => $message,
+                    'scaled_result_count' => $result,
+                    'scaling_period' => $period,
+                    'scaled_conversion' => $conversion,
                 ]);
                 AutomationLog::create([
                     'automation_task_id' => $task->id,
@@ -1218,6 +1236,15 @@ class AutomationBudgetService
         });
 
         return $reason === false ? 'budget_increase_lock_unavailable' : $reason;
+    }
+
+    private function recordScalingDecision(AutomationTask $task, string $message): void
+    {
+        if ($task->last_log === $message) {
+            return;
+        }
+        $task->update(['last_log' => $message]);
+        AutomationLog::create(['automation_task_id' => $task->id, 'messages' => [$message]]);
     }
 
     private function taskMutationLock(AutomationTask $task)
@@ -1247,8 +1274,8 @@ class AutomationBudgetService
         $target->refresh();
 
         if (! $task->is_active || ! $this->hasPendingPause($task)
-            || (int) $task->cpr_cap <= 0 || ! $task->pause_when_cpr_loss
-            || $cpr < (int) $task->cpr_cap || $target->status !== 'ACTIVE'
+            || $task->pauseCprLimit() <= 0 || ! $task->pause_when_cpr_loss
+            || $cpr < $task->pauseCprLimit() || $target->status !== 'ACTIVE'
             || ! config('services.meta.enable_writes') || ! $this->writableMetaTarget($target)) {
             return;
         }
@@ -1261,7 +1288,7 @@ class AutomationBudgetService
             }
         } catch (MetaAdsException $exception) {
             $rateLimited = $this->isRateLimitException($exception);
-            $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap, $rateLimited);
+            $this->recordPendingPause($task, $profile, $cpr, $task->pauseCprLimit(), $rateLimited);
 
             if ($rateLimited) {
                 $this->stopBatch = true;
@@ -1273,7 +1300,7 @@ class AutomationBudgetService
         $message = sprintf(
             'Campaign otomatis dipause karena CPR Rp. %s mencapai batas Rp. %s setelah cooldown rate limit.',
             number_format($cpr, 0, ',', '.'),
-            number_format((int) $task->cpr_cap, 0, ',', '.'),
+            number_format($task->pauseCprLimit(), 0, ',', '.'),
         );
 
         DB::transaction(function () use ($task, $target, $message): void {
@@ -1537,14 +1564,14 @@ class AutomationBudgetService
             $metrics = $freshTargets[$targetKey] ?? null;
 
             if ($metrics === null) {
-                $this->recordPendingPause($task, $profile, null, $task->cpr_cap);
+                $this->recordPendingPause($task, $profile, null, $task->pauseCprLimit());
 
                 return;
             }
 
             $spend = (int) ($metrics['spend'] ?? $task->current_spend);
             $result = max(0, (int) ($metrics['results'][$task->conversion] ?? $task->current_result));
-            $cpr = $result > 0 ? (int) round($spend / $result) : $spend;
+            $cpr = $result > 0 ? intdiv($spend, $result) : $spend;
 
             $task->update([
                 'current_spend' => $spend,
@@ -1555,14 +1582,14 @@ class AutomationBudgetService
                 'last_checked_at' => now(),
             ]);
 
-            if ($cpr < (int) $task->cpr_cap) {
+            if ($cpr < $task->pauseCprLimit()) {
                 $this->logPendingPauseCancellation($task);
                 $this->clearPendingPause($task);
 
                 return;
             }
 
-            if ((int) $task->cpr_cap <= 0 || ! $task->pause_when_cpr_loss) {
+            if ($task->pauseCprLimit() <= 0 || ! $task->pause_when_cpr_loss) {
                 $this->clearPendingPause($task);
 
                 return;
@@ -1573,7 +1600,7 @@ class AutomationBudgetService
             }
 
             if ($target->status !== 'ACTIVE' || ! config('services.meta.enable_writes')) {
-                $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap);
+                $this->recordPendingPause($task, $profile, $cpr, $task->pauseCprLimit());
 
                 return;
             }
@@ -1584,7 +1611,7 @@ class AutomationBudgetService
                 });
             } catch (MetaAdsException $exception) {
                 $rateLimited = $this->isRateLimitException($exception);
-                $this->recordPendingPause($task, $profile, $cpr, $task->cpr_cap, $rateLimited);
+                $this->recordPendingPause($task, $profile, $cpr, $task->pauseCprLimit(), $rateLimited);
 
                 if ($rateLimited) {
                     $this->stopBatch = true;

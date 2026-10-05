@@ -73,7 +73,7 @@
                     <th class="num">Hasil Konversi</th>
                     <th class="num">CPR</th>
                     <th class="num">
-                        CPR PAUSE LIMIT
+                        CPR CAP / PAUSE
                         {{-- <details class="info-tooltip">
                             <summary><span aria-hidden="true">ⓘ</span><span class="sr-only">Info CPR PAUSE LIMIT</span></summary>
                             <span class="info-tooltip__content" role="tooltip">Campaign akan dipause otomatis jika CPR mencapai atau melebihi batas ini.</span>

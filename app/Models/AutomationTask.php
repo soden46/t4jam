@@ -29,6 +29,11 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'starting_budget',
     'maximum_budget',
     'pause_cpr_cap',
+    'pause_cpr_limit',
+    'scaled_result_count',
+    'scaling_period',
+    'scaled_conversion',
+    'scaling_observed_at',
     'period',
     'is_active',
     'pause_when_cpr_loss',
@@ -58,6 +63,9 @@ class AutomationTask extends Model
     {
         return [
             'is_active' => 'boolean',
+            'pause_cpr_limit' => 'integer',
+            'scaled_result_count' => 'integer',
+            'scaling_observed_at' => 'datetime',
             'pause_when_cpr_loss' => 'boolean',
             'counter_cpr' => 'boolean',
             'use_on_off' => 'boolean',
@@ -74,6 +82,18 @@ class AutomationTask extends Model
     public function adAccount(): BelongsTo
     {
         return $this->belongsTo(AdAccount::class);
+    }
+
+    public function pauseCprLimit(): int
+    {
+        return (int) ($this->pause_cpr_limit ?? $this->cpr_cap);
+    }
+
+    public function recoveryCprLimit(): int
+    {
+        // Legacy tasks retain their configured recovery threshold until edited.
+        return $this->pause_cpr_limit === null ? (int) $this->pause_cpr_cap
+            : min((int) $this->cpr_cap, $this->pauseCprLimit() - 1);
     }
 
     public function campaign(): BelongsTo

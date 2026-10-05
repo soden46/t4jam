@@ -1872,7 +1872,7 @@ class ExampleTest extends TestCase
         $this->assertTrue($task->fresh()->is_active);
     }
 
-    public function test_automation_scales_budget_by_fifteen_percent_when_cpr_is_under_cap(): void
+    public function test_automation_scales_budget_by_two_levels_when_new_results_are_under_cap(): void
     {
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
@@ -1907,12 +1907,12 @@ class ExampleTest extends TestCase
             ->expectsOutput("Profile {$profile->id}: 0 automation campaign dipause.")
             ->assertExitCode(0);
 
-        $this->assertSame(115000, $task->campaign->fresh()->daily_budget);
-        $this->assertSame(115000, $task->fresh()->current_budget);
+        $this->assertSame(144000, $task->campaign->fresh()->daily_budget);
+        $this->assertSame(144000, $task->fresh()->current_budget);
         $this->assertSame('increase', $task->fresh()->last_budget_action);
         Http::assertSent(fn ($request) => $request->method() === 'POST'
             && str_contains($request->url(), $task->campaign->external_id)
-            && ($request->data()['daily_budget'] ?? null) === 115000);
+            && ($request->data()['daily_budget'] ?? null) === 144000);
     }
 
     public function test_counter_cpr_resumes_only_an_automation_paused_campaign(): void
