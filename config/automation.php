@@ -1,12 +1,12 @@
 <?php
 
 return [
-    // Each pair of results earns two levels: 77000 -> 100000 -> 120000,
-    // then 144000 -> 172800 -> 207360 -> 248832; see the user's budget history.
+    // First result pair targets 120000; each later pair earns four 20% levels.
     'scaling' => [
         'minimum_results' => 2,
         'results_per_increase' => 2,
-        'levels_per_result_batch' => 2,
+        'initial_result_budget' => 120000,
+        'levels_per_result_batch' => 4,
         'levels_per_increase' => 2,
         'level_ratio' => 1.20,
         'first_level_budget' => 100000,

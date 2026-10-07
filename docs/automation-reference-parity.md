@@ -3,15 +3,17 @@
 Observed on 2026-10-05 (Asia/Jakarta). Reference:
 https://t4jam.santuiaja.com/automation-task/
 
-Updated 2026-10-07: automatic scaling follows the user's latest budget-history
-image: 77,000 -> 100,000 -> 120,000 -> 144,000 -> 172,800 -> 207,360 -> 248,832.
-Each level is `max(100000, round(current_budget * 1.2))`. Combined with the user's
-earlier every-two-leads instruction, each result pair earns two levels:
-2 results -> 120,000; 4 -> 172,800; 6 -> 248,832, starting at 77,000.
-This corrects the previous four-level-per-pair interpretation. The latest image
-shows budget amounts and processing-status transitions, without lead counts;
-the two-level grouping uses the earlier result instruction and the pairs of
-budget changes between processing-status transitions.
+Updated 2026-10-07: the user requested alignment with the supplied chat:
+starting at 77,000, 2 leads -> 120,000; 2 more leads -> 248,832.
+The first complete pair targets 120,000 when the processed-result marker is
+zero and the current budget is lower. Otherwise, each pair earns four levels
+of `max(100000, round(current_budget * 1.2))`, rounded at each level.
+The resulting totals are 2 results -> 120,000; 4 -> 248,832; 6 -> 515,978.
+The budget-history image shows intermediate amounts and processing-status
+transitions without lead counts. Its intermediate budgets are calculated locally;
+only the final budget is sent in one Meta write per evaluation. The four-level
+continuation generalizes the chat's 120,000 -> 248,832 transition; later lead
+totals are calculated local behavior, not separately observed reference events.
 This is not proof of complete parity. No reference-account settings or Meta
 budgets were changed during inspection.
 
@@ -92,10 +94,12 @@ uses the rendered timestamps.
 
 - Default mode evaluates fresh Insights at the configured running period. Each
   two additional results from the selected conversion earn one automatic increase.
-  Every pair increases two levels. Each level multiplies the current budget by
-  1.2, rounds to integer IDR, and applies a 100,000 minimum. Starting at 77,000,
-  pair totals are 120,000 -> 172,800 -> 248,832. There is no fixed initial
-  120,000 target; a current budget of 100,000 becomes 144,000 after one pair.
+  With a zero processed-result marker and a budget below 120,000, the first pair
+  targets 120,000, subject to Maximum Budget. Otherwise, each pair increases four
+  levels. Each level multiplies the current budget by 1.2, rounds to integer IDR,
+  and applies a 100,000 minimum. Starting at 77,000, pair totals are
+  120,000 -> 248,832 -> 515,978. A higher current budget is never lowered to the
+  initial target; for example, 200,000 becomes 414,720 after one pair.
   The previous 72-hour, three-result, and 80%-of-cap gates are removed.
   CPR must be strictly below CPR Cap.
 - Separate processed-result state is scoped to conversion and account-local day
@@ -138,7 +142,8 @@ as evidence of that earlier behavior.
 | --- | --- | --- |
 | Automatic result batch | 2 new results | User explicitly requested an increase every 2 leads |
 | First-level minimum | 100,000 | Latest user image explicitly shows 77,000 -> 100,000; generic minimum inferred from this transition |
-| Automatic increase per pair | Two levels: `max(100000, round(budget * 1.2))` per level | Replays all supplied budget amounts; pair grouping combines the earlier two-leads instruction with the latest budget history |
+| Initial automatic increase | 120,000 if the processed-result marker is zero and the current budget is lower | Chat specifies 2 leads -> 120,000 starting at 77,000; applies Maximum Budget |
+| Subsequent automatic increase per pair | Four levels: `max(100000, round(budget * 1.2))` per level | Matches the chat's next 2 leads -> 248,832 from 120,000; later pairs extrapolate this formula |
 | Hybrid manual increase | Two steps of 20%, with first-level floor 100,000 | Existing manual controls retained |
 | Result jump | Process all complete new pairs in one write; retain the odd remainder | Local catch-up policy consistent with every-2-results instruction |
 | Hold | Default requires spend >= budget; No Hold X3 requires spend * 3 >= budget; Loss Doll bypasses spend gate | Labels observed, numerical behavior inferred |
@@ -154,7 +159,7 @@ choices are reviewable local behavior, not claims about hidden source code.
 ## Validation and rollout
 
 `AutomationReferenceFlowTest` exercises results 1 -> 2 -> 2 -> 3 -> 4 -> 5 -> 6,
-including exact outgoing budgets 120,000, 172,800, and 248,832 from a starting
+including exact outgoing budgets 120,000, 248,832, and 515,978 from a starting
 budget of 77,000, using fake Meta
 responses. It also covers count jumps and odd remainders, legacy odd markers,
 maximum budgets, a 100,000 starting budget, existing higher budgets, integer

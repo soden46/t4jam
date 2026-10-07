@@ -6,11 +6,17 @@ use App\Models\AutomationTask;
 
 class AutomationScalingPolicy
 {
-    public function nextAutomaticBudget(int $budget, int $batches, int $maximum = 0): int
+    public function nextAutomaticBudget(int $budget, int $previousResult, int $batches, int $maximum = 0): int
     {
+        $initialBudget = (int) config('automation.scaling.initial_result_budget', 120000);
         for ($batch = 0; $batch < $batches; $batch++) {
             $before = $budget;
-            $budget = $this->increaseByLevels($budget, (int) config('automation.scaling.levels_per_result_batch', 2), $maximum);
+            if ($batch === 0 && $previousResult === 0 && $budget < $initialBudget) {
+                $budget = $maximum > 0 ? min($initialBudget, $maximum) : $initialBudget;
+            } else {
+                $budget = $this->increaseByLevels($budget, (int) config('automation.scaling.levels_per_result_batch', 4), $maximum);
+            }
+
             if ($budget <= $before || ($maximum > 0 && $budget >= $maximum)) {
                 break;
             }
