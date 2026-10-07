@@ -1153,6 +1153,15 @@ class AutomationBudgetService
                 return 'minimum_results_not_met';
             }
 
+            $resultsPerIncrease = max(1, (int) config('automation.scaling.results_per_increase', 2));
+            $batches = intdiv($result - $previousResult, $resultsPerIncrease);
+            if ($batches === 0) {
+                $this->recordScalingDecision($task, "Menunggu tambahan {$resultsPerIncrease} hasil untuk kenaikan budget. last result: {$previousResult} - current result: {$result}.");
+
+                return 'result_batch_not_met';
+            }
+            $consumedResult = $previousResult + $batches * $resultsPerIncrease;
+
             if ($task->mode === 'hybrid') {
                 return 'hybrid_manual_scaling';
             }
@@ -1176,7 +1185,7 @@ class AutomationBudgetService
                 return 'budget_spend_on_hold';
             }
 
-            $nextBudget = $this->scalingPolicy->nextBudget($currentBudget, $maximumBudget);
+            $nextBudget = $this->scalingPolicy->nextAutomaticBudget($currentBudget, $previousResult, $batches, $maximumBudget);
             if ($nextBudget <= $currentBudget) {
                 return 'maximum_budget_reached';
             }
@@ -1205,16 +1214,17 @@ class AutomationBudgetService
             }
 
             $message = sprintf(
-                'Budget otomatis dinaikkan dari Rp. %s menjadi Rp. %s; hasil %s menjadi %s, CPR Rp. %s di bawah CPR Cap Rp. %s.',
+                'Budget otomatis dinaikkan dari Rp. %s menjadi Rp. %s; hasil terpakai %s menjadi %s dari %s hasil, CPR Rp. %s di bawah CPR Cap Rp. %s.',
                 number_format($currentBudget, 0, ',', '.'),
                 number_format($nextBudget, 0, ',', '.'),
                 $previousResult,
+                $consumedResult,
                 $result,
                 number_format($cpr, 0, ',', '.'),
                 number_format($cprTarget, 0, ',', '.'),
             );
 
-            DB::transaction(function () use ($task, $target, $currentBudget, $nextBudget, $message, $result, $period, $conversion): void {
+            DB::transaction(function () use ($task, $target, $currentBudget, $nextBudget, $message, $consumedResult, $period, $conversion): void {
                 $target->update(['daily_budget' => $nextBudget]);
                 $task->update([
                     'current_budget' => $nextBudget,
@@ -1222,7 +1232,7 @@ class AutomationBudgetService
                     'last_budget_before' => $currentBudget,
                     'last_budget_action' => 'increase',
                     'last_log' => $message,
-                    'scaled_result_count' => $result,
+                    'scaled_result_count' => $consumedResult,
                     'scaling_period' => $period,
                     'scaled_conversion' => $conversion,
                 ]);

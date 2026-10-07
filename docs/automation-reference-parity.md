@@ -3,9 +3,13 @@
 Observed on 2026-10-05 (Asia/Jakarta). Reference:
 https://t4jam.santuiaja.com/automation-task/
 
-Status: observed result-triggered flow implemented locally, with explicit inferred
-policies for rules hidden by the reference backend. This is not proof of complete
-parity. No reference-account settings or Meta budgets were changed during inspection.
+Updated 2026-10-07: automatic scaling now follows the user's screenshot and
+clarification: increase every two leads, first to 120,000, then to 248,832 after
+two more. This supersedes the earlier inferred one-increase-per-higher-count
+policy. Four compounded 20% levels per subsequent pair reproduce those amounts;
+later values remain a local interpretation, not verified reference behavior.
+This is not proof of complete parity. No reference-account settings or Meta
+budgets were changed during inspection.
 
 ## Verified reference behavior
 
@@ -82,18 +86,26 @@ uses the rendered timestamps.
 
 ## Implemented Laravel flow
 
-- Default mode evaluates fresh Insights at the configured running period. An
-  eligible count greater than the successfully processed count can increase the
-  budget immediately; the previous 72-hour, three-result, and 80%-of-cap gates
-  are removed. CPR must be strictly below CPR Cap.
+- Default mode evaluates fresh Insights at the configured running period. Each
+  two additional results from the selected conversion earn one automatic increase.
+  The first pair brings a lower budget to 120,000. Subsequent pairs increase four
+  compounded 20% levels, rounded to integer IDR per level: 120,000 -> 248,832 ->
+  515,978. If the current budget already reaches/exceeds 120,000, the first pair
+  also increases four levels, preserving an existing higher budget.
+  The previous 72-hour, three-result, and 80%-of-cap gates are removed.
+  CPR must be strictly below CPR Cap.
 - Separate processed-result state is scoped to conversion and account-local day
   for `today` Insights (otherwise to the configured preset). Display/reconciliation
   refreshes cannot consume it. Lower/corrected counts do not reduce the marker.
   Out-of-order snapshots cannot increase budget. Changing conversion clears it;
   manually resetting budget does not permit reuse of consumed results.
-- One successful increase consumes the complete observed count. Failed or
-  unconfirmed Meta writes leave the count unconsumed, so they can retry. All
-  budget mutations use the existing shared task lock.
+- Multiple newly observed pairs are calculated together and sent in one Meta
+  write. A successful increase consumes only complete pairs; result 5 consumes
+  4, leaving one for result 6. Failed or unconfirmed Meta writes leave all pairs
+  unconsumed, so they can retry. Existing markers, including odd counts, remain
+  intact and require two new results; deployment does not replay past results.
+  With `today` Insights, a new account-local day starts a new pair counter without
+  resetting the current budget. All budget mutations use the existing task lock.
 - New `pause_cpr_limit` stores the separate Pause CPR Cap. Pause uses `>=` and
   takes priority over scaling. Recovery uses CPR Cap, constrained below the
   pause threshold to avoid immediately pausing again. Budget never triggers pause.
@@ -111,16 +123,20 @@ uses the rendered timestamps.
   polling behavior are retained. CPR display and evaluation truncate integer
   spend/results consistently with the observed histories.
 
-## Explicit inferred policies, not verified reference rules
+## Requested scaling and remaining inferred policies
 
-`config/automation.php` and `AutomationScalingPolicy` isolate the inferred numbers:
+`config/automation.php` and `AutomationScalingPolicy` isolate these numbers.
+The 2026-10-07 user instruction takes priority over the earlier observed
+one-result increase; the historical reference observations above are retained
+as evidence of that earlier behavior.
 
 | Policy | Local implementation | Evidence / limitation |
 | --- | --- | --- |
-| Minimum results | 2 | Increase at 2 verified; behavior at 1 not established |
-| Level increase | Two steps of 20%, rounded to integer IDR per step; each next step at least 100,000 | 120,000 -> 172,800 matches; first-level floor and general formula are inferred |
-| Example initial budget | 75,000 -> 120,000 | Local fixture assumption; reference pre-increase budget unavailable |
-| Result jump | One increase per fresh higher count, even if several conversions arrive together | Skipped-result formula unavailable |
+| Automatic result batch | 2 new results | User explicitly requested an increase every 2 leads |
+| Initial automatic budget | 120,000 for a budget below this amount | User screenshot; existing higher budgets are increased, never lowered |
+| Subsequent automatic increase | Four steps of 20%, rounded to integer IDR per step | Reproduces requested 120,000 -> 248,832; later formula inferred |
+| Hybrid manual increase | Two steps of 20%, with first-level floor 100,000 | Existing manual controls retained |
+| Result jump | Process all complete new pairs in one write; retain the odd remainder | Local catch-up policy consistent with every-2-results instruction |
 | Hold | Default requires spend >= budget; No Hold X3 requires spend * 3 >= budget; Loss Doll bypasses spend gate | Labels observed, numerical behavior inferred |
 | Hybrid | Manual scaling; CPR protection/recovery remain automatic | Buttons observed; automatic Hybrid behavior unavailable |
 | Funnels | Same numeric scaling policy for all funnels | Histories only establish LP To Form / Default / Loss Doll behavior |
@@ -133,15 +149,20 @@ choices are reviewable local behavior, not claims about hidden source code.
 
 ## Validation and rollout
 
-`AutomationReferenceFlowTest` replays results 1 -> 2 -> 2 -> 3 over twenty minutes,
-including exact outgoing budgets 120,000 and 172,800, using fake Meta responses.
-It also covers failed writes/retries, independent pause/recovery thresholds,
-metrics refreshes, day rollover, Hold, and Hybrid ownership/budget boundaries.
+`AutomationReferenceFlowTest` exercises results 1 -> 2 -> 2 -> 3 -> 4 -> 5 -> 6,
+including exact outgoing budgets 120,000, 248,832, and 515,978, using fake Meta
+responses. It also covers count jumps and odd remainders, legacy odd markers,
+maximum budgets, existing higher budgets, failed writes/retries, independent
+pause/recovery thresholds, metrics refreshes, day rollover, Hold, and Hybrid
+ownership/budget boundaries.
 Existing automation tests retain status, locking, stale-metric, disabled-write,
 reconciliation, scheduling, and rate-limit checks.
 
 Deploy code and run `php artisan migrate --force` before restarting workers on
 the new code, then rebuild assets and refresh cached configuration. The migration
 adds result state and `pause_cpr_limit`; no existing legacy threshold is rewritten.
+The 2026-10-07 pair-scaling update needs no additional migration; it reuses that
+state without rewriting existing markers. Refresh cached configuration and restart
+existing workers to pick up the new policy.
 Local tests and browser checks do not prove live Meta success or full parity for
 unobserved reference modes. No deployment or live budget mutation was performed.

@@ -116,8 +116,9 @@ CPR dihitung sebagai spend / hasil, dibulatkan ke bawah (atau spend jika hasil n
 
 Flow automation budget:
 
-- Scale: hasil bertambah dibanding hasil yang sudah dipakai untuk kenaikan, minimal dua hasil, dan `CPR < CPR Cap`. Tidak ada cooldown wajib 72 jam. Hasil yang sama tidak menaikkan budget dua kali.
-- Besaran kenaikan: dua level 20%, dengan minimum budget level pertama 100.000; angka ini merupakan inferensi yang dipisahkan di `config/automation.php`, bukan formula backend referensi yang sudah terverifikasi.
+- Scale: setiap tambahan dua hasil dari conversion yang dipilih, dengan `CPR < CPR Cap`. Tidak ada cooldown wajib 72 jam. Hasil yang sama tidak menaikkan budget dua kali; satu hasil yang belum berpasangan tetap disimpan untuk kenaikan berikutnya.
+- Besaran kenaikan sesuai instruksi 7 Oktober 2026: pasangan pertama membawa budget yang lebih rendah ke Rp120.000, lalu setiap pasangan berikutnya naik empat level 20%, dibulatkan ke integer IDR tiap level: 2 hasil → Rp120.000; 4 → Rp248.832; 6 → Rp515.978. Budget yang sudah >= Rp120.000 naik empat level sejak pasangan pertama, sehingga tidak diturunkan. Angka disimpan di `config/automation.php`; rumus empat level merupakan interpretasi dari contoh Rp120.000 → Rp248.832.
+- Jika beberapa pasangan masuk sekaligus, satu write Meta mencakup semua pasangan lengkap. Penanda hasil hanya mengonsumsi pasangan lengkap setelah write dikonfirmasi. Penanda task lama dipertahankan; setiap kenaikan berikutnya memerlukan dua hasil baru. Dengan Insights `today`, hitungan pasangan dimulai kembali pada hari akun berikutnya, tanpa mereset budget.
 - Hold: Default memerlukan spend >= budget; No Hold X3 memakai spend x 3 >= budget; Loss Doll tanpa gerbang spend. Kondisi numerik Hold ini masih inferensi.
 - Hybrid: kontrol manual naik/turun dua level; perlindungan CPR tetap otomatis. Perilaku otomatis Hybrid referensi belum diketahui.
 - Pause: `CPR >= Pause CPR Cap` dan toggle pause aktif. Budget/spend mencapai batas budget tidak menjadi trigger pause.

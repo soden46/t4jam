@@ -67,7 +67,7 @@
                 </label>
                 <label>CPR Cap <span class="currency">IDR</span>
                     <input type="number" name="cpr_cap" id="cpr_cap" value="7000">
-                    <small>Batas CPR untuk kenaikan budget saat hasil bertambah.</small>
+                    <small>Batas CPR untuk kenaikan budget setiap tambahan 2 hasil dari conversion yang dipilih.</small>
                 </label>
                 <label>Running Period
                     <select name="period" id="period">

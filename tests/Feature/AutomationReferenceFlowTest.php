@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Services\AutomationBudgetService;
 use App\Services\MetaAdsSyncService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -15,7 +16,7 @@ class AutomationReferenceFlowTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_reference_sequence_scales_twice_in_twenty_minutes_without_reusing_results(): void
+    public function test_requested_sequence_scales_every_two_results_without_reusing_results(): void
     {
         [$profile, $task] = $this->fixture();
         $this->evaluate($profile, $task, 33016, 1);
@@ -29,23 +30,97 @@ class AutomationReferenceFlowTest extends TestCase
         $this->assertStringContainsString('Tidak ada penambahan hasil', $task->fresh()->last_log);
         $this->travel(10)->minutes();
         $this->evaluate($profile, $task, 37537, 3);
-        $this->assertSame(172800, $task->fresh()->current_budget);
+        $this->assertSame(120000, $task->fresh()->current_budget);
+        $this->assertSame(2, $task->fresh()->scaled_result_count);
+        Http::assertSentCount(1);
+        $this->evaluate($profile, $task, 40000, 4);
+        $this->assertSame(248832, $task->fresh()->current_budget);
+        $this->assertSame(4, $task->fresh()->scaled_result_count);
         Http::assertSentCount(2);
-        Http::assertSent(fn ($r) => ($r->data()['daily_budget'] ?? 0) === 172800);
+        Http::assertSent(fn ($r) => ($r->data()['daily_budget'] ?? 0) === 120000);
+        Http::assertSent(fn ($r) => ($r->data()['daily_budget'] ?? 0) === 248832);
+        $this->evaluate($profile, $task, 50000, 5);
+        Http::assertSentCount(2);
+        $this->evaluate($profile, $task, 60000, 6);
+        $this->assertSame(515978, $task->fresh()->current_budget);
+        $this->assertSame(6, $task->fresh()->scaled_result_count);
+        Http::assertSentCount(3);
         $this->travel(73)->hours();
         // Replay an old snapshot after a day boundary must not scale again.
-        $this->evaluate($profile, $task, 37537, 3, now()->subHours(73));
-        Http::assertSentCount(2);
+        $this->evaluate($profile, $task, 60000, 6, now()->subHours(73));
+        Http::assertSentCount(3);
     }
 
     public function test_metrics_refresh_does_not_consume_a_new_result(): void
     {
         [$profile, $task] = $this->fixture();
         $this->evaluate($profile, $task, 20000, 2);
-        $task->refresh()->update(['current_result' => 3, 'current_spend' => 30000, 'last_metrics_synced_at' => now()]);
-        $this->evaluate($profile, $task, 30000, 3);
-        $this->assertSame(172800, $task->fresh()->current_budget);
+        $task->refresh()->update(['current_result' => 4, 'current_spend' => 40000, 'last_metrics_synced_at' => now()]);
+        $this->evaluate($profile, $task, 40000, 4);
+        $this->assertSame(248832, $task->fresh()->current_budget);
         Http::assertSentCount(2);
+    }
+
+    public function test_result_jump_catches_up_and_keeps_the_unpaired_result(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $this->evaluate($profile, $task, 50000, 5);
+        $this->assertSame(248832, $task->fresh()->current_budget);
+        $this->assertSame(4, $task->fresh()->scaled_result_count);
+        Http::assertSentCount(1);
+        $this->evaluate($profile, $task, 50000, 5);
+        Http::assertSentCount(1);
+        $this->evaluate($profile, $task, 60000, 6);
+        $this->assertSame(515978, $task->fresh()->current_budget);
+        $this->assertSame(6, $task->fresh()->scaled_result_count);
+        Http::assertSentCount(2);
+    }
+
+    public function test_first_odd_result_count_keeps_a_result_for_the_next_pair(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $this->evaluate($profile, $task, 30000, 3);
+        $this->assertSame(120000, $task->fresh()->current_budget);
+        $this->assertSame(2, $task->fresh()->scaled_result_count);
+        $this->evaluate($profile, $task, 40000, 4);
+        $this->assertSame(248832, $task->fresh()->current_budget);
+        Http::assertSentCount(2);
+    }
+
+    public function test_existing_odd_marker_requires_two_new_results_without_replaying_history(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $task->campaign->update(['daily_budget' => 120000]);
+        $task->update(['current_budget' => 120000, 'scaled_result_count' => 3,
+            'scaled_conversion' => $task->conversion, 'scaling_period' => 'today:2026-10-05']);
+        $this->evaluate($profile, $task, 40000, 4);
+        Http::assertNothingSent();
+        $this->evaluate($profile, $task, 50000, 5);
+        $this->assertSame(248832, $task->fresh()->current_budget);
+        $this->assertSame(5, $task->fresh()->scaled_result_count);
+    }
+
+    public function test_maximum_budget_caps_multiple_pairs_without_pausing(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $task->update(['maximum_budget' => 200000]);
+        $this->evaluate($profile, $task, 60000, 6);
+        $this->assertSame(200000, $task->fresh()->current_budget);
+        $this->assertTrue($task->fresh()->is_active);
+        Http::assertSentCount(1);
+        Http::assertSent(fn ($r) => ($r->data()['daily_budget'] ?? 0) === 200000);
+        $this->evaluate($profile, $task, 80000, 8);
+        Http::assertSentCount(1);
+    }
+
+    public function test_budget_already_above_initial_target_increases_without_being_lowered(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $task->campaign->update(['daily_budget' => 200000]);
+        $task->update(['current_budget' => 200000]);
+        $this->evaluate($profile, $task, 20000, 2);
+        $this->assertSame(414720, $task->fresh()->current_budget);
+        Http::assertSentCount(1);
     }
 
     public function test_failed_or_unconfirmed_write_does_not_consume_results_and_can_retry(): void
@@ -59,17 +134,50 @@ class AutomationReferenceFlowTest extends TestCase
         $this->assertSame(2, $task->fresh()->scaled_result_count);
     }
 
+    public function test_failed_later_pair_retries_the_same_budget_without_losing_the_remainder(): void
+    {
+        [$profile, $task] = $this->fixture(rejectFirstBudget: true);
+        $task->campaign->update(['daily_budget' => 120000]);
+        $task->update(['current_budget' => 120000, 'scaled_result_count' => 2,
+            'scaled_conversion' => $task->conversion, 'scaling_period' => 'today:2026-10-05']);
+        $this->evaluate($profile, $task, 50000, 5);
+        $this->assertSame(120000, $task->fresh()->current_budget);
+        $this->assertSame(2, $task->fresh()->scaled_result_count);
+        $this->assertSame(120000, $task->campaign->fresh()->daily_budget);
+        $this->evaluate($profile, $task, 50000, 5);
+        $this->assertSame(248832, $task->fresh()->current_budget);
+        $this->assertSame(4, $task->fresh()->scaled_result_count);
+        Http::assertSentCount(2);
+        Http::assertSent(fn ($r) => ($r->data()['daily_budget'] ?? 0) === 248832);
+    }
+
+    public function test_adset_scaling_uses_pairs_and_writes_only_the_adset_budget(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $adSet = $task->campaign->adSets()->firstOrFail();
+        $task->update(['level' => 'adset', 'ad_set_id' => $adSet->id,
+            'ad_set_external_id' => $adSet->external_id]);
+        $this->evaluate($profile, $task, 40000, 4);
+        $this->assertSame(248832, $task->fresh()->current_budget);
+        $this->assertSame(248832, $adSet->fresh()->daily_budget);
+        $this->assertSame(75000, $task->campaign->fresh()->daily_budget);
+        Http::assertSentCount(1);
+        Http::assertSent(fn ($r) => str_ends_with($r->url(), '/'.$adSet->external_id)
+            && ($r->data()['daily_budget'] ?? 0) === 248832);
+    }
+
     public function test_account_local_new_day_allows_new_results_but_attribution_decreases_do_not_replay(): void
     {
         [$profile, $task] = $this->fixture();
         $task->adAccount->update(['timezone_name' => 'America/Los_Angeles']);
-        $this->evaluate($profile, $task, 30000, 3);
+        $this->evaluate($profile, $task, 40000, 4);
         $this->evaluate($profile, $task, 20000, 2);
-        $this->evaluate($profile, $task, 30000, 3);
+        $this->evaluate($profile, $task, 40000, 4);
         Http::assertSentCount(1);
         $this->travelTo(now('America/Los_Angeles')->addDay()->startOfDay()->addHour());
         $this->evaluate($profile, $task, 20000, 2);
         Http::assertSentCount(2);
+        $this->assertSame(515978, $task->fresh()->current_budget);
         $this->assertSame('today:'.now('America/Los_Angeles')->toDateString(), $task->fresh()->scaling_period);
     }
 
@@ -154,7 +262,7 @@ class AutomationReferenceFlowTest extends TestCase
 
     private function fixture(bool $rejectFirstBudget = false): array
     {
-        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-10-05 10:00:00', 'Asia/Jakarta'));
+        $this->travelTo(Carbon::parse('2026-10-05 10:00:00', 'Asia/Jakarta'));
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true, 'services.meta.automation_insights_date_preset' => 'today']);
         $user = User::firstOrFail();
@@ -162,7 +270,7 @@ class AutomationReferenceFlowTest extends TestCase
         $task = AutomationTask::with(['campaign', 'adAccount'])->where('user_id', $user->id)->firstOrFail();
         AutomationTask::whereKeyNot($task->id)->delete();
         $task->campaign->update(['status' => 'ACTIVE', 'effective_status' => 'ACTIVE', 'daily_budget' => 75000]);
-        $task->update(['conversion' => 'purchase', 'mode' => 'default', 'system_flow' => 'loss',
+        $task->update(['conversion' => 'lead', 'mode' => 'default', 'system_flow' => 'loss',
             'current_budget' => 75000, 'cpr_cap' => 35000, 'maximum_budget' => 0, 'is_active' => true,
             'pause_when_cpr_loss' => true, 'counter_cpr' => false, 'use_on_off' => false]);
         $profile->adAccounts()->syncWithoutDetaching([$task->ad_account_id]);
@@ -177,9 +285,10 @@ class AutomationReferenceFlowTest extends TestCase
     {
         $task->refresh();
         $at ??= now();
+        $key = $task->level === 'adset' ? 'adset:'.$task->ad_set_external_id : 'campaign:'.$task->campaign_external_id;
         app(AutomationBudgetService::class)->pauseWebhookTasksOverCprCap(
             $profile, app(MetaAdsSyncService::class)->client($profile), $task->adAccount->external_id,
-            [$task->campaign_external_id], [], ['campaign:'.$task->campaign_external_id => [
+            [$task->campaign_external_id], $task->level === 'adset' ? [$task->ad_set_external_id] : [], [$key => [
                 'spend' => $spend, 'results' => [$task->conversion => $results],
                 'insights_synced_at' => $at,
                 'date_stop' => $at->copy()->timezone($task->adAccount->timezone_name ?: 'Asia/Jakarta')->toDateString(),
