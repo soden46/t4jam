@@ -1185,7 +1185,7 @@ class AutomationBudgetService
                 return 'budget_spend_on_hold';
             }
 
-            $nextBudget = $this->scalingPolicy->nextAutomaticBudget($currentBudget, $previousResult, $batches, $maximumBudget);
+            $nextBudget = $this->scalingPolicy->nextAutomaticBudget($currentBudget, $batches, $maximumBudget);
             if ($nextBudget <= $currentBudget) {
                 return 'maximum_budget_reached';
             }

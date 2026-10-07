@@ -3,11 +3,15 @@
 Observed on 2026-10-05 (Asia/Jakarta). Reference:
 https://t4jam.santuiaja.com/automation-task/
 
-Updated 2026-10-07: automatic scaling now follows the user's screenshot and
-clarification: increase every two leads, first to 120,000, then to 248,832 after
-two more. This supersedes the earlier inferred one-increase-per-higher-count
-policy. Four compounded 20% levels per subsequent pair reproduce those amounts;
-later values remain a local interpretation, not verified reference behavior.
+Updated 2026-10-07: automatic scaling follows the user's latest budget-history
+image: 77,000 -> 100,000 -> 120,000 -> 144,000 -> 172,800 -> 207,360 -> 248,832.
+Each level is `max(100000, round(current_budget * 1.2))`. Combined with the user's
+earlier every-two-leads instruction, each result pair earns two levels:
+2 results -> 120,000; 4 -> 172,800; 6 -> 248,832, starting at 77,000.
+This corrects the previous four-level-per-pair interpretation. The latest image
+shows budget amounts and processing-status transitions, without lead counts;
+the two-level grouping uses the earlier result instruction and the pairs of
+budget changes between processing-status transitions.
 This is not proof of complete parity. No reference-account settings or Meta
 budgets were changed during inspection.
 
@@ -88,10 +92,10 @@ uses the rendered timestamps.
 
 - Default mode evaluates fresh Insights at the configured running period. Each
   two additional results from the selected conversion earn one automatic increase.
-  The first pair brings a lower budget to 120,000. Subsequent pairs increase four
-  compounded 20% levels, rounded to integer IDR per level: 120,000 -> 248,832 ->
-  515,978. If the current budget already reaches/exceeds 120,000, the first pair
-  also increases four levels, preserving an existing higher budget.
+  Every pair increases two levels. Each level multiplies the current budget by
+  1.2, rounds to integer IDR, and applies a 100,000 minimum. Starting at 77,000,
+  pair totals are 120,000 -> 172,800 -> 248,832. There is no fixed initial
+  120,000 target; a current budget of 100,000 becomes 144,000 after one pair.
   The previous 72-hour, three-result, and 80%-of-cap gates are removed.
   CPR must be strictly below CPR Cap.
 - Separate processed-result state is scoped to conversion and account-local day
@@ -133,8 +137,8 @@ as evidence of that earlier behavior.
 | Policy | Local implementation | Evidence / limitation |
 | --- | --- | --- |
 | Automatic result batch | 2 new results | User explicitly requested an increase every 2 leads |
-| Initial automatic budget | 120,000 for a budget below this amount | User screenshot; existing higher budgets are increased, never lowered |
-| Subsequent automatic increase | Four steps of 20%, rounded to integer IDR per step | Reproduces requested 120,000 -> 248,832; later formula inferred |
+| First-level minimum | 100,000 | Latest user image explicitly shows 77,000 -> 100,000; generic minimum inferred from this transition |
+| Automatic increase per pair | Two levels: `max(100000, round(budget * 1.2))` per level | Replays all supplied budget amounts; pair grouping combines the earlier two-leads instruction with the latest budget history |
 | Hybrid manual increase | Two steps of 20%, with first-level floor 100,000 | Existing manual controls retained |
 | Result jump | Process all complete new pairs in one write; retain the odd remainder | Local catch-up policy consistent with every-2-results instruction |
 | Hold | Default requires spend >= budget; No Hold X3 requires spend * 3 >= budget; Loss Doll bypasses spend gate | Labels observed, numerical behavior inferred |
@@ -150,9 +154,11 @@ choices are reviewable local behavior, not claims about hidden source code.
 ## Validation and rollout
 
 `AutomationReferenceFlowTest` exercises results 1 -> 2 -> 2 -> 3 -> 4 -> 5 -> 6,
-including exact outgoing budgets 120,000, 248,832, and 515,978, using fake Meta
+including exact outgoing budgets 120,000, 172,800, and 248,832 from a starting
+budget of 77,000, using fake Meta
 responses. It also covers count jumps and odd remainders, legacy odd markers,
-maximum budgets, existing higher budgets, failed writes/retries, independent
+maximum budgets, a 100,000 starting budget, existing higher budgets, integer
+rounding, failed writes/retries, independent
 pause/recovery thresholds, metrics refreshes, day rollover, Hold, and Hybrid
 ownership/budget boundaries.
 Existing automation tests retain status, locking, stale-metric, disabled-write,

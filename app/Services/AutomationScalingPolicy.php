@@ -6,22 +6,11 @@ use App\Models\AutomationTask;
 
 class AutomationScalingPolicy
 {
-    public function nextAutomaticBudget(int $budget, int $previousResult, int $batches, int $maximum = 0): int
+    public function nextAutomaticBudget(int $budget, int $batches, int $maximum = 0): int
     {
-        $initialBudget = (int) config('automation.scaling.initial_result_budget', 120000);
         for ($batch = 0; $batch < $batches; $batch++) {
             $before = $budget;
-            if ($batch === 0 && $previousResult === 0 && $budget < $initialBudget) {
-                $budget = $initialBudget;
-            } else {
-                for ($level = 0; $level < (int) config('automation.scaling.levels_per_result_batch', 4); $level++) {
-                    $budget = (int) min(2000000000, round($budget * (float) config('automation.scaling.level_ratio', 1.2)));
-                }
-            }
-
-            if ($maximum > 0) {
-                $budget = min($budget, $maximum);
-            }
+            $budget = $this->increaseByLevels($budget, (int) config('automation.scaling.levels_per_result_batch', 2), $maximum);
             if ($budget <= $before || ($maximum > 0 && $budget >= $maximum)) {
                 break;
             }
@@ -32,8 +21,13 @@ class AutomationScalingPolicy
 
     public function nextBudget(int $budget, int $maximum = 0): int
     {
+        return $this->increaseByLevels($budget, (int) config('automation.scaling.levels_per_increase', 2), $maximum);
+    }
+
+    private function increaseByLevels(int $budget, int $levels, int $maximum): int
+    {
         $next = $budget;
-        for ($i = 0; $i < (int) config('automation.scaling.levels_per_increase', 2); $i++) {
+        for ($i = 0; $i < $levels; $i++) {
             $next = (int) min(2000000000, max(
                 (int) config('automation.scaling.first_level_budget', 100000),
                 round($next * (float) config('automation.scaling.level_ratio', 1.2)),
