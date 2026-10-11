@@ -491,7 +491,7 @@ function renderAutomationTable(rows, summary = null) {
                 <td><span class="badge ${metaStatusClass}">${escapeHtml(metaStatus)}</span></td>
                 <td class="num"><strong>${rupiah(row.current_budget)}</strong></td>
                 <td class="num"><strong${staleMetricTitle}>${rupiah(row.current_spend)}</strong></td>
-                <td class="num center"><strong>${number(row.current_hasil)}</strong></td>
+                <td class="num center"><strong${staleMetricTitle}>${number(row.current_hasil)}</strong><small class="campaign-sub">${escapeHtml(row.conversion_label || 'Menunggu Meta')}</small></td>
                 <td class="num ${isOverLimit ? 'text-danger' : ''}"><strong${staleMetricTitle}>${rupiah(row.current_cpr)}</strong></td>
                 <td class="num"><strong>${rupiah(row.cpr_cap)}</strong><small class="campaign-sub">Pause: ${row.cpr_pause ? rupiah(cprCap) : 'Off'}</small></td>
                 <td class="log-cell">
@@ -616,7 +616,7 @@ async function editTask(id) {
         budget_funnel_lp: task.event_flow,
         mode_automation: task.mode,
         hold_spend: task.system_flow,
-        budget_conversion: task.conversion,
+        budget_conversion: 'meta',
         starting_budget: task.starting_budget,
         maximum_budget: task.maximum_budget,
         cpr_cap: task.cpr_cap,

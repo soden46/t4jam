@@ -21,6 +21,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'event_flow',
     'system_flow',
     'conversion',
+    'result_conversion',
     'mode',
     'current_budget',
     'current_spend',

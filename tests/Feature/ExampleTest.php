@@ -572,7 +572,7 @@ class ExampleTest extends TestCase
                 'spend' => '37210',
                 'reach' => '1000',
                 'inline_link_clicks' => '20',
-                'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
             ]]]),
         ]);
 
@@ -705,7 +705,7 @@ class ExampleTest extends TestCase
             'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights*' => Http::response(['data' => [[
                 'campaign_id' => $task->campaign_external_id,
                 'spend' => '0',
-                'actions' => [],
+                'results' => [], 'actions' => [],
             ]]]),
         ]);
 
@@ -745,7 +745,7 @@ class ExampleTest extends TestCase
             'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights*' => Http::response(['data' => []]),
             'graph.facebook.com/*/'.$task->campaign_external_id.'/insights*' => Http::response(['data' => [[
                 'spend' => '18259',
-                'actions' => [['action_type' => 'omni_initiated_checkout', 'value' => '0']],
+                'results' => $this->metaResults('omni_initiated_checkout', '0'), 'actions' => [['action_type' => 'omni_initiated_checkout', 'value' => '0']],
             ]]]),
         ]);
 
@@ -818,7 +818,7 @@ class ExampleTest extends TestCase
                 return Http::response(['data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '37210',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]]]);
             }
 
@@ -1198,7 +1198,7 @@ class ExampleTest extends TestCase
         $this->assertSame($originalBudget, $task->current_budget);
         $this->assertSame(45000, $task->cpr_cap);
         $this->assertSame(15, $task->period);
-        $this->assertSame('lead', $task->conversion);
+        $this->assertSame('meta', $task->conversion);
     }
 
     public function test_rule_update_does_not_resend_unchanged_meta_budget(): void
@@ -1446,7 +1446,7 @@ class ExampleTest extends TestCase
                     'spend' => '45000',
                     'reach' => '1000',
                     'inline_link_clicks' => '20',
-                    'actions' => [['action_type' => 'purchase', 'value' => '3']],
+                    'results' => $this->metaResults('purchase', '3'), 'actions' => [['action_type' => 'purchase', 'value' => '3']],
                 ]]]);
             }
 
@@ -1700,7 +1700,7 @@ class ExampleTest extends TestCase
                     'spend' => '40000',
                     'reach' => '1000',
                     'inline_link_clicks' => '10',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true]),
@@ -1746,7 +1746,7 @@ class ExampleTest extends TestCase
                     'spend' => '40000',
                     'reach' => '1000',
                     'inline_link_clicks' => '10',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign->external_id => Http::response(['success' => true]),
@@ -1791,7 +1791,7 @@ class ExampleTest extends TestCase
                 'data' => $tasks->map(fn (AutomationTask $task) => [
                     'campaign_id' => $task->campaign->external_id,
                     'spend' => '30000',
-                    'actions' => [['action_type' => $task->conversion, 'value' => '3']],
+                    'results' => $this->metaResults($task->conversion, '3'), 'actions' => [['action_type' => $task->conversion, 'value' => '3']],
                 ])->all(),
             ]),
         ]);
@@ -1805,7 +1805,7 @@ class ExampleTest extends TestCase
         $tasks->each(fn (AutomationTask $task) => $this->assertSame(3, $task->fresh()->current_result));
     }
 
-    public function test_cpr_uses_the_task_conversion_instead_of_summing_other_meta_actions(): void
+    public function test_cpr_uses_the_meta_conversion_instead_of_summing_other_meta_actions(): void
     {
         $this->seed(TestDataSeeder::class);
         config(['services.meta.enable_writes' => true]);
@@ -1826,6 +1826,7 @@ class ExampleTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign->external_id,
                     'spend' => '40000',
+                    'results' => $this->metaResults('initiate_checkout', 2),
                     'actions' => [
                         ['action_type' => 'purchase', 'value' => '1'],
                         ['action_type' => 'add_to_cart', 'value' => '4'],
@@ -1896,7 +1897,7 @@ class ExampleTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign->external_id,
                     'spend' => '31929',
-                    'actions' => [['action_type' => 'purchase', 'value' => '3']],
+                    'results' => $this->metaResults('purchase', '3'), 'actions' => [['action_type' => 'purchase', 'value' => '3']],
                     'cost_per_action_type' => [['action_type' => 'purchase', 'value' => '15965']],
                 ]],
             ]),
@@ -1939,7 +1940,7 @@ class ExampleTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign->external_id,
                     'spend' => '10000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                     'cost_per_action_type' => [['action_type' => 'purchase', 'value' => '10000']],
                 ]],
             ]),
@@ -1997,7 +1998,7 @@ class ExampleTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign->external_id,
                     'spend' => '10000',
-                    'actions' => [['action_type' => $task->conversion, 'value' => '1']],
+                    'results' => $this->metaResults($task->conversion, '1'), 'actions' => [['action_type' => $task->conversion, 'value' => '1']],
                 ]],
             ]),
         ]);
@@ -2030,6 +2031,7 @@ class ExampleTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign->external_id,
                     'spend' => '40000',
+                    'results' => $this->metaResults('add_to_cart', 4),
                     'actions' => [
                         ['action_type' => 'purchase', 'value' => '1'],
                         ['action_type' => 'add_to_cart', 'value' => '4'],

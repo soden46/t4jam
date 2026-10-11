@@ -235,9 +235,15 @@ class MetaAutomationReconciliationService
                 $target = $this->target($task);
                 $target->update($this->automation->insightPayload($metrics));
                 $freshTargets[$task->level.':'.$target->external_id] = $metrics;
+                $result = $this->automation->resultForTask($task, $metrics);
+                if ($result === null) {
+                    $task->update(['metrics_unavailable_at' => now()]);
+
+                    continue;
+                }
                 $changes = [
                     'current_spend' => (int) $metrics['spend'],
-                    'current_result' => max(0, (int) ($metrics['results'][$task->conversion] ?? 0)),
+                    'current_result' => $result,
                     'last_metrics_synced_at' => $metrics['insights_synced_at'] ?? now(),
                     'metrics_unavailable_at' => null,
                     'meta_reconciliation_failure_count' => 0,
@@ -371,8 +377,8 @@ class MetaAutomationReconciliationService
                 'has_insight_row' => true,
                 'raw_spend' => $insights['spend'] ?? null,
                 'spend' => $metrics['spend'],
-                'conversion' => $task->conversion,
-                'conversion_result' => $metrics['results'][$task->conversion] ?? 0,
+                'conversion' => $task->result_conversion,
+                'conversion_result' => $metrics['meta_result']['count'] ?? null,
                 'date_start' => $insights['date_start'] ?? null,
                 'date_stop' => $insights['date_stop'] ?? null,
             ]);

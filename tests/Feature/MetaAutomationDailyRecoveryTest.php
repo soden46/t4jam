@@ -225,6 +225,7 @@ class MetaAutomationDailyRecoveryTest extends TestCase
                     default => Http::response(['data' => [[
                         'campaign_id' => $task->campaign_external_id,
                         'spend' => $response === 'over_cap' ? '90000' : '0',
+                        'results' => $this->metaResults('purchase', $response === 'over_cap' ? 2 : 0),
                         'actions' => $response === 'over_cap' ? [['action_type' => 'purchase', 'value' => '2']] : [],
                     ]]]),
                 };

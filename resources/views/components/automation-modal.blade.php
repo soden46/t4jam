@@ -48,14 +48,9 @@
                 </label>
                 <label>Conversion Event Tracking
                     <select name="budget_conversion" id="budget_conversion">
-                        <option value="purchase">Event Conversion : Purchase</option>
-                        <option value="add_to_cart">Event Conversion : ATC</option>
-                        <option value="lead">Event Conversion : Lead (Prospek)</option>
-                        <option value="add_payment_info">Event Conversion : Add Payment Info</option>
-                        <option value="initiate_checkout">Event Conversion : Initiate Checkout</option>
-                        <option value="contact_website">Event Conversion : Website Contact</option>
-                        <option value="onsite_conversion.messaging_conversation_started_7d">Event Conversion : Chat Whatsapp</option>
+                        <option value="meta">Otomatis dari Meta</option>
                     </select>
+                    <small>Mengikuti tipe hasil yang dipilih pada iklan di Meta Ads.</small>
                 </label>
                 <label>Starting Budget <span class="currency">IDR</span>
                     <input type="number" name="starting_budget" id="starting_budget" value="100000">
@@ -67,7 +62,7 @@
                 </label>
                 <label>CPR Cap <span class="currency">IDR</span>
                     <input type="number" name="cpr_cap" id="cpr_cap" value="7000">
-                    <small>Batas CPR untuk kenaikan budget setiap tambahan 2 hasil dari conversion yang dipilih.</small>
+                    <small>Batas CPR untuk kenaikan budget setiap tambahan 2 hasil sesuai pilihan Meta Ads.</small>
                 </label>
                 <label>Running Period
                     <select name="period" id="period">

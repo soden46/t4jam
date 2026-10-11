@@ -45,11 +45,67 @@ class AutomationBudgetService
     public static function conversionLabel(string $conversion): string
     {
         return match ($conversion) {
-            'purchase' => 'Purchase', 'lead' => 'Lead', 'add_to_cart' => 'ATC',
-            'initiate_checkout' => 'Checkout', 'contact_website' => 'Website Contact',
-            'onsite_conversion.messaging_conversation_started_7d' => 'WhatsApp',
-            default => 'Add Payment Info',
+            'purchase' => 'Purchase', 'lead' => 'Leads', 'add_to_cart' => 'Add to Cart',
+            'initiate_checkout' => 'Initiate Checkout', 'contact_website' => 'Website Contact',
+            'onsite_conversion.messaging_conversation_started_7d' => 'Messaging Conversations',
+            'add_payment_info' => 'Add Payment Info',
+            'meta' => 'Otomatis dari Meta',
+            'link_click' => 'Link Clicks', 'landing_page_view' => 'Landing Page Views',
+            default => str_starts_with($conversion, 'offsite_conversion.custom.')
+                ? 'Custom Conversion '.substr($conversion, strlen('offsite_conversion.custom.'))
+                : ucwords(str_replace(['_', '.'], ' ', $conversion)),
         };
+    }
+
+    public function resultForTask(AutomationTask $task, array $metrics): ?int
+    {
+        // Internal snapshots from older callers retain their existing contract.
+        // API snapshots always carry meta_result and never guess from actions.
+        if (! array_key_exists('meta_result', $metrics)) {
+            return max(0, (int) ($metrics['results'][$task->conversion] ?? 0));
+        }
+
+        if ($metrics['meta_result'] === null) {
+            return null;
+        }
+
+        $conversion = $metrics['meta_result']['conversion'];
+        if ($conversion !== null && $task->result_conversion !== $conversion) {
+            $task->update(['result_conversion' => $conversion]);
+        }
+
+        return $metrics['meta_result']['count'];
+    }
+
+    private function metaResult(array $insights): ?array
+    {
+        $results = $insights['results'] ?? null;
+        if (! is_array($results)) {
+            return null;
+        }
+        if ($results === []) {
+            return ['conversion' => null, 'count' => 0];
+        }
+        // Multiple result indicators/windows are ambiguous, not additive.
+        if (count($results) !== 1 || ! is_array($results[0])) {
+            return null;
+        }
+        $result = $results[0];
+        $indicator = $result['indicator'] ?? null;
+        $values = $result['values'] ?? null;
+        if (! is_string($indicator) || $indicator === '' || ! is_array($values)
+            || count($values) !== 1 || ! is_numeric($values[0]['value'] ?? null)) {
+            return null;
+        }
+        $conversion = preg_replace('/^(actions|conversions):/', '', $indicator);
+        foreach (self::CONVERSION_ACTION_TYPES as $key => $types) {
+            if (in_array($conversion, $types, true)) {
+                $conversion = $key;
+                break;
+            }
+        }
+
+        return ['conversion' => $conversion, 'count' => max(0, (int) $values[0]['value'])];
     }
 
     public function automationInsightsDatePreset(): string
@@ -175,9 +231,16 @@ class AutomationBudgetService
                     return;
                 }
 
+                $result = $this->resultForTask($task, $metrics);
+                if ($result === null) {
+                    $task->update(['metrics_unavailable_at' => now()]);
+
+                    return;
+                }
+
                 $task->update([
                     'current_spend' => (int) $metrics['spend'],
-                    'current_result' => max(0, (int) ($metrics['results'][$task->conversion] ?? 0)),
+                    'current_result' => $result,
                     'current_budget' => (int) $target->daily_budget,
                     'last_metrics_synced_at' => $metrics['insights_synced_at'] ?? now(),
                     'metrics_unavailable_at' => null,
@@ -351,8 +414,14 @@ class AutomationBudgetService
                     }
                     $spend = (int) ($metrics['spend'] ?? $task->current_spend);
                     $result = $metrics !== null
-                        ? max(0, (int) ($metrics['results'][$task->conversion] ?? 0))
+                        ? $this->resultForTask($task, $metrics)
                         : max(0, (int) $task->current_result);
+                    if ($result === null) {
+                        $reason = 'conversion_unavailable';
+                        $task->update(['metrics_unavailable_at' => now()]);
+
+                        return;
+                    }
                     $cpr = $result > 0 ? intdiv($spend, $result) : $spend;
 
                     $task->update([
@@ -811,7 +880,7 @@ class AutomationBudgetService
             }
         }
 
-        return ['spend' => '0', 'actions' => []];
+        return ['spend' => '0', 'actions' => [], 'results' => []];
     }
 
     private function refreshMetrics(Collection $tasks, MetaAdsClient $client, T4JamProfile $profile, ?string $datePreset = null): array
@@ -1098,7 +1167,7 @@ class AutomationBudgetService
             return 'metrics_not_fresh';
         }
 
-        $conversion = $task->conversion;
+        $conversion = $task->result_conversion ?? $task->conversion;
         $observedAt = Carbon::parse($metrics['insights_synced_at'] ?? now());
         $lock = $this->taskMutationLock($task);
         $reason = $lock->get(function () use ($task, $target, $client, $profile, $result, $cpr, $metrics, $conversion, $observedAt): string {
@@ -1123,7 +1192,7 @@ class AutomationBudgetService
                 return 'target_not_eligible';
             }
 
-            if ($task->conversion !== $conversion || ! $this->isWithinAutomationWindow($task)
+            if (($task->result_conversion ?? $task->conversion) !== $conversion || ! $this->isWithinAutomationWindow($task)
                 || ($task->scaling_observed_at && $observedAt->lt($task->scaling_observed_at))) {
                 return 'scaling_snapshot_outdated';
             }
@@ -1375,6 +1444,7 @@ class AutomationBudgetService
             'link_click' => (int) ($insights['inline_link_clicks'] ?? $this->actionValue($actions, ['link_click'])),
             'landing_page_view' => $this->actionValue($actions, ['landing_page_view']),
             'results' => $results,
+            'meta_result' => $this->metaResult($insights),
             'costs' => $conversionCosts,
             'insights_synced_at' => now(),
             'date_stop' => $insights['date_stop'] ?? null,
@@ -1580,7 +1650,12 @@ class AutomationBudgetService
             }
 
             $spend = (int) ($metrics['spend'] ?? $task->current_spend);
-            $result = max(0, (int) ($metrics['results'][$task->conversion] ?? $task->current_result));
+            $result = $this->resultForTask($task, $metrics);
+            if ($result === null) {
+                $task->update(['metrics_unavailable_at' => now()]);
+
+                return;
+            }
             $cpr = $result > 0 ? intdiv($spend, $result) : $spend;
 
             $task->update([

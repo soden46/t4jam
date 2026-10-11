@@ -589,15 +589,6 @@ class T4JamController extends Controller
                     $taskData['starting_budget'] = $task->starting_budget;
                 }
 
-                if (($taskData['conversion'] ?? $task->conversion) !== $task->conversion) {
-                    $taskData['current_result'] = 0;
-                    $taskData['current_spend'] = 0;
-                    $taskData['scaled_result_count'] = null;
-                    $taskData['scaling_period'] = null;
-                    $taskData['scaled_conversion'] = null;
-                    $taskData['scaling_observed_at'] = null;
-                    $taskData['last_metrics_synced_at'] = null;
-                }
                 $task->update($taskData);
                 if ($resolvesPendingPause) {
                     $this->taskMutations->clearPendingPause($task);
@@ -1059,7 +1050,7 @@ class T4JamController extends Controller
     private function validateAutomation(Request $request): void
     {
         $request->validate([
-            'budget_conversion' => ['sometimes', Rule::in(AutomationBudgetService::conversions())],
+            'budget_conversion' => ['sometimes', Rule::in(['meta', ...AutomationBudgetService::conversions()])],
             'cpr_cap' => ['sometimes', 'integer', 'min:1'],
             'pause_cpr_cap' => ['sometimes', 'integer', 'min:1'],
             'pause_cpr_limit' => ['sometimes', 'integer', 'min:1'],
@@ -1083,7 +1074,7 @@ class T4JamController extends Controller
             'event_flow' => $request->input('budget_funnel_lp', 'lp_to_wa'),
             'mode' => $request->input('mode_automation', 'default'),
             'system_flow' => $request->input('hold_spend', 'onhold'),
-            'conversion' => $request->input('budget_conversion', 'purchase'),
+            'conversion' => 'meta',
             'starting_budget' => (int) $request->input('starting_budget', 100000),
             'maximum_budget' => (int) $request->input('maximum_budget', 0),
             'cpr_cap' => (int) $request->input('cpr_cap', 7000),
@@ -1167,6 +1158,10 @@ class T4JamController extends Controller
             'event_flow' => $task->event_flow,
             'system_flow' => $task->system_flow,
             'conversion' => $task->conversion,
+            'conversion_label' => $task->result_conversion !== null
+                ? AutomationBudgetService::conversionLabel($task->result_conversion)
+                : 'Menunggu Meta',
+            'result_conversion' => $task->result_conversion,
             'cpr_cap' => $task->cpr_cap,
             'log' => $task->last_log,
             'status' => $automationActive ? 'true' : 'false',

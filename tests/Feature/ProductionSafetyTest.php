@@ -81,7 +81,7 @@ class ProductionSafetyTest extends TestCase
             'ad_set_external_id' => $level === 'adset' ? $target->external_id : null,
             'maximum_budget' => (int) $target->daily_budget]);
         Http::fake([
-            '*/insights?*' => Http::response(['data' => [['spend' => '40000', 'actions' => [
+            '*/insights?*' => Http::response(['data' => [['spend' => '40000', 'results' => $this->metaResults($conversion, $result), 'actions' => [
                 ['action_type' => 'purchase', 'value' => '1'], ['action_type' => 'lead', 'value' => '4'],
             ]]]]),
             '*'.$target->external_id => Http::response(['success' => true]),
@@ -109,9 +109,9 @@ class ProductionSafetyTest extends TestCase
         [, $task] = $this->fixture();
         Http::fake([
             '*/insights?*' => Http::sequence()
-                ->push(['data' => [['campaign_id' => $task->campaign_external_id, 'spend' => 40000, 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]])
-                ->push(['data' => [['campaign_id' => $task->campaign_external_id, 'spend' => 40000, 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]])
-                ->push(['data' => [['campaign_id' => $task->campaign_external_id, 'spend' => 10000, 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]]),
+                ->push(['data' => [['campaign_id' => $task->campaign_external_id, 'spend' => 40000, 'results' => $this->metaResults('purchase', 1), 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]])
+                ->push(['data' => [['campaign_id' => $task->campaign_external_id, 'spend' => 40000, 'results' => $this->metaResults('purchase', 1), 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]])
+                ->push(['data' => [['campaign_id' => $task->campaign_external_id, 'spend' => 10000, 'results' => $this->metaResults('purchase', 1), 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]]),
             '*'.$task->campaign_external_id => Http::response(['success' => true]),
         ]);
         $this->artisan('t4jam:enforce-automation')->assertSuccessful();
@@ -139,7 +139,7 @@ class ProductionSafetyTest extends TestCase
         Http::assertNothingSent();
         $task->campaign->update(['status' => 'PAUSED']);
         $task->update(['is_active' => false, 'last_budget_action' => 'pause', 'pause_cpr_cap' => 70000]);
-        Http::fake(['*' => Http::response(['data' => [['spend' => 40000, 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]])]);
+        Http::fake(['*' => Http::response(['data' => [['spend' => 40000, 'results' => $this->metaResults('purchase', 1), 'actions' => [['action_type' => 'purchase', 'value' => 1]]]]])]);
         $this->artisan('t4jam:enforce-automation')->assertSuccessful();
         $this->assertFalse($task->fresh()->is_active);
         Http::assertNotSent(fn ($r) => $r->method() === 'POST');

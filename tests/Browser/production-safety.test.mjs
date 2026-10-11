@@ -29,7 +29,7 @@ test('dynamic names, attributes, logs and product links cannot inject markup or 
     const attack = `"'><img src=x onerror="window.xss=1">&quot;`;
     await page.evaluate(async attack => {
         renderCampaignTable([{ campaign_id: attack, campaign_name: attack, level: attack }]);
-        renderAutomationTable([{ id: attack, campaign_name: attack, ad_account: attack, log: attack, conversion: attack }]);
+        renderAutomationTable([{ id: attack, campaign_name: attack, ad_account: attack, log: attack, conversion: attack, conversion_label: attack }]);
         renderInterest([{ name: attack, topic: attack }]);
         renderProducts([{ name: attack, category: attack, rating: attack, image: 'javascript:alert(1)', detail_url: 'javascript:alert(1)' }]);
         window.fetch = async () => ({ ok: true, json: async () => ({ data: [{ time: attack, text: [attack] }] }) });
@@ -38,6 +38,7 @@ test('dynamic names, attributes, logs and product links cannot inject markup or 
     assert.equal(await page.locator('#campaign_table .campaign-name').textContent(), attack);
     assert.equal(await page.locator('#automation_table .campaign-name').textContent(), attack);
     assert.equal(await page.locator('#automation_table .log-cell .log-text').textContent(), attack);
+    assert.equal(await page.locator('#automation_table tbody td').nth(6).locator('small').textContent(), attack);
     assert.equal(await page.locator('#item-timeline li').textContent(), attack);
     assert.equal(await page.locator('#interest_table tr').getAttribute('data-topic'), attack);
     await page.locator('[data-product-detail]').click();
@@ -55,6 +56,7 @@ test('automation table renders compact grouped metrics and action menu', async (
             ad_account: 'Account CPR',
             event_flow: 'lp_to_wa',
             conversion: 'purchase',
+            conversion_label: 'Leads',
             status: 'true',
             automation_status: 'active',
             meta_status: 'PAUSED',
@@ -76,6 +78,8 @@ test('automation table renders compact grouped metrics and action menu', async (
     assert.match(await cells.nth(4).textContent(), /Rp\. 100\.000,-/);
     assert.match(await cells.nth(5).textContent(), /Rp\. 75\.919,-/);
     assert.match(await cells.nth(6).textContent(), /1/);
+    assert.equal(await cells.nth(6).locator('small').textContent(), 'Leads');
+    assert.ok(await cells.nth(6).locator('small').evaluate(el => el.previousElementSibling.tagName === 'STRONG'));
     assert.match(await cells.nth(7).textContent(), /Rp\. 75\.919,-/);
     assert.doesNotMatch(await cells.nth(7).textContent(), /stale/i);
     assert.equal(await cells.nth(7).locator('strong').getAttribute('title'), 'Metrik Meta belum diperbarui; menampilkan data terakhir.');

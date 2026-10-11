@@ -54,13 +54,13 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => 'campaign_not_requested',
                     'spend' => '1000',
-                    'actions' => [],
+                    'results' => [], 'actions' => [],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id.'/insights?*' => Http::response([
                 'data' => [[
                     'spend' => '75919',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true]),
@@ -312,7 +312,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '45000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '3']],
+                    'results' => $this->metaResults('purchase', '3'), 'actions' => [['action_type' => 'purchase', 'value' => '3']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id => Http::response([
@@ -454,7 +454,7 @@ class MetaAutomationEnforcementTest extends TestCase
 
         Http::fake([
             'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
-                'data' => [['campaign_id' => 'campaign_not_requested', 'spend' => '1000', 'actions' => []]],
+                'data' => [['campaign_id' => 'campaign_not_requested', 'spend' => '1000', 'results' => [], 'actions' => []]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id.'/insights?*' => Http::response([
                 'error' => ['code' => 17, 'message' => 'Rate limit'],
@@ -541,7 +541,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '60000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '2']],
+                    'results' => $this->metaResults('purchase', '2'), 'actions' => [['action_type' => 'purchase', 'value' => '2']],
                 ]],
             ]),
         ]);
@@ -578,7 +578,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '1000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
         ]);
@@ -662,7 +662,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'adset_id' => $adSet->external_id,
                     'spend' => '75000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$adSet->external_id => Http::response(['success' => true]),
@@ -708,7 +708,7 @@ class MetaAutomationEnforcementTest extends TestCase
         $client = app(MetaAdsSyncService::class)->client($profile);
         $metrics = app(AutomationBudgetService::class)->metricSnapshot([
             'spend' => '75000',
-            'actions' => [['action_type' => 'purchase', 'value' => '1']],
+            'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
         ]);
 
         Http::fake(['graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true])]);
@@ -743,7 +743,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '75000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id => Http::response([
@@ -773,7 +773,7 @@ class MetaAutomationEnforcementTest extends TestCase
 
         Http::fake([
             'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/insights?*' => Http::response([
-                'data' => [['campaign_id' => 'campaign_not_requested', 'spend' => '1000', 'actions' => []]],
+                'data' => [['campaign_id' => 'campaign_not_requested', 'spend' => '1000', 'results' => [], 'actions' => []]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id.'/insights?*' => Http::response([
                 'error' => ['code' => 17, 'message' => 'Rate limit'],
@@ -813,7 +813,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '75000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign->adAccount->external_id.'/campaigns?*' => Http::response([
@@ -858,7 +858,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '1000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true]),
@@ -894,7 +894,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '1000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true]),
@@ -982,7 +982,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '1000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true]),
@@ -1043,7 +1043,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '1000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
         ]);
@@ -1678,7 +1678,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => (string) $spend,
-                    'actions' => [['action_type' => 'purchase', 'value' => (string) $result]],
+                    'results' => $this->metaResults('purchase', (string) $result), 'actions' => [['action_type' => 'purchase', 'value' => (string) $result]],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true]),
@@ -1692,7 +1692,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => (string) $spend,
-                    'actions' => [['action_type' => 'purchase', 'value' => (string) $result]],
+                    'results' => $this->metaResults('purchase', (string) $result), 'actions' => [['action_type' => 'purchase', 'value' => (string) $result]],
                 ]],
             ]),
         ];
@@ -1729,7 +1729,7 @@ class MetaAutomationEnforcementTest extends TestCase
             if (str_contains($url, '/'.$targetId.'/insights')) {
                 return Http::response(['data' => [[
                     'spend' => (string) $webhookSpend,
-                    'actions' => [['action_type' => 'purchase', 'value' => (string) $webhookResult]],
+                    'results' => $this->metaResults('purchase', (string) $webhookResult), 'actions' => [['action_type' => 'purchase', 'value' => (string) $webhookResult]],
                 ]]]);
             }
 
@@ -1806,7 +1806,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '75000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id => Http::response([
@@ -1867,7 +1867,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '75000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id => Http::response([
@@ -1905,7 +1905,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '75000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
             'graph.facebook.com/*/'.$task->campaign_external_id => Http::response(['success' => true]),
@@ -1949,7 +1949,7 @@ class MetaAutomationEnforcementTest extends TestCase
                 'data' => [[
                     'campaign_id' => $task->campaign_external_id,
                     'spend' => '10000',
-                    'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                    'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                 ]],
             ]),
         ]);

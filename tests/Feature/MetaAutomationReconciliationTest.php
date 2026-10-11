@@ -630,7 +630,7 @@ class MetaAutomationReconciliationTest extends TestCase
             if (str_contains($url, '/'.$task->campaign_external_id.'/insights')) {
                 return Http::response(['data' => [[
                     'spend' => (string) $spend,
-                    'actions' => [['action_type' => 'purchase', 'value' => (string) $result]],
+                    'results' => $this->metaResults('purchase', (string) $result), 'actions' => [['action_type' => 'purchase', 'value' => (string) $result]],
                 ]]]);
             }
 
@@ -718,7 +718,7 @@ class MetaAutomationReconciliationTest extends TestCase
                 if (str_contains($request->url(), '/'.$task->campaign_external_id.'/insights')) {
                     return Http::response(['data' => [[
                         'spend' => '10000',
-                        'actions' => [['action_type' => 'purchase', 'value' => '1']],
+                        'results' => $this->metaResults('purchase', '1'), 'actions' => [['action_type' => 'purchase', 'value' => '1']],
                     ]]]);
                 }
 
