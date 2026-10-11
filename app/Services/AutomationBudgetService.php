@@ -32,9 +32,10 @@ class AutomationBudgetService
         'add_to_cart' => ['add_to_cart', 'omni_add_to_cart', 'offsite_conversion.fb_pixel_add_to_cart', 'onsite_conversion.add_to_cart'],
         'lead' => ['lead', 'omni_lead', 'offsite_conversion.fb_pixel_lead', 'onsite_conversion.lead_grouped'],
         'add_payment_info' => ['add_payment_info', 'omni_add_payment_info', 'offsite_conversion.fb_pixel_add_payment_info'],
-        'initiate_checkout' => ['initiate_checkout', 'omni_initiated_checkout', 'offsite_conversion.fb_pixel_initiate_checkout'],
+        'initiate_checkout' => ['initiate_checkout', 'omni_initiated_checkout', 'offsite_conversion.fb_pixel_initiate_checkout', 'app_custom_event.fb_mobile_initiated_checkout'],
         'contact_website' => ['contact_website', 'omni_contact_website', 'offsite_conversion.contact_website'],
         'onsite_conversion.messaging_conversation_started_7d' => ['onsite_conversion.messaging_conversation_started_7d'],
+        'mobile_app_install' => ['mobile_app_install', 'app_install', 'omni_app_install'],
     ];
 
     public static function conversions(): array
@@ -51,6 +52,7 @@ class AutomationBudgetService
             'add_payment_info' => 'Add Payment Info',
             'meta' => 'Otomatis dari Meta',
             'link_click' => 'Link Clicks', 'landing_page_view' => 'Landing Page Views',
+            'mobile_app_install' => 'App Installs',
             default => str_starts_with($conversion, 'offsite_conversion.custom.')
                 ? 'Custom Conversion '.substr($conversion, strlen('offsite_conversion.custom.'))
                 : ucwords(str_replace(['_', '.'], ' ', $conversion)),
@@ -75,6 +77,59 @@ class AutomationBudgetService
         }
 
         return $metrics['meta_result']['count'];
+    }
+
+    public function selectedConversionFromSettings(array $settings): ?string
+    {
+        if (isset($settings['_adsets']) || isset($settings['adsets'])) {
+            if (! empty($settings['adsets']['paging']['next'])) {
+                return null;
+            }
+            $adSets = $settings['_adsets'] ?? $settings['adsets']['data'] ?? [];
+            $conversions = array_map(fn (array $adSet) => $this->selectedConversionFromSettings($adSet), $adSets);
+
+            return $conversions !== [] && ! in_array(null, $conversions, true)
+                && count(array_unique($conversions)) === 1 ? $conversions[0] : null;
+        }
+
+        $goalConversion = match ($settings['optimization_goal'] ?? null) {
+            'LEAD_GENERATION' => 'lead',
+            'CONVERSATIONS' => 'onsite_conversion.messaging_conversation_started_7d',
+            'LINK_CLICKS' => 'link_click',
+            'LANDING_PAGE_VIEWS' => 'landing_page_view',
+            'APP_INSTALLS' => 'mobile_app_install',
+            default => null,
+        };
+        if ($goalConversion !== null) {
+            return $goalConversion;
+        }
+
+        $promoted = $settings['promoted_object'] ?? [];
+        if (! empty($promoted['custom_conversion_id'])) {
+            return 'offsite_conversion.custom.'.$promoted['custom_conversion_id'];
+        }
+        $event = $promoted['custom_event_type'] ?? $promoted['lead_ads_custom_event_type'] ?? null;
+        if (is_string($event) && $event !== '' && $event !== 'OTHER') {
+            return match ($event) {
+                'INITIATED_CHECKOUT' => 'initiate_checkout',
+                'MESSAGING_CONVERSATION_STARTED_7D' => 'onsite_conversion.messaging_conversation_started_7d',
+                'CONTENT_VIEW' => 'view_content',
+                default => strtolower($event),
+            };
+        }
+
+        return null;
+    }
+
+    public function storeConversionSettings(Campaign|AdSet $target, array $settings): void
+    {
+        $conversion = $this->selectedConversionFromSettings($settings);
+        $target->update(['conversion_results' => array_merge($target->conversion_results ?? [], ['_selected_conversion' => $conversion])]);
+        if ($conversion !== null) {
+            // Zero-result rows can show the selected event before Insights has
+            // any results. Positive historical counts keep their original type.
+            $target->automationTasks()->where('current_result', 0)->update(['result_conversion' => $conversion]);
+        }
     }
 
     private function metaResult(array $insights): ?array
@@ -911,7 +966,7 @@ class AutomationBudgetService
                 continue;
             }
 
-            $metrics = $this->metricSnapshot($insights);
+            $metrics = $this->metricSnapshot($insights, $target->conversion_results['_selected_conversion'] ?? null);
 
             if ($metrics === null) {
                 continue;
@@ -1419,7 +1474,7 @@ class AutomationBudgetService
             ->all();
     }
 
-    public function metricSnapshot(array $insights): ?array
+    public function metricSnapshot(array $insights, ?string $selectedConversion = null): ?array
     {
         if ($insights === []) {
             return null;
@@ -1433,6 +1488,22 @@ class AutomationBudgetService
             $results[$conversion] = $this->actionValue($actions, $types);
         }
 
+        $metaResult = $this->metaResult($insights);
+        if ($selectedConversion !== null) {
+            if (($insights['results'] ?? null) === null) {
+                $types = array_unique(array_merge(self::CONVERSION_ACTION_TYPES[$selectedConversion] ?? [], [
+                    $selectedConversion, 'omni_'.$selectedConversion,
+                    'offsite_conversion.fb_pixel_'.$selectedConversion,
+                    'app_custom_event.fb_mobile_'.$selectedConversion,
+                ]));
+                $metaResult = ['conversion' => $selectedConversion, 'count' => $selectedConversion === 'link_click'
+                    ? (int) ($insights['inline_link_clicks'] ?? $this->actionValue($actions, $types))
+                    : $this->actionValue($actions, $types)];
+            } elseif ($insights['results'] === []) {
+                $metaResult = ['conversion' => $selectedConversion, 'count' => 0];
+            }
+        }
+
         $conversionCosts = [];
         foreach (self::CONVERSION_ACTION_TYPES as $conversion => $types) {
             $conversionCosts[$conversion] = $this->actionCost($costs, $types);
@@ -1444,7 +1515,8 @@ class AutomationBudgetService
             'link_click' => (int) ($insights['inline_link_clicks'] ?? $this->actionValue($actions, ['link_click'])),
             'landing_page_view' => $this->actionValue($actions, ['landing_page_view']),
             'results' => $results,
-            'meta_result' => $this->metaResult($insights),
+            'meta_result' => $metaResult,
+            'selected_conversion' => $selectedConversion,
             'costs' => $conversionCosts,
             'insights_synced_at' => now(),
             'date_stop' => $insights['date_stop'] ?? null,
@@ -1457,7 +1529,7 @@ class AutomationBudgetService
             'spend' => $metrics['spend'],
             'reach' => $metrics['reach'],
             'result' => $metrics['results']['purchase'] ?? 0,
-            'conversion_results' => $metrics['results'],
+            'conversion_results' => array_merge($metrics['results'], ['_selected_conversion' => $metrics['selected_conversion'] ?? null]),
             'link_click' => $metrics['link_click'],
             'landing_page_view' => $metrics['landing_page_view'],
             'insights_synced_at' => $metrics['insights_synced_at'],

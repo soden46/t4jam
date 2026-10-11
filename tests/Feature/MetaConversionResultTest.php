@@ -96,6 +96,97 @@ class MetaConversionResultTest extends TestCase
         Http::assertNotSent(fn ($request) => $request->method() === 'POST');
     }
 
+    public static function zeroResultSettings(): array
+    {
+        return [
+            [['promoted_object' => ['custom_event_type' => 'LEAD']], 'Leads'],
+            [['promoted_object' => ['custom_event_type' => 'PURCHASE']], 'Purchase'],
+            [['promoted_object' => ['custom_event_type' => 'INITIATED_CHECKOUT']], 'Initiate Checkout'],
+            [['optimization_goal' => 'CONVERSATIONS'], 'Messaging Conversations'],
+            [['optimization_goal' => 'APP_INSTALLS'], 'App Installs'],
+            [['optimization_goal' => 'LEAD_GENERATION'], 'Leads', 'adset'],
+            [['optimization_goal' => 'LINK_CLICKS', 'promoted_object' => ['custom_event_type' => 'PURCHASE']], 'Link Clicks'],
+        ];
+    }
+
+    #[DataProvider('zeroResultSettings')]
+    public function test_paused_zero_result_rows_get_event_from_meta_settings(array $settings, string $label, string $level = 'campaign'): void
+    {
+        [$profile, $task] = $this->fixture($level);
+        $task->update(['current_result' => 0, 'result_conversion' => null, 'is_active' => false, 'last_budget_action' => 'meta_sync']);
+        $this->fakeMetrics($task, [], $settings, status: 'PAUSED');
+        $this->reconcile($profile, $task);
+
+        $this->actingAs($profile->user)->getJson('/get-specific-task/?automation_id='.$task->id)
+            ->assertOk()->assertJsonPath('data.current_hasil', 0)->assertJsonPath('data.conversion_label', $label);
+        $this->assertFalse($task->fresh()->is_active);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_empty_insights_can_still_populate_zero_result_event_label(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $task->update(['current_result' => 0, 'result_conversion' => null, 'is_active' => false, 'last_budget_action' => 'meta_sync']);
+        $this->fakeMetrics($task, null, ['optimization_goal' => 'LEAD_GENERATION'], emptyInsights: true, status: 'PAUSED');
+        $this->reconcile($profile, $task);
+        $this->assertSame('lead', $task->fresh()->result_conversion);
+        $this->assertNotNull($task->fresh()->metrics_unavailable_at);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_missing_native_results_use_only_the_event_selected_in_meta(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $task->update(['current_result' => 0, 'is_active' => false, 'last_budget_action' => 'meta_sync']);
+        $this->fakeMetrics($task, null, ['promoted_object' => ['custom_event_type' => 'LEAD']], status: 'PAUSED');
+        $this->reconcile($profile, $task);
+        $this->assertSame('lead', $task->fresh()->result_conversion);
+        $this->assertSame(25, $task->fresh()->current_result);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_mixed_campaign_settings_do_not_guess_a_conversion(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $task->update(['current_result' => 0, 'result_conversion' => null]);
+        Http::fake([
+            '*/'.$task->campaign_external_id.'?*' => Http::response(['status' => 'ACTIVE', 'daily_budget' => 77000,
+                'adsets' => ['data' => [
+                    ['promoted_object' => ['custom_event_type' => 'LEAD']],
+                    ['promoted_object' => ['custom_event_type' => 'PURCHASE']],
+                ]]]),
+            '*/insights?*' => Http::response(['data' => [['spend' => '20000',
+                'actions' => [['action_type' => 'purchase', 'value' => 99], ['action_type' => 'lead', 'value' => 25]]]]]),
+        ]);
+        $this->reconcile($profile, $task);
+        $this->assertNull($task->fresh()->result_conversion);
+        $this->assertNotNull($task->fresh()->metrics_unavailable_at);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
+    public function test_forced_full_sync_populates_paused_event_label_without_insights(): void
+    {
+        [$profile, $task] = $this->fixture();
+        $task->update(['current_result' => 0, 'result_conversion' => null, 'is_active' => false, 'last_budget_action' => 'meta_sync']);
+        $accountId = $task->adAccount->external_id;
+        $adSet = $task->campaign->adSets()->firstOrFail();
+        Http::fake([
+            '*/me?*' => Http::response(['id' => 'meta-user', 'name' => 'Meta User']),
+            '*/me/adaccounts?*' => Http::response(['data' => [['id' => $accountId, 'name' => 'Account']]]),
+            '*/me/businesses?*' => Http::response(['data' => []]),
+            '*/'.$accountId.'/campaigns?*' => Http::response(['data' => [['id' => $task->campaign_external_id,
+                'name' => 'Campaign', 'status' => 'PAUSED', 'daily_budget' => '77000']]]),
+            '*/'.$accountId.'/adsets?*' => Http::response(['data' => [['id' => $adSet->external_id,
+                'campaign_id' => $task->campaign_external_id, 'status' => 'PAUSED',
+                'optimization_goal' => 'OFFSITE_CONVERSIONS', 'promoted_object' => ['custom_event_type' => 'LEAD']]]]),
+            '*/'.$accountId.'/insights?*' => Http::response(['data' => []]),
+        ]);
+        $this->artisan('t4jam:sync-meta-ads', ['--profile_id' => $profile->id])->assertSuccessful();
+        $this->assertSame('lead', $task->fresh()->result_conversion);
+        $this->assertFalse($task->fresh()->is_active);
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+    }
+
     private function fixture(string $level = 'campaign'): array
     {
         $this->travelTo(now('Asia/Jakarta')->setTime(10, 0));
@@ -119,7 +210,7 @@ class MetaConversionResultTest extends TestCase
         return [$profile, $task];
     }
 
-    private function fakeMetrics(AutomationTask $task, ?array $results): void
+    private function fakeMetrics(AutomationTask $task, ?array $results, array $settings = [], bool $emptyInsights = false, string $status = 'ACTIVE'): void
     {
         $targetId = $task->level === 'adset' ? $task->ad_set_external_id : $task->campaign_external_id;
         $metrics = ['spend' => '20000', 'date_stop' => now()->toDateString(),
@@ -127,10 +218,12 @@ class MetaConversionResultTest extends TestCase
         if ($results !== null) {
             $metrics['results'] = $results;
         }
+        $remoteSettings = $task->level === 'campaign'
+            ? ($settings === [] ? [] : ['adsets' => ['data' => [$settings]]]) : $settings;
         Http::fake([
             '*/'.$targetId.'?*' => Http::response(['id' => $targetId,
-                'status' => 'ACTIVE', 'effective_status' => 'ACTIVE', 'daily_budget' => '77000']),
-            '*/insights?*' => Http::response(['data' => [$metrics]]),
+                'status' => $status, 'effective_status' => $status, 'daily_budget' => '77000', ...$remoteSettings]),
+            '*/insights?*' => Http::response(['data' => $emptyInsights ? [] : [$metrics]]),
             '*'.$targetId => Http::response(['success' => true]),
         ]);
     }

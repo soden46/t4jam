@@ -68,7 +68,7 @@ class MetaAdsClient
     public function campaign(string $campaignId): array
     {
         return $this->get("/{$campaignId}", [
-            'fields' => 'id,name,status,effective_status,daily_budget,objective',
+            'fields' => 'id,name,status,effective_status,daily_budget,objective,adsets.limit(100){id,optimization_goal,promoted_object}',
         ]);
     }
 
@@ -97,7 +97,7 @@ class MetaAdsClient
     public function adSets(string $campaignId): array
     {
         return $this->paginate("/{$campaignId}/adsets", [
-            'fields' => 'id,name,status,effective_status,daily_budget',
+            'fields' => 'id,name,status,effective_status,daily_budget,optimization_goal,promoted_object',
             'limit' => 100,
         ]);
     }
@@ -105,7 +105,7 @@ class MetaAdsClient
     public function accountAdSets(string $adAccountId): array
     {
         return $this->paginate("/{$adAccountId}/adsets", [
-            'fields' => 'id,name,status,effective_status,daily_budget,campaign_id',
+            'fields' => 'id,name,status,effective_status,daily_budget,campaign_id,optimization_goal,promoted_object',
             'limit' => 100,
         ]);
     }
@@ -113,7 +113,7 @@ class MetaAdsClient
     public function adSet(string $adSetId): array
     {
         return $this->get("/{$adSetId}", [
-            'fields' => 'id,name,status,effective_status,daily_budget,campaign_id',
+            'fields' => 'id,name,status,effective_status,daily_budget,campaign_id,optimization_goal,promoted_object',
         ]);
     }
 

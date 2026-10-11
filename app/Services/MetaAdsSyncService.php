@@ -149,8 +149,8 @@ class MetaAdsSyncService
                     $insights = $insightsByCampaign->get($campaign->external_id, []);
 
                     if ($insights !== []) {
-                        $campaign->update($this->insightPayload($insights));
-                        $this->freshInsightTargets['campaign:'.$campaign->external_id] = app(AutomationBudgetService::class)->metricSnapshot($insights);
+                        $campaign->update($this->insightPayload($insights, $campaign));
+                        $this->freshInsightTargets['campaign:'.$campaign->external_id] = app(AutomationBudgetService::class)->metricSnapshot($insights, $campaign->conversion_results['_selected_conversion'] ?? null);
                         $count++;
                     }
                 }
@@ -176,8 +176,8 @@ class MetaAdsSyncService
                     $insights = $insightsByAdSet->get($adSet->external_id, []);
 
                     if ($insights !== []) {
-                        $adSet->update($this->insightPayload($insights));
-                        $this->freshInsightTargets['adset:'.$adSet->external_id] = app(AutomationBudgetService::class)->metricSnapshot($insights);
+                        $adSet->update($this->insightPayload($insights, $adSet));
+                        $this->freshInsightTargets['adset:'.$adSet->external_id] = app(AutomationBudgetService::class)->metricSnapshot($insights, $adSet->conversion_results['_selected_conversion'] ?? null);
                         $count++;
                     }
                 }
@@ -237,7 +237,7 @@ class MetaAdsSyncService
 
     private function upsertCampaign(AdAccount $account, array $campaignData): Campaign
     {
-        return Campaign::updateOrCreate(
+        $campaign = Campaign::updateOrCreate(
             ['external_id' => $campaignData['id']],
             [
                 'ad_account_id' => $account->id,
@@ -250,11 +250,14 @@ class MetaAdsSyncService
                 'daily_budget' => (int) ($campaignData['daily_budget'] ?? 0),
             ],
         );
+        app(AutomationBudgetService::class)->storeConversionSettings($campaign, $campaignData);
+
+        return $campaign;
     }
 
     private function upsertAdSet(AdAccount $account, Campaign $campaign, array $adSetData): AdSet
     {
-        return AdSet::updateOrCreate(
+        $adSet = AdSet::updateOrCreate(
             ['external_id' => $adSetData['id']],
             [
                 'ad_account_id' => $account->id,
@@ -265,6 +268,9 @@ class MetaAdsSyncService
                 'daily_budget' => (int) ($adSetData['daily_budget'] ?? 0),
             ],
         );
+        app(AutomationBudgetService::class)->storeConversionSettings($adSet, $adSetData);
+
+        return $adSet;
     }
 
     private function markMissingCampaignsDeleted(AdAccount $account, array $campaignIds): void
@@ -286,9 +292,9 @@ class MetaAdsSyncService
             ->update(['status' => 'DELETED', 'effective_status' => 'DELETED']);
     }
 
-    private function insightPayload(array $insights): array
+    private function insightPayload(array $insights, Campaign|AdSet $target): array
     {
-        $metrics = app(AutomationBudgetService::class)->metricSnapshot($insights);
+        $metrics = app(AutomationBudgetService::class)->metricSnapshot($insights, $target->conversion_results['_selected_conversion'] ?? null);
 
         if ($metrics === null) {
             return [];

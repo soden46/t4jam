@@ -219,7 +219,7 @@ class MetaAutomationReconciliationService
             return ['api_calls' => $apiCalls, 'updated' => $updated, 'paused' => 0, 'rate_limited' => false];
         }
 
-        $metrics = $this->automation->metricSnapshot($insights);
+        $metrics = $this->automation->metricSnapshot($insights, $target->conversion_results['_selected_conversion'] ?? null);
 
         if ($metrics === null) {
             $this->logMetricsUnavailable($profile, $tasks, $targetId, $level, $datePreset);
@@ -285,6 +285,7 @@ class MetaAutomationReconciliationService
                     'effective_status' => $remote['effective_status'] ?? $remote['status'] ?? $target->effective_status,
                     'daily_budget' => (int) ($remote['daily_budget'] ?? $target->daily_budget),
                 ]);
+                $this->automation->storeConversionSettings($target, $remote);
 
                 $changes = ['current_budget' => (int) $target->daily_budget];
                 $active = strtoupper((string) ($target->effective_status ?: $target->status)) === 'ACTIVE';

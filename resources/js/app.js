@@ -484,7 +484,7 @@ function renderAutomationTable(rows, summary = null) {
             <tr>
                 <td>
                     <span class="campaign-name">${escapeHtml(row.campaign_name)}</span>
-                    <span class="campaign-sub">${escapeHtml(row.event_flow)} / ${escapeHtml(row.conversion)}</span>
+                    <span class="campaign-sub">${escapeHtml(row.event_flow)} / ${escapeHtml(row.result_conversion || 'meta')}</span>
                 </td>
                 <td><span class="account-name">${escapeHtml(row.ad_account || '-')}</span></td>
                 <td><span class="badge ${automationActive ? 'active' : 'pause'}">${automationActive ? 'Active' : 'Paused'}</span></td>
