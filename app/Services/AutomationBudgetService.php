@@ -147,9 +147,7 @@ class AutomationBudgetService
         }
         $result = $results[0];
         $indicator = $result['indicator'] ?? null;
-        $values = $result['values'] ?? null;
-        if (! is_string($indicator) || $indicator === '' || ! is_array($values)
-            || count($values) !== 1 || ! is_numeric($values[0]['value'] ?? null)) {
+        if (! is_string($indicator) || $indicator === '') {
             return null;
         }
         $conversion = preg_replace('/^(actions|conversions):/', '', $indicator);
@@ -158,6 +156,20 @@ class AutomationBudgetService
                 $conversion = $key;
                 break;
             }
+        }
+
+        // Meta can return only the result indicator on a zero-spend day.
+        // Do not infer zero for malformed values or positive conversion evidence.
+        if (! array_key_exists('values', $result) && $conversion !== ''
+            && is_numeric($insights['spend'] ?? null) && (float) $insights['spend'] === 0.0
+            && $this->actionValue(collect($insights['actions'] ?? []), self::CONVERSION_ACTION_TYPES[$conversion] ?? [$conversion]) === 0
+            && ($conversion !== 'link_click' || (float) ($insights['inline_link_clicks'] ?? 0) === 0.0)) {
+            return ['conversion' => $conversion, 'count' => 0];
+        }
+
+        $values = $result['values'] ?? null;
+        if (! is_array($values) || count($values) !== 1 || ! is_numeric($values[0]['value'] ?? null)) {
+            return null;
         }
 
         return ['conversion' => $conversion, 'count' => max(0, (int) $values[0]['value'])];
@@ -690,7 +702,8 @@ class AutomationBudgetService
             return false;
         }
 
-        if (! $task->is_active && in_array($task->last_budget_action, ['schedule_pause', 'manual_pause'], true)) {
+        if (! $task->is_active && (in_array($task->last_budget_action, ['schedule_pause', 'manual_pause'], true)
+            || $this->isScheduledCprResumeDue($task))) {
             return $this->setScheduledStatus($task, $target, $client, $profile, true, $source);
         }
 
@@ -731,21 +744,29 @@ class AutomationBudgetService
                 if ($task->is_active && $target->status === 'ACTIVE') {
                     return false;
                 }
+                if (! $this->isWithinAutomationWindow($task)
+                    || (! $task->is_active && ! in_array($task->last_budget_action, ['schedule_pause', 'manual_pause', 'manual'], true)
+                        && ! $this->isScheduledCprResumeDue($task))) {
+                    return false;
+                }
             } else {
                 if (! $task->is_active && $target->status === 'PAUSED') {
                     return false;
                 }
             }
 
-            if (! $this->assertNoPendingMetaAction($task)) {
+            if ($task->pending_meta_action !== null || ! $this->assertNoPendingMetaAction($task)) {
                 return false;
             }
 
             try {
                 if ($task->level === 'adset') {
-                    $client->updateAdSetStatus($target->external_id, $active);
+                    $response = $client->updateAdSetStatus($target->external_id, $active);
                 } else {
-                    $client->updateCampaignStatus($target->external_id, $active);
+                    $response = $client->updateCampaignStatus($target->external_id, $active);
+                }
+                if (($response['success'] ?? false) !== true) {
+                    throw new MetaAdsException('Meta belum mengonfirmasi perubahan jadwal automation.');
                 }
             } catch (MetaAdsException $exception) {
                 MetaFlowLog::warning('automation schedule status update failed', [
@@ -785,6 +806,7 @@ class AutomationBudgetService
                     'last_log' => $message,
                     'last_checked_at' => now(),
                     'last_budget_action' => $action,
+                    'cpr_paused_at' => $active ? null : $task->cpr_paused_at,
                 ]);
                 AutomationLog::create([
                     'automation_task_id' => $task->id,
@@ -912,6 +934,7 @@ class AutomationBudgetService
     {
         return $this->automationInsightsDatePreset() === 'today'
             && ! $task->is_active && $task->last_budget_action === 'pause'
+            && (! $task->use_on_off || $this->isScheduledCprResumeDue($task))
             && (int) $task->cpr_cap > 0
             && $task->cpr_paused_at !== null
             && $task->cpr_paused_at->lt($this->automationDayStart($task));
@@ -1207,6 +1230,24 @@ class AutomationBudgetService
         return $on < $off
             ? $current >= $on && $current < $off
             : $current >= $on || $current < $off;
+    }
+
+    private function isScheduledCprResumeDue(AutomationTask $task): bool
+    {
+        if (! $task->use_on_off || $task->is_active || $task->last_budget_action !== 'pause'
+            || $task->cpr_paused_at === null || ! $this->isWithinAutomationWindow($task)) {
+            return false;
+        }
+
+        // Restart at the next ON session, including windows spanning midnight.
+        // A CPR pause in this session must not cause repeated ON/PAUSE writes.
+        $current = now('Asia/Jakarta');
+        $windowStart = $current->copy()->setTimeFromTimeString((string) $task->on_time);
+        if ($windowStart->gt($current)) {
+            $windowStart->subDay();
+        }
+
+        return $task->cpr_paused_at->lt($windowStart);
     }
 
     private function increaseBudgetIfEligible(

@@ -90,6 +90,39 @@ class MetaAutomationDailyRecoveryTest extends TestCase
         Http::assertSent(fn ($request) => str_contains($request->url(), '/insights') && $request['date_preset'] === 'today');
     }
 
+    public static function sparseRecoveryPaths(): array
+    {
+        return [['scheduler'], ['reconciliation']];
+    }
+
+    #[DataProvider('sparseRecoveryPaths')]
+    public function test_indicator_only_zero_today_resumes_yesterday_cpr_pause(string $path): void
+    {
+        [$profile, $task] = $this->fixture();
+        $task->update(['conversion' => 'initiate_checkout', 'result_conversion' => null]);
+        $this->fakeMeta($task, 'indicator_only');
+
+        if ($path === 'scheduler') {
+            app(AutomationBudgetService::class)->pauseTasksOverCprCap(
+                $profile, app(MetaAdsSyncService::class)->client($profile), true,
+            );
+        } else {
+            app(MetaAutomationReconciliationService::class)->reconcileProfile($profile);
+        }
+
+        $fresh = $task->fresh();
+        $this->assertTrue($fresh->is_active);
+        $this->assertSame('daily_resume', $fresh->last_budget_action);
+        $this->assertSame('ACTIVE', $task->campaign->fresh()->status);
+        $this->assertSame(0, $fresh->current_spend);
+        $this->assertSame(0, $fresh->current_result);
+        $this->assertSame('initiate_checkout', $fresh->result_conversion);
+        $this->assertNull($fresh->metrics_unavailable_at);
+        $this->assertNull($fresh->cpr_paused_at);
+        $this->assertCount(1, Http::recorded(fn ($request) => $request->method() === 'POST' && $request['status'] === 'ACTIVE'));
+        Http::assertNotSent(fn ($request) => $request->method() === 'POST' && isset($request['daily_budget']));
+    }
+
     public function test_account_timezone_determines_the_day_of_recovery(): void
     {
         [$profile, $task] = $this->fixture();
@@ -219,6 +252,14 @@ class MetaAutomationDailyRecoveryTest extends TestCase
             }
             if (str_contains($request->url(), '/insights')) {
                 return match ($response) {
+                    'indicator_only' => Http::response(['data' => [[
+                        'campaign_id' => $task->campaign_external_id,
+                        'spend' => '0',
+                        'results' => [['indicator' => 'actions:offsite_conversion.fb_pixel_initiate_checkout']],
+                        'inline_link_clicks' => '0',
+                        'date_start' => now('Asia/Jakarta')->toDateString(),
+                        'date_stop' => now('Asia/Jakarta')->toDateString(),
+                    ]]]),
                     'read_error' => Http::response(['error' => ['code' => 100, 'message' => 'Invalid request']], 400),
                     'malformed' => Http::response(['unexpected' => true]),
                     'empty' => Http::response(['data' => []]),

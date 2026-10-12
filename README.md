@@ -123,7 +123,8 @@ Flow automation budget:
 - Hybrid: kontrol manual naik/turun dua level; perlindungan CPR tetap otomatis. Perilaku otomatis Hybrid referensi belum diketahui.
 - Pause: `CPR >= Pause CPR Cap` dan toggle pause aktif. Budget/spend mencapai batas budget tidak menjadi trigger pause.
 - Recovery: jika Aktifkan Lagi aktif dan pause berasal dari automation, CPR harus memenuhi CPR Cap sekaligus aman di bawah ambang pause, dengan minimal satu hasil. Task lama tetap memakai Resume CPR lama sampai diedit melalui form baru.
-- Recovery hari berikutnya: tetap memerlukan provenance pause CPR, pergantian hari akun, jam ON/OFF, Insights hari ini yang segar, CPR sehat, dan konfirmasi aktivasi Meta. Pause manual tidak ikut aturan ini.
+- ON/OFF: aktivasi pada sesi ON berikutnya berjalan sebelum pemeriksaan hasil/kelipatan dan tidak menunggu Insights. Pause CPR dari sesi sebelumnya dapat diaktifkan kembali; pause CPR dalam sesi yang sama tetap berlaku. Jadwal memakai Asia/Jakarta, termasuk rentang yang melewati tengah malam. Aktivasi tetap memerlukan tidak adanya mutation pending dan konfirmasi Meta.
+- Recovery hari berikutnya: memerlukan provenance pause CPR, pergantian hari akun, Insights hari ini yang segar, CPR sehat, dan konfirmasi aktivasi Meta. Jika ON/OFF digunakan, recovery tidak boleh mendahului sesi ON berikutnya. Pause manual tidak ikut aturan recovery CPR ini.
 - Maximum Budget membatasi kenaikan; nol berarti unlimited. Starting Budget menjadi batas bawah kontrol turun Hybrid dan nilai reset budget.
 - Penanda hasil baru disimpan setelah Meta mengonfirmasi write. Polling dan refresh metrik tidak mengonsumsi hasil. Perubahan conversion mereset penanda; reset budget manual tidak mengizinkan hasil lama dipakai lagi.
 
