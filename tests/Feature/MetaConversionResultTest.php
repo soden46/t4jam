@@ -61,6 +61,67 @@ class MetaConversionResultTest extends TestCase
         $this->assertSame(2, $task->fresh()->scaled_result_count);
     }
 
+    public static function sparseSpendingResults(): array
+    {
+        return [
+            '30SEP production response' => ['campaign', 23657, 0, 25000, false],
+            '100KT production response over CPR limit' => ['campaign', 35568, 0, 34000, true],
+            'campaign spend without checkout' => ['campaign', 35148, 0, 50000, false],
+            'ad set spend without checkout' => ['adset', 22466, 0, 50000, false],
+            'zero checkout still enforces CPR pause' => ['campaign', 35148, 0, 33000, true],
+            'selected checkout actions still count' => ['campaign', 35148, 2, 50000, false],
+        ];
+    }
+
+    #[DataProvider('sparseSpendingResults')]
+    public function test_indicator_only_results_refresh_spend_using_the_confirmed_meta_event(
+        string $level, int $spend, int $checkouts, int $pauseLimit, bool $paused,
+    ): void {
+        [$profile, $task] = $this->fixture($level);
+        $task->update(['current_spend' => 0, 'current_result' => 0, 'pause_cpr_limit' => $pauseLimit]);
+        $targetId = $level === 'adset' ? $task->ad_set_external_id : $task->campaign_external_id;
+        $settings = ['optimization_goal' => 'OFFSITE_CONVERSIONS',
+            'promoted_object' => ['custom_event_type' => 'INITIATED_CHECKOUT']];
+        Http::fake([
+            '*/'.$targetId.'?*' => Http::response(['id' => $targetId, 'status' => 'ACTIVE',
+                'effective_status' => 'ACTIVE', 'daily_budget' => '77000',
+                ...($level === 'campaign' ? ['adsets' => ['data' => [$settings]]] : $settings)]),
+            '*/insights?*' => Http::response(['data' => [[
+                'spend' => (string) $spend, 'date_start' => now()->toDateString(), 'date_stop' => now()->toDateString(),
+                'results' => [['indicator' => 'actions:offsite_conversion.fb_pixel_initiate_checkout']],
+                'inline_link_clicks' => '6', 'actions' => [
+                    ['action_type' => 'link_click', 'value' => '6'],
+                    ['action_type' => 'purchase', 'value' => '1'],
+                    ['action_type' => 'omni_purchase', 'value' => '1'],
+                    ['action_type' => 'offsite_conversion.fb_pixel_purchase', 'value' => '1'],
+                    ...($checkouts > 0 ? [['action_type' => 'omni_initiated_checkout', 'value' => (string) $checkouts]] : []),
+                ],
+            ]]]),
+            '*'.$targetId => Http::response(['success' => true]),
+        ]);
+
+        $this->reconcile($profile, $task);
+
+        $fresh = $task->fresh();
+        $this->assertSame($spend, $fresh->current_spend);
+        $this->assertSame($checkouts, $fresh->current_result);
+        $this->assertSame('initiate_checkout', $fresh->result_conversion);
+        $this->assertNull($fresh->metrics_unavailable_at);
+        $this->assertNotNull($fresh->last_metrics_synced_at);
+        $this->assertSame(! $paused, $fresh->is_active);
+        $this->actingAs($profile->user)->getJson('/get-specific-task/?automation_id='.$task->id)
+            ->assertOk()->assertJsonPath('data.current_spend', $spend)
+            ->assertJsonPath('data.current_hasil', $checkouts)
+            ->assertJsonPath('data.current_cpr', $checkouts > 0 ? intdiv($spend, $checkouts) : $spend)
+            ->assertJsonPath('data.metrics_available', true);
+        if ($paused) {
+            Http::assertSent(fn ($request) => $request->method() === 'POST' && $request['status'] === 'PAUSED');
+            Http::assertNotSent(fn ($request) => $request->method() === 'POST' && isset($request['daily_budget']));
+        } elseif ($checkouts === 0) {
+            Http::assertNotSent(fn ($request) => $request->method() === 'POST');
+        }
+    }
+
     public static function unavailableResults(): array
     {
         return [

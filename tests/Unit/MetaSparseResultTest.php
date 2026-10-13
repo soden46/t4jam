@@ -9,7 +9,7 @@ use Tests\TestCase;
 class MetaSparseResultTest extends TestCase
 {
     #[DataProvider('sparseResults')]
-    public function test_sparse_native_results_only_become_zero_with_valid_zero_spend(array $changes, bool $available): void
+    public function test_sparse_native_results_require_valid_spend_and_selected_event_evidence(array $changes, ?int $expected): void
     {
         $insights = array_replace([
             'spend' => '0',
@@ -21,7 +21,7 @@ class MetaSparseResultTest extends TestCase
 
         $metrics = app(AutomationBudgetService::class)->metricSnapshot($insights, 'initiate_checkout');
 
-        $this->assertSame($available ? ['conversion' => 'initiate_checkout', 'count' => 0] : null, $metrics['meta_result']);
+        $this->assertSame($expected !== null ? ['conversion' => 'initiate_checkout', 'count' => $expected] : null, $metrics['meta_result']);
     }
 
     public static function sparseResults(): array
@@ -29,21 +29,21 @@ class MetaSparseResultTest extends TestCase
         $indicator = 'actions:offsite_conversion.fb_pixel_initiate_checkout';
 
         return [
-            'production zero response' => [[], true],
-            'numeric zero' => [['spend' => 0], true],
-            'positive spend' => [['spend' => '100'], false],
-            'missing spend' => [['spend' => null], false],
-            'invalid spend' => [['spend' => 'unknown'], false],
-            'negative spend' => [['spend' => '-1'], false],
+            'production zero response' => [[], 0],
+            'numeric zero' => [['spend' => 0], 0],
+            'positive spend with confirmed event' => [['spend' => '35148'], 0],
+            'missing spend' => [['spend' => null], null],
+            'invalid spend' => [['spend' => 'unknown'], null],
+            'negative spend' => [['spend' => '-1'], null],
             'positive checkout actions despite zero spend' => [['actions' => [
                 ['action_type' => 'omni_initiated_checkout', 'value' => '2'],
-            ]], false],
-            'null values are malformed' => [['results' => [['indicator' => $indicator, 'values' => null]]], false],
-            'empty values are malformed' => [['results' => [['indicator' => $indicator, 'values' => []]]], false],
-            'invalid value is malformed' => [['results' => [['indicator' => $indicator, 'values' => [['value' => 'unknown']]]]], false],
-            'multiple windows remain ambiguous' => [['results' => [['indicator' => $indicator, 'values' => [['value' => '0'], ['value' => '0']]]]], false],
-            'multiple indicators remain ambiguous' => [['results' => [['indicator' => $indicator], ['indicator' => 'actions:lead']]], false],
-            'missing indicator' => [['results' => [[]]], false],
+            ]], 2],
+            'null values are malformed' => [['results' => [['indicator' => $indicator, 'values' => null]]], null],
+            'empty values are malformed' => [['results' => [['indicator' => $indicator, 'values' => []]]], null],
+            'invalid value is malformed' => [['results' => [['indicator' => $indicator, 'values' => [['value' => 'unknown']]]]], null],
+            'multiple windows remain ambiguous' => [['results' => [['indicator' => $indicator, 'values' => [['value' => '0'], ['value' => '0']]]]], null],
+            'multiple indicators remain ambiguous' => [['results' => [['indicator' => $indicator], ['indicator' => 'actions:lead']]], null],
+            'missing indicator' => [['results' => [[]]], null],
         ];
     }
 
@@ -55,5 +55,32 @@ class MetaSparseResultTest extends TestCase
         ]);
 
         $this->assertNull($metrics['meta_result']);
+    }
+
+    #[DataProvider('unconfirmedEvents')]
+    public function test_positive_spend_with_sparse_results_requires_matching_meta_settings(?string $selected): void
+    {
+        $metrics = app(AutomationBudgetService::class)->metricSnapshot([
+            'spend' => '35148',
+            'results' => [['indicator' => 'actions:offsite_conversion.fb_pixel_initiate_checkout']],
+            'actions' => [['action_type' => 'purchase', 'value' => '5']],
+        ], $selected);
+
+        $this->assertNull($metrics['meta_result']);
+    }
+
+    public static function unconfirmedEvents(): array
+    {
+        return [[null], ['purchase'], ['lead']];
+    }
+
+    public function test_confirmed_sparse_click_result_uses_actual_clicks(): void
+    {
+        $metrics = app(AutomationBudgetService::class)->metricSnapshot([
+            'spend' => '22466', 'inline_link_clicks' => '8',
+            'results' => [['indicator' => 'actions:link_click']],
+        ], 'link_click');
+
+        $this->assertSame(['conversion' => 'link_click', 'count' => 8], $metrics['meta_result']);
     }
 }

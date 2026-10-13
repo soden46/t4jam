@@ -132,7 +132,7 @@ class AutomationBudgetService
         }
     }
 
-    private function metaResult(array $insights): ?array
+    private function metaResult(array $insights, ?string $selectedConversion = null): ?array
     {
         $results = $insights['results'] ?? null;
         if (! is_array($results)) {
@@ -156,6 +156,13 @@ class AutomationBudgetService
                 $conversion = $key;
                 break;
             }
+        }
+
+        // An indicator-only response can still carry spend and actions. Use the
+        // configured Meta event only when it agrees with the native indicator.
+        if (! array_key_exists('values', $result) && $conversion === $selectedConversion
+            && is_numeric($insights['spend'] ?? null) && (float) $insights['spend'] >= 0.0) {
+            return ['conversion' => $conversion, 'count' => $this->selectedActionValue($insights, $selectedConversion)];
         }
 
         // Meta can return only the result indicator on a zero-spend day.
@@ -1529,17 +1536,10 @@ class AutomationBudgetService
             $results[$conversion] = $this->actionValue($actions, $types);
         }
 
-        $metaResult = $this->metaResult($insights);
+        $metaResult = $this->metaResult($insights, $selectedConversion);
         if ($selectedConversion !== null) {
             if (($insights['results'] ?? null) === null) {
-                $types = array_unique(array_merge(self::CONVERSION_ACTION_TYPES[$selectedConversion] ?? [], [
-                    $selectedConversion, 'omni_'.$selectedConversion,
-                    'offsite_conversion.fb_pixel_'.$selectedConversion,
-                    'app_custom_event.fb_mobile_'.$selectedConversion,
-                ]));
-                $metaResult = ['conversion' => $selectedConversion, 'count' => $selectedConversion === 'link_click'
-                    ? (int) ($insights['inline_link_clicks'] ?? $this->actionValue($actions, $types))
-                    : $this->actionValue($actions, $types)];
+                $metaResult = ['conversion' => $selectedConversion, 'count' => $this->selectedActionValue($insights, $selectedConversion)];
             } elseif ($insights['results'] === []) {
                 $metaResult = ['conversion' => $selectedConversion, 'count' => 0];
             }
@@ -1590,6 +1590,19 @@ class AutomationBudgetService
         }
 
         return 0;
+    }
+
+    private function selectedActionValue(array $insights, string $conversion): int
+    {
+        $types = array_unique(array_merge(self::CONVERSION_ACTION_TYPES[$conversion] ?? [], [
+            $conversion, 'omni_'.$conversion,
+            'offsite_conversion.fb_pixel_'.$conversion,
+            'app_custom_event.fb_mobile_'.$conversion,
+        ]));
+
+        return $conversion === 'link_click'
+            ? (int) ($insights['inline_link_clicks'] ?? $this->actionValue(collect($insights['actions'] ?? []), $types))
+            : $this->actionValue(collect($insights['actions'] ?? []), $types);
     }
 
     private function actionCost(Collection $costs, array $types): ?float
